@@ -1,0 +1,29 @@
+.ui-button {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 10px;
+  color: #062a27;
+  background: #5eead4;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.ui-button:hover {
+  background: #99f6e4;
+  transform: translateY(-1px);
+}
+
+.ui-button:focus-visible {
+  outline: 3px solid rgb(94 234 212 / 35%);
+  outline-offset: 3px;
+}
+
+.ui-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
