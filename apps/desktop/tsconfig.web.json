@@ -27,6 +27,7 @@
   "include": [
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.tsx",
+    "src/shared/**/*.ts",
     "../../packages/ui/src/**/*.ts",
     "../../packages/ui/src/**/*.tsx"
   ]

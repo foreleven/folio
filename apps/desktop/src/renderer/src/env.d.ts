@@ -1,8 +1,11 @@
 /// <reference types="vite/client" />
 
-interface Window {
-  desktop: Readonly<{
-    platform: NodeJS.Platform
-  }>
+import type { DesktopRpcClient } from '../../shared/rpc'
+
+declare global {
+  interface Window {
+    desktop: Readonly<DesktopRpcClient>
+  }
 }
 
+export {}

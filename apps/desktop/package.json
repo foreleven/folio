@@ -9,12 +9,15 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "package": "npm run build && electron-builder",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
     "@folio/ui": "file:../../packages/ui",
+    "inversify": "8.2.3",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
@@ -25,7 +28,8 @@
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
     "typescript": "6.0.3",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "vitest": "4.1.10"
   },
   "build": {
     "appId": "com.folio.desktop",

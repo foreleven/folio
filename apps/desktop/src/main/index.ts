@@ -1,5 +1,11 @@
+import 'reflect-metadata'
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
+import { createRpcContainer, getJsonRpcServer } from './rpc/container'
+import { registerElectronRpc } from './rpc/electron-rpc'
+
+const rpcContainer = createRpcContainer()
+registerElectronRpc(getJsonRpcServer(rpcContainer))
 
 /**
  * Opens a renderer-provided URL only when it uses a web protocol. Invalid and
