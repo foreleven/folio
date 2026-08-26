@@ -1,31 +1,21 @@
 import { Container } from 'inversify'
-import type { JsonRpcMethodHandler } from './handler'
-import { SystemGetInfoHandler } from './handlers/system-get-info-handler'
-import { JsonRpcServer } from './server'
-import { SystemService } from '../services/system-service'
-import { RPC_TYPES } from './types'
+import { SystemRpcHandler } from './handlers/system-rpc-handler'
+import { JsonRpcServer, RpcServer } from './server'
+import { ElectronSystemService, SystemService } from '../services/system-service'
 
 /** Creates the main-process composition root for RPC services and handlers. */
 export function createRpcContainer(): Container {
   const container = new Container()
 
-  container
-    .bind<SystemService>(RPC_TYPES.systemService)
-    .to(SystemService)
-    .inSingletonScope()
-  container
-    .bind<JsonRpcMethodHandler>(RPC_TYPES.jsonRpcMethodHandler)
-    .to(SystemGetInfoHandler)
-    .inSingletonScope()
-  container
-    .bind<JsonRpcServer>(RPC_TYPES.jsonRpcServer)
-    .to(JsonRpcServer)
-    .inSingletonScope()
+  container.bind<SystemService>(SystemService).to(ElectronSystemService).inSingletonScope()
+  container.bind<RpcServer>(RpcServer).to(JsonRpcServer).inSingletonScope()
+  container.bind(SystemRpcHandler).toSelf().inSingletonScope()
 
   return container
 }
 
-/** Resolves the process-wide JSON-RPC server from the configured container. */
-export function getJsonRpcServer(container: Container): JsonRpcServer {
-  return container.get<JsonRpcServer>(RPC_TYPES.jsonRpcServer)
+/** Resolves namespace handlers once, then returns the process-wide RPC server. */
+export function getRpcServer(container: Container): RpcServer {
+  container.get(SystemRpcHandler)
+  return container.get<RpcServer>(RpcServer)
 }

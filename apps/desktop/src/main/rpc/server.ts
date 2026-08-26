@@ -1,32 +1,66 @@
-import { injectable, multiInject } from 'inversify'
+import { injectable } from 'inversify'
 import type {
   JsonRpcCall,
   JsonRpcFailure,
   JsonRpcId,
+  JsonRpcParams,
   JsonRpcResponse
 } from '../../shared/rpc'
 import { JsonRpcError } from './errors'
-import type { JsonRpcMethodHandler } from './handler'
-import { RPC_TYPES } from './types'
 
 const PARSE_ERROR = -32700
 const INVALID_REQUEST = -32600
 const METHOD_NOT_FOUND = -32601
 const INTERNAL_ERROR = -32603
 
-/** Dispatches serialized JSON-RPC 2.0 calls to an immutable method registry. */
+/** Stable DI token for the process-wide RPC server. */
+export const RpcServer = Symbol.for('folio.rpc.RpcServer')
+
+/** Registers namespace handlers and dispatches serialized JSON-RPC messages. */
+export interface RpcServer {
+  /** Registers every method declared by one handler under a shared namespace. */
+  register(namespace: string, handler: object): void
+
+  /** Parses, validates, dispatches, and serializes one JSON-RPC message or batch. */
+  handleMessage(message: unknown): Promise<string | undefined>
+}
+
+type RegisteredRpcMethod = (
+  params: JsonRpcParams | undefined
+) => unknown | Promise<unknown>
+
+/** Dispatches serialized JSON-RPC 2.0 calls to registered namespace handlers. */
 @injectable()
-export class JsonRpcServer {
-  private readonly handlers: ReadonlyMap<string, JsonRpcMethodHandler>
+export class JsonRpcServer implements RpcServer {
+  private readonly handlers = new Map<string, RegisteredRpcMethod>()
+  private readonly namespaces = new Set<string>()
 
-  public constructor(
-    @multiInject(RPC_TYPES.jsonRpcMethodHandler) handlers: readonly JsonRpcMethodHandler[]
-  ) {
-    const entries = handlers.map((handler) => [handler.method, handler] as const)
-    this.handlers = new Map(entries)
+  /** Registers the methods declared by one handler under a shared RPC namespace. */
+  public register(namespace: string, handler: object): void {
+    if (this.namespaces.has(namespace)) {
+      throw new Error(`JSON-RPC namespace "${namespace}" is already registered`)
+    }
 
-    if (this.handlers.size !== handlers.length) {
-      throw new Error('JSON-RPC methods must be unique')
+    const prototype: object | null = Object.getPrototypeOf(handler)
+    const owners =
+      prototype === null || prototype === Object.prototype
+        ? [handler]
+        : [prototype, handler]
+
+    this.namespaces.add(namespace)
+
+    for (const owner of owners) {
+      for (const methodName of Object.getOwnPropertyNames(owner)) {
+        const descriptor = Object.getOwnPropertyDescriptor(owner, methodName)
+        const method: unknown = descriptor?.value
+        if (methodName === 'constructor' || typeof method !== 'function') {
+          continue
+        }
+
+        const qualifiedMethod = `${namespace}.${methodName}`
+        // Bind calls back to the registered instance so handler dependencies remain accessible.
+        this.handlers.set(qualifiedMethod, (params) => Reflect.apply(method, handler, [params]))
+      }
     }
   }
 
@@ -74,7 +108,7 @@ export class JsonRpcServer {
     }
 
     try {
-      const result = await handler.handle(payload.params)
+      const result = await handler(payload.params)
       if (!hasId) {
         return undefined
       }

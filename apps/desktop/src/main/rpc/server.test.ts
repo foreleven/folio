@@ -1,7 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { JsonRpcParams } from '../../shared/rpc'
 import { JsonRpcError } from './errors'
-import type { JsonRpcMethodHandler } from './handler'
 import { JsonRpcServer } from './server'
+
+interface TestRpcMethod {
+  method: string
+  handle(params: JsonRpcParams | undefined): unknown
+}
+
+/** Builds namespace objects from concise method fixtures used by protocol tests. */
+function createServer(methods: readonly TestRpcMethod[] = []): JsonRpcServer {
+  const server = new JsonRpcServer()
+  const namespaces = new Map<string, Record<string, TestRpcMethod['handle']>>()
+
+  for (const method of methods) {
+    const separator = method.method.lastIndexOf('.')
+    const namespace = method.method.slice(0, separator)
+    const methodName = method.method.slice(separator + 1)
+    const handler = namespaces.get(namespace) ?? {}
+    handler[methodName] = method.handle
+    namespaces.set(namespace, handler)
+  }
+
+  for (const [namespace, handler] of namespaces) {
+    server.register(namespace, handler)
+  }
+
+  return server
+}
 
 /** Decodes a server response for focused protocol assertions. */
 function decode(message: string | undefined): unknown {
@@ -16,12 +42,58 @@ afterEach(() => {
 })
 
 describe('JsonRpcServer', () => {
+  it('registers every public method on one namespace handler', async () => {
+    class ExampleRpcHandler {
+      private readonly readiness = 'ready'
+
+      /** Echoes the request params to prove namespace dispatch. */
+      public echo(params: unknown): unknown {
+        return params
+      }
+
+      /** Returns a second result from the same registered handler instance. */
+      public status(): string {
+        return this.readiness
+      }
+    }
+
+    const server = new JsonRpcServer()
+    server.register('example', new ExampleRpcHandler())
+
+    await expect(
+      server.handleMessage(
+        JSON.stringify({ jsonrpc: '2.0', method: 'example.echo', params: { value: 7 }, id: 1 })
+      )
+    ).resolves.toBe(JSON.stringify({ jsonrpc: '2.0', result: { value: 7 }, id: 1 }))
+    await expect(
+      server.handleMessage(
+        JSON.stringify({ jsonrpc: '2.0', method: 'example.status', id: 2 })
+      )
+    ).resolves.toBe(JSON.stringify({ jsonrpc: '2.0', result: 'ready', id: 2 }))
+  })
+
+  it('does not expose inherited Object methods as RPC methods', async () => {
+    const server = createServer([{ method: 'example.echo', handle: (params) => params }])
+
+    expect(
+      decode(
+        await server.handleMessage(
+          JSON.stringify({ jsonrpc: '2.0', method: 'example.toString', id: 1 })
+        )
+      )
+    ).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32601, message: 'Method not found' },
+      id: 1
+    })
+  })
+
   it('dispatches a valid request and preserves its id', async () => {
-    const handler: JsonRpcMethodHandler = {
+    const handler: TestRpcMethod = {
       method: 'example.echo',
       handle: vi.fn((params) => params)
     }
-    const server = new JsonRpcServer([handler])
+    const server = createServer([handler])
 
     const response = await server.handleMessage(
       JSON.stringify({ jsonrpc: '2.0', method: 'example.echo', params: { value: 7 }, id: 42 })
@@ -44,7 +116,7 @@ describe('JsonRpcServer', () => {
       'Method not found'
     ]
   ])('returns a standard error for %s', async (_name, request, code, message) => {
-    const server = new JsonRpcServer([])
+    const server = createServer()
 
     expect(decode(await server.handleMessage(request))).toEqual({
       jsonrpc: '2.0',
@@ -54,7 +126,7 @@ describe('JsonRpcServer', () => {
   })
 
   it('serializes deliberate handler errors without treating them as internal failures', async () => {
-    const server = new JsonRpcServer([
+    const server = createServer([
       {
         method: 'example.fail',
         handle: () => {
@@ -76,7 +148,7 @@ describe('JsonRpcServer', () => {
 
   it('executes a notification without returning a response', async () => {
     const handle = vi.fn(() => undefined)
-    const server = new JsonRpcServer([{ method: 'example.notify', handle }])
+    const server = createServer([{ method: 'example.notify', handle }])
 
     const response = await server.handleMessage(
       JSON.stringify({ jsonrpc: '2.0', method: 'example.notify', params: ['updated'] })
@@ -87,7 +159,7 @@ describe('JsonRpcServer', () => {
   })
 
   it('handles batches and omits notification responses', async () => {
-    const server = new JsonRpcServer([
+    const server = createServer([
       { method: 'example.echo', handle: (params) => params },
       { method: 'example.notify', handle: () => undefined }
     ])
@@ -110,7 +182,7 @@ describe('JsonRpcServer', () => {
 
   it('returns an internal error when a handler result cannot be serialized', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const server = new JsonRpcServer([
+    const server = createServer([
       { method: 'example.bigint', handle: () => 1n }
     ])
 
@@ -128,7 +200,7 @@ describe('JsonRpcServer', () => {
 
   it('rejects values whose result field disappears during serialization', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const server = new JsonRpcServer([
+    const server = createServer([
       { method: 'example.symbol', handle: () => Symbol('not-json') }
     ])
 
@@ -146,7 +218,7 @@ describe('JsonRpcServer', () => {
 
   it('hides unexpected exception details', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const server = new JsonRpcServer([
+    const server = createServer([
       {
         method: 'example.crash',
         handle: () => {
@@ -167,8 +239,12 @@ describe('JsonRpcServer', () => {
     expect(consoleError).toHaveBeenCalledOnce()
   })
 
-  it('rejects duplicate method registrations', () => {
-    const handler: JsonRpcMethodHandler = { method: 'duplicate', handle: () => null }
-    expect(() => new JsonRpcServer([handler, handler])).toThrow('JSON-RPC methods must be unique')
+  it('rejects duplicate namespace registrations', () => {
+    const server = new JsonRpcServer()
+    server.register('duplicate', { first: () => null })
+
+    expect(() => server.register('duplicate', { second: () => null })).toThrow(
+      'JSON-RPC namespace "duplicate" is already registered'
+    )
   })
 })
