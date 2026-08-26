@@ -1,5 +1,8 @@
 import { Container } from 'inversify'
-import { SystemRpcHandler } from './handlers/system-rpc-handler'
+import {
+  DefaultSystemRpcHandler,
+  SystemRpcHandler
+} from './handlers/system-rpc-handler'
 import { JsonRpcServer, RpcServer } from './server'
 import { ElectronSystemService, SystemService } from '../services/system-service'
 
@@ -9,13 +12,18 @@ export function createRpcContainer(): Container {
 
   container.bind<SystemService>(SystemService).to(ElectronSystemService).inSingletonScope()
   container.bind<RpcServer>(RpcServer).to(JsonRpcServer).inSingletonScope()
-  container.bind(SystemRpcHandler).toSelf().inSingletonScope()
+  container
+    .bind<SystemRpcHandler>(SystemRpcHandler)
+    .to(DefaultSystemRpcHandler)
+    .inSingletonScope()
+
+  // Resolve self-registering handlers before the completed container becomes observable.
+  container.get<SystemRpcHandler>(SystemRpcHandler)
 
   return container
 }
 
-/** Resolves namespace handlers once, then returns the process-wide RPC server. */
+/** Returns the process-wide RPC server from the completed composition root. */
 export function getRpcServer(container: Container): RpcServer {
-  container.get(SystemRpcHandler)
   return container.get<RpcServer>(RpcServer)
 }

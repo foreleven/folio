@@ -62,6 +62,27 @@ export interface RpcMethodDefinitions {
 
 export type RpcMethod = keyof RpcMethodDefinitions
 
+/** Runtime method allowlist kept type-checked against the renderer RPC contract. */
+export const RPC_METHODS = {
+  'system.getInfo': true
+} as const satisfies Record<RpcMethod, true>
+
+/** Namespace prefixes represented by the shared RPC method contract. */
+export type RpcNamespace = RpcMethod extends `${infer Namespace}.${string}`
+  ? Namespace
+  : never
+
+/** Methods a namespace handler must implement, derived from the shared RPC contract. */
+export type RpcNamespaceHandler<Namespace extends RpcNamespace> = {
+  [Method in RpcMethod as Method extends `${Namespace}.${infer MethodName}`
+    ? MethodName
+    : never]: (
+    params: RpcMethodDefinitions[Method]['params']
+  ) =>
+    | RpcMethodDefinitions[Method]['result']
+    | Promise<RpcMethodDefinitions[Method]['result']>
+}
+
 export interface DesktopRpcClient {
   /** Sends one JSON-RPC request and rejects with RpcClientError for protocol failures. */
   request<Method extends RpcMethod>(

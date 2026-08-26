@@ -1,6 +1,7 @@
 import 'reflect-metadata'
 import { describe, expect, it, vi } from 'vitest'
 import { createRpcContainer, getRpcServer } from './container'
+import { SystemRpcHandler } from './handlers/system-rpc-handler'
 import { RpcServer } from './server'
 import { SystemService } from '../services/system-service'
 
@@ -15,6 +16,7 @@ describe('RPC dependency container', () => {
 
     expect(firstServer).toBe(secondServer)
     expect(RpcServer).toBe(Symbol.for('folio.rpc.RpcServer'))
+    expect(SystemRpcHandler).toBe(Symbol.for('folio.rpc.SystemRpcHandler'))
     expect(SystemService).toBe(Symbol.for('folio.services.SystemService'))
     await expect(
       firstServer.handleMessage(
