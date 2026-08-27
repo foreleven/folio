@@ -1,23 +1,31 @@
 import { useState } from 'react'
 import { Button } from '@folio/ui'
-import { SystemRpcHandler } from '../../shared/handlers/system-rpc-handler'
-import { useRpcClient } from './rpc/rpc-client-provider'
+import { Effect } from 'effect'
+import { SystemRpcClient } from '../../shared/rpc/system-rpc'
+import { useEffectRuntime } from './effect-runtime-provider'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
-  const systemRpcHandler = useRpcClient(SystemRpcHandler)
-  const [runtime, setRuntime] = useState('Not checked')
+  const effectRuntime = useEffectRuntime()
+  const [runtimeLabel, setRuntimeLabel] = useState('Not checked')
 
-  /** Loads process-owned metadata through the injected RPC handler. */
-  async function checkRuntime(): Promise<void> {
-    try {
-      const info = await systemRpcHandler.getInfo()
-      setRuntime(`${info.platform} · v${info.version}`)
-    } catch (error: unknown) {
-      console.error('Failed to load runtime information', error)
-      setRuntime('Unavailable')
-    }
+  /** Runs the Effect RPC program that loads process-owned metadata. */
+  function checkRuntime(): void {
+    const program = Effect.gen(function*() {
+      const client = yield* SystemRpcClient
+      const info = yield* client['system.getInfo']()
+      yield* Effect.sync(() => setRuntimeLabel(`${info.platform} · v${info.version}`))
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          console.error('Failed to load runtime information', cause)
+          setRuntimeLabel('Unavailable')
+        })
+      )
+    )
+
+    effectRuntime.runFork(program)
   }
 
   return (
@@ -30,10 +38,10 @@ export function App(): React.JSX.Element {
           wired together.
         </p>
         <div className="actions">
-          <Button onClick={() => void checkRuntime()}>
+          <Button onClick={checkRuntime}>
             Check platform
           </Button>
-          <code>{runtime}</code>
+          <code>{runtimeLabel}</code>
         </div>
       </section>
     </main>

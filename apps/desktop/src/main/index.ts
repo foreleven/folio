@@ -1,11 +1,14 @@
-import 'reflect-metadata'
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
-import { createRpcContainer, getRpcServer } from './rpc/container'
-import { registerElectronRpc } from './rpc/electron-rpc'
+import {
+  createMainRpcRuntime,
+  startMainRpcRuntime
+} from './rpc/runtime'
 
-const rpcContainer = createRpcContainer()
-registerElectronRpc(getRpcServer(rpcContainer))
+const rpcRuntime = createMainRpcRuntime()
+void startMainRpcRuntime(rpcRuntime).catch((error: unknown) => {
+  console.error('Failed to start Effect RPC runtime', error)
+})
 
 /**
  * Opens a renderer-provided URL only when it uses a web protocol. Invalid and
@@ -80,4 +83,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  void rpcRuntime.dispose()
 })

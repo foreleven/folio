@@ -1,8 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { createRendererContainer } from './di/container'
-import { RpcClientProvider } from './rpc/rpc-client-provider'
+import { EffectRuntimeProvider } from './effect-runtime-provider'
+import { createRendererRuntime } from './runtime'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -11,12 +11,13 @@ if (!rootElement) {
   throw new Error('Renderer root element was not found')
 }
 
-const rendererContainer = createRendererContainer()
+const rendererRuntime = createRendererRuntime()
+window.addEventListener('beforeunload', () => void rendererRuntime.dispose(), { once: true })
 
 createRoot(rootElement).render(
   <StrictMode>
-    <RpcClientProvider container={rendererContainer}>
+    <EffectRuntimeProvider runtime={rendererRuntime}>
       <App />
-    </RpcClientProvider>
+    </EffectRuntimeProvider>
   </StrictMode>
 )

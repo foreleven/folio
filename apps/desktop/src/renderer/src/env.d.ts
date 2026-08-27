@@ -1,13 +1,10 @@
 /// <reference types="vite/client" />
 
-interface DesktopRpcBridge {
-  /** Sends an untyped transport request; injected service contracts provide application types. */
-  request(method: string, ...args: [] | [params: unknown]): Promise<unknown>
-}
+import type { ElectronRpcBridge } from '../../shared/rpc/electron-rpc'
 
 declare global {
   interface Window {
-    desktop: Readonly<DesktopRpcBridge>
+    desktopRpc: Readonly<ElectronRpcBridge>
   }
 }
 

@@ -1,24 +1,20 @@
+import { Context, Effect, Layer } from 'effect'
 import { app } from 'electron'
-import { injectable } from 'inversify'
-import type { SystemInfo } from '../../shared/handlers/system-rpc-handler'
+import type { SystemInfo } from '../../shared/rpc/system-rpc'
 
-/** Stable DI token for process-owned system information. */
-export const SystemService = Symbol.for('folio.services.SystemService')
-
-/** Supplies application metadata without exposing Electron to RPC handlers. */
-export interface SystemService {
-  /** Returns stable runtime metadata for the current application process. */
-  getInfo(): SystemInfo
-}
-
-/** Supplies process-owned application metadata to RPC handlers. */
-@injectable()
-export class ElectronSystemService implements SystemService {
-  /** Returns stable runtime metadata without exposing the Electron app object. */
-  public getInfo(): SystemInfo {
-    return {
+/** Effect service for process-owned application metadata. */
+export class SystemService extends Context.Service<
+  SystemService,
+  {
+    /** Reads stable runtime metadata from the Electron main process. */
+    readonly getInfo: Effect.Effect<SystemInfo>
+  }
+>()('folio/services/SystemService') {
+  /** Live adapter backed by Electron's application object and Node platform. */
+  static readonly layer = Layer.succeed(SystemService)({
+    getInfo: Effect.sync(() => ({
       platform: process.platform,
       version: app.getVersion()
-    }
-  }
+    }))
+  })
 }

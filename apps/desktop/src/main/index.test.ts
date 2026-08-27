@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ELECTRON_RPC_REQUEST_CHANNEL } from '../shared/rpc/electron-rpc'
 
 const electronMocks = vi.hoisted(() => ({
   createBrowserWindow: vi.fn(),
   loadFile: vi.fn(),
   loadURL: vi.fn(),
   openDevTools: vi.fn(),
-  registerIpcHandler: vi.fn(),
+  registerIpcListener: vi.fn(),
+  removeIpcListener: vi.fn(),
   onAppEvent: vi.fn(),
   onWebContentsEvent: vi.fn(),
   openExternal: vi.fn(),
@@ -40,7 +42,10 @@ vi.mock('electron', () => {
       whenReady: () => Promise.resolve()
     },
     BrowserWindow,
-    ipcMain: { handle: electronMocks.registerIpcHandler },
+    ipcMain: {
+      on: electronMocks.registerIpcListener,
+      removeListener: electronMocks.removeIpcListener
+    },
     shell: { openExternal: electronMocks.openExternal }
   }
 })
@@ -68,6 +73,12 @@ describe('desktop main window', () => {
 
     expect(electronMocks.loadURL).toHaveBeenCalledWith('http://localhost:5173')
     expect(electronMocks.openDevTools).toHaveBeenCalledOnce()
+    await vi.waitFor(() =>
+      expect(electronMocks.registerIpcListener).toHaveBeenCalledWith(
+        ELECTRON_RPC_REQUEST_CHANNEL,
+        expect.any(Function)
+      )
+    )
     expect(electronMocks.createBrowserWindow).toHaveBeenCalledWith(
       expect.objectContaining({
         webPreferences: expect.objectContaining({

@@ -1,80 +1,67 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DesktopRpcClient } from '../shared/rpc'
-import { RPC_CHANNEL } from '../shared/rpc'
+import {
+  ELECTRON_RPC_REQUEST_CHANNEL,
+  ELECTRON_RPC_RESPONSE_CHANNEL,
+  type ElectronRpcBridge,
+  type ElectronRpcFrame
+} from '../shared/rpc/electron-rpc'
 
 const electronMocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
-  invoke: vi.fn()
+  on: vi.fn(),
+  send: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: electronMocks.exposeInMainWorld },
-  ipcRenderer: { invoke: electronMocks.invoke }
+  ipcRenderer: { on: electronMocks.on, send: electronMocks.send }
 }))
 
-/** Reloads preload so every test starts with request id 1 and a fresh exposed client. */
+/** Reloads preload and returns the bridge exposed through context isolation. */
 async function loadPreload(): Promise<{
-  client: DesktopRpcClient
-  RpcClientError: typeof import('./index')['RpcClientError']
+  bridge: ElectronRpcBridge
+  receive: (frame: ElectronRpcFrame) => void
 }> {
   vi.resetModules()
-  const module = await import('./index')
-  const client = electronMocks.exposeInMainWorld.mock.calls[0]?.[1] as DesktopRpcClient
-  return { client, RpcClientError: module.RpcClientError }
+  await import('./index')
+  const bridge = electronMocks.exposeInMainWorld.mock.calls[0]?.[1] as ElectronRpcBridge
+  const receive = electronMocks.on.mock.calls[0]?.[1] as (
+    event: unknown,
+    frame: ElectronRpcFrame
+  ) => void
+  return { bridge, receive: (frame) => receive(undefined, frame) }
 }
 
 beforeEach(() => {
-  electronMocks.exposeInMainWorld.mockReset()
-  electronMocks.invoke.mockReset()
+  vi.clearAllMocks()
 })
 
-describe('preload RPC client', () => {
-  it('serializes a transport request and returns its result', async () => {
-    electronMocks.invoke.mockResolvedValue(
-      JSON.stringify({ jsonrpc: '2.0', result: { platform: 'darwin', version: '0.1.0' }, id: 1 })
-    )
-    const { client } = await loadPreload()
+describe('preload Electron RPC bridge', () => {
+  it('forwards serialized client frames without exposing Electron primitives', async () => {
+    const { bridge } = await loadPreload()
+    const frame = { clientId: 3, data: '{"_tag":"Request"}' }
 
-    await expect(client.request('system.getInfo')).resolves.toEqual({
-      platform: 'darwin',
-      version: '0.1.0'
-    })
-    expect(electronMocks.invoke).toHaveBeenCalledWith(
-      RPC_CHANNEL,
-      JSON.stringify({ jsonrpc: '2.0', method: 'system.getInfo', id: 1 })
+    bridge.send(frame)
+
+    expect(electronMocks.send).toHaveBeenCalledWith(ELECTRON_RPC_REQUEST_CHANNEL, frame)
+    expect(electronMocks.on).toHaveBeenCalledWith(
+      ELECTRON_RPC_RESPONSE_CHANNEL,
+      expect.any(Function)
     )
   })
 
-  it('maps a JSON-RPC failure to RpcClientError', async () => {
-    electronMocks.invoke.mockResolvedValue(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        error: { code: -32603, message: 'Internal error', data: { traceId: 'safe-id' } },
-        id: 1
-      })
-    )
-    const { client, RpcClientError } = await loadPreload()
+  it('delivers valid server frames only while a listener is installed', async () => {
+    const { bridge, receive } = await loadPreload()
+    const listener = vi.fn()
+    const frame = { clientId: 7, data: '{"_tag":"Exit"}' }
 
-    const request = client.request('system.getInfo')
-    await expect(request).rejects.toBeInstanceOf(RpcClientError)
-    await expect(request).rejects.toMatchObject({
-      code: -32603,
-      message: 'Internal error',
-      data: { traceId: 'safe-id' }
-    })
-  })
+    bridge.listen(listener)
+    receive(frame)
+    receive({ clientId: Number.NaN, data: 'invalid' })
+    bridge.clearListener()
+    receive(frame)
 
-  it.each([
-    ['non-string response', { jsonrpc: '2.0', result: {}, id: 1 }],
-    ['invalid JSON', '{'],
-    ['mismatched id', JSON.stringify({ jsonrpc: '2.0', result: {}, id: 99 })],
-    ['invalid envelope', JSON.stringify({ jsonrpc: '2.0', id: 1 })]
-  ])('rejects a %s', async (_name, response) => {
-    electronMocks.invoke.mockResolvedValue(response)
-    const { client, RpcClientError } = await loadPreload()
-
-    await expect(client.request('system.getInfo')).rejects.toEqual(
-      new RpcClientError(-32000, 'Invalid response from main process')
-    )
+    expect(listener).toHaveBeenCalledOnce()
+    expect(listener).toHaveBeenCalledWith(frame)
   })
 })
