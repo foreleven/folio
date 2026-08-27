@@ -2,9 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DesktopRpcClient,
   JsonRpcFailure,
-  JsonRpcResponse,
-  RpcMethod,
-  RpcMethodDefinitions
+  JsonRpcParams,
+  JsonRpcResponse
 } from '../shared/rpc'
 import { RPC_CHANNEL } from '../shared/rpc'
 
@@ -22,13 +21,11 @@ export class RpcClientError extends Error {
   }
 }
 
-/** Sends one typed request over the isolated Electron JSON-RPC transport. */
-async function request<Method extends RpcMethod>(
-  method: Method,
-  ...args: RpcMethodDefinitions[Method]['params'] extends undefined
-    ? []
-    : [params: RpcMethodDefinitions[Method]['params']]
-): Promise<RpcMethodDefinitions[Method]['result']> {
+/** Sends one application-agnostic request over the isolated JSON-RPC transport. */
+async function request(
+  method: string,
+  ...args: [] | [params: JsonRpcParams]
+): Promise<unknown> {
   const id = ++nextRequestId
   const message = JSON.stringify({
     jsonrpc: '2.0',
@@ -43,7 +40,7 @@ async function request<Method extends RpcMethod>(
     throw new RpcClientError(response.error.code, response.error.message, response.error.data)
   }
 
-  return response.result as RpcMethodDefinitions[Method]['result']
+  return response.result
 }
 
 /** Validates that main returned a matching JSON-RPC response envelope. */

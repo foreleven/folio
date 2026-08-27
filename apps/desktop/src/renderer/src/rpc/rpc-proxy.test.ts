@@ -3,6 +3,10 @@ import { DesktopRpcProxy } from './rpc-proxy'
 
 const request = vi.fn()
 
+interface ExampleRpcHandler {
+  getInfo(params?: unknown): Promise<unknown>
+}
+
 beforeEach(() => {
   request.mockReset()
   vi.stubGlobal('window', { desktop: { request } })
@@ -13,21 +17,20 @@ afterEach(() => {
 })
 
 describe('DesktopRpcProxy', () => {
-  it('forwards one params argument through the registered service route', async () => {
+  it('forwards one params argument through a generic namespace client', async () => {
     request.mockResolvedValue({ platform: 'darwin', version: '0.1.0' })
-    const service = new DesktopRpcProxy().getService('system')
-    const getInfo = service.getInfo as unknown as (params: unknown) => Promise<unknown>
+    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>('example')
 
-    await expect(getInfo({ refresh: true })).resolves.toEqual({
+    await expect(client.getInfo({ refresh: true })).resolves.toEqual({
       platform: 'darwin',
       version: '0.1.0'
     })
-    expect(request).toHaveBeenCalledWith('system.getInfo', { refresh: true })
+    expect(request).toHaveBeenCalledWith('example.getInfo', { refresh: true })
   })
 
   it('rejects calls with more than one params argument before transport', async () => {
-    const service = new DesktopRpcProxy().getService('system')
-    const getInfo = service.getInfo as unknown as (...args: unknown[]) => Promise<unknown>
+    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>('example')
+    const getInfo = client.getInfo as (...args: unknown[]) => Promise<unknown>
 
     await expect(getInfo('first', 'second')).rejects.toThrow(
       'RPC service methods accept at most one params argument'
@@ -36,13 +39,15 @@ describe('DesktopRpcProxy', () => {
   })
 
   it('does not expose then or symbol properties as remote methods', () => {
-    const service = new DesktopRpcProxy().getService('system') as unknown as Record<
+    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>(
+      'example'
+    ) as unknown as Record<
       PropertyKey,
       unknown
     >
 
-    expect(service.then).toBeUndefined()
-    expect(service[Symbol.toStringTag]).toBeUndefined()
+    expect(client.then).toBeUndefined()
+    expect(client[Symbol.toStringTag]).toBeUndefined()
     expect(request).not.toHaveBeenCalled()
   })
 })

@@ -1,7 +1,7 @@
 import 'reflect-metadata'
 import { describe, expect, it, vi } from 'vitest'
+import { SystemRpcHandler } from '../../shared/handlers/system-rpc-handler'
 import { createRpcContainer, getRpcServer } from './container'
-import { SystemRpcHandler } from './handlers/system-rpc-handler'
 import { RpcServer } from './server'
 import { SystemService } from '../services/system-service'
 

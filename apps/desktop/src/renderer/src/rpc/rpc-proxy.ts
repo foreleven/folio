@@ -1,40 +1,25 @@
-import {
-  RPC_SERVICE_METHODS,
-  type RpcNamespace,
-  type RpcServices
-} from '../../../shared/services/rpc-services'
-
 /** Stable DI token for the renderer's sole RPC service proxy. */
 export const RpcProxy = Symbol.for('folio.renderer.RpcProxy')
 
-/** Creates typed client implementations for registered server namespaces. */
+/** Creates typed client implementations without knowing concrete RPC handlers. */
 export interface RpcProxy {
-  /** Creates a typed client implementation for one registered server namespace. */
-  getService<Namespace extends RpcNamespace>(
-    namespace: Namespace
-  ): RpcServices[Namespace]
+  /** Creates a typed client whose method calls are forwarded under one namespace. */
+  createClient<Client extends object>(namespace: string): Client
 }
 
 /** Maps injected service method calls onto the isolated preload RPC bridge. */
 export class DesktopRpcProxy implements RpcProxy {
-  /** Creates a typed service whose calls are restricted to the shared runtime route registry. */
-  public getService<Namespace extends RpcNamespace>(
-    namespace: Namespace
-  ): RpcServices[Namespace] {
-    const methods: Readonly<Record<string, string>> = RPC_SERVICE_METHODS[namespace]
-    const service = new Proxy(Object.create(null) as object, {
+  /** Creates a client that maps zero- or one-argument calls to namespace.method requests. */
+  public createClient<Client extends object>(namespace: string): Client {
+    const client = new Proxy(Object.create(null) as object, {
       get: (_target, property) => {
-        if (typeof property !== 'string') {
-          return undefined
-        }
-
-        const method = methods[property]
-        if (!method) {
-          // Only registered service methods are exposed, which also prevents thenable proxies.
+        if (typeof property !== 'string' || property === 'then') {
+          // Suppressing then prevents a dynamic client from being treated as a Promise.
           return undefined
         }
 
         return (...args: readonly unknown[]): Promise<unknown> => {
+          const method = `${namespace}.${property}`
           if (args.length === 0) {
             return window.desktop.request(method)
           }
@@ -49,6 +34,6 @@ export class DesktopRpcProxy implements RpcProxy {
       }
     })
 
-    return service as RpcServices[Namespace]
+    return client as Client
   }
 }

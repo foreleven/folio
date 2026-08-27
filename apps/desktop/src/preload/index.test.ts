@@ -29,7 +29,7 @@ beforeEach(() => {
 })
 
 describe('preload RPC client', () => {
-  it('serializes a typed request and returns its result', async () => {
+  it('serializes a transport request and returns its result', async () => {
     electronMocks.invoke.mockResolvedValue(
       JSON.stringify({ jsonrpc: '2.0', result: { platform: 'darwin', version: '0.1.0' }, id: 1 })
     )

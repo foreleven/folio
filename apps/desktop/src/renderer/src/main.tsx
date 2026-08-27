@@ -1,7 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { createRendererContainer, getSystemService } from './di/container'
+import { createRendererContainer } from './di/container'
+import { RpcClientProvider } from './rpc/rpc-client-provider'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -11,10 +12,11 @@ if (!rootElement) {
 }
 
 const rendererContainer = createRendererContainer()
-const systemService = getSystemService(rendererContainer)
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App systemService={systemService} />
+    <RpcClientProvider container={rendererContainer}>
+      <App />
+    </RpcClientProvider>
   </StrictMode>
 )

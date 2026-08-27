@@ -1,16 +1,13 @@
 import { app } from 'electron'
 import { injectable } from 'inversify'
-import {
-  SystemService as SharedSystemService,
-  type SystemInfo
-} from '../../shared/services/system-service'
+import type { SystemInfo } from '../../shared/handlers/system-rpc-handler'
 
-/** Main-process DI token shared with renderer-side service injection. */
-export const SystemService = SharedSystemService
+/** Stable DI token for process-owned system information. */
+export const SystemService = Symbol.for('folio.services.SystemService')
 
-/** Narrows the cross-process service contract to its synchronous local implementation. */
-export interface SystemService extends SharedSystemService {
-  /** Returns metadata synchronously because Electron owns it in this process. */
+/** Supplies application metadata without exposing Electron to RPC handlers. */
+export interface SystemService {
+  /** Returns stable runtime metadata for the current application process. */
   getInfo(): SystemInfo
 }
 

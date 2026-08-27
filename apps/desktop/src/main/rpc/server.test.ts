@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { JsonRpcParams, SystemInfo } from '../../shared/rpc'
+import type { SystemInfo } from '../../shared/handlers/system-rpc-handler'
+import type { JsonRpcParams } from '../../shared/rpc'
 import { JsonRpcError } from './errors'
 import { JsonRpcServer } from './server'
 
@@ -29,7 +30,7 @@ afterEach(() => {
 })
 
 describe('JsonRpcServer', () => {
-  it('registers contract methods, preserves this, and keeps helpers private', async () => {
+  it('registers every handler method in one namespace and preserves this', async () => {
     class TestSystemRpcHandler {
       private readonly readiness = 'ready'
 
@@ -38,7 +39,7 @@ describe('JsonRpcServer', () => {
         return { platform: process.platform, version: this.readiness }
       }
 
-      /** Represents process-only behavior that must not become remotely callable. */
+      /** Returns a second result from the same handler instance. */
       public helper(): string {
         return this.readiness
       }
@@ -59,17 +60,11 @@ describe('JsonRpcServer', () => {
       })
     )
 
-    expect(
-      decode(
-        await server.handleMessage(
-          JSON.stringify({ jsonrpc: '2.0', method: 'system.helper', id: 2 })
-        )
+    await expect(
+      server.handleMessage(
+        JSON.stringify({ jsonrpc: '2.0', method: 'system.helper', id: 2 })
       )
-    ).toEqual({
-      jsonrpc: '2.0',
-      error: { code: -32601, message: 'Method not found' },
-      id: 2
-    })
+    ).resolves.toBe(JSON.stringify({ jsonrpc: '2.0', result: 'ready', id: 2 }))
   })
 
   it('does not expose inherited Object methods as RPC methods', async () => {

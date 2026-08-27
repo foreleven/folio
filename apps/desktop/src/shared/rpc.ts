@@ -1,16 +1,3 @@
-import type {
-  RpcMethod,
-  RpcMethodDefinitions
-} from './services/rpc-services'
-
-export type { SystemInfo } from './services/system-service'
-export type {
-  RpcMethod,
-  RpcMethodDefinitions,
-  RpcNamespace,
-  RpcNamespaceHandler
-} from './services/rpc-services'
-
 /** The single Electron IPC channel carrying serialized JSON-RPC messages. */
 export const RPC_CHANNEL = 'folio:rpc'
 
@@ -50,11 +37,6 @@ export interface JsonRpcFailure {
 export type JsonRpcResponse<Result = unknown> = JsonRpcSuccess<Result> | JsonRpcFailure
 
 export interface DesktopRpcClient {
-  /** Sends one JSON-RPC request and rejects with RpcClientError for protocol failures. */
-  request<Method extends RpcMethod>(
-    method: Method,
-    ...args: RpcMethodDefinitions[Method]['params'] extends undefined
-      ? []
-      : [params: RpcMethodDefinitions[Method]['params']]
-  ): Promise<RpcMethodDefinitions[Method]['result']>
+  /** Sends one transport request; injected handler interfaces provide application types. */
+  request(method: string, ...args: [] | [params: JsonRpcParams]): Promise<unknown>
 }

@@ -1,14 +1,10 @@
 import { inject, injectable } from 'inversify'
-import type { RpcNamespaceHandler, SystemInfo } from '../../../shared/rpc'
-import { JsonRpcError } from '../errors'
+import {
+  SystemRpcHandler,
+  type SystemInfo
+} from '../../../shared/handlers/system-rpc-handler'
 import { RpcServer } from '../server'
 import { SystemService } from '../../services/system-service'
-
-/** Stable DI token for the system namespace handler. */
-export const SystemRpcHandler = Symbol.for('folio.rpc.SystemRpcHandler')
-
-/** Contract for every RPC method owned by the public system namespace. */
-export interface SystemRpcHandler extends RpcNamespaceHandler<'system'> {}
 
 /** Process implementation of the public system namespace. */
 @injectable()
@@ -25,12 +21,8 @@ export class DefaultSystemRpcHandler implements SystemRpcHandler {
     rpcServer.register('system', this)
   }
 
-  /** Returns application metadata and rejects params because the contract accepts none. */
-  public getInfo(params: undefined): SystemInfo {
-    if (params !== undefined) {
-      throw new JsonRpcError(-32602, 'Invalid params')
-    }
-
+  /** Returns application metadata through the process-owned system service. */
+  public getInfo(): SystemInfo {
     return this.systemService.getInfo()
   }
 }

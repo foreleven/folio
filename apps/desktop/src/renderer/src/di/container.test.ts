@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SystemService } from '../../../shared/services/system-service'
-import { createRendererContainer, getSystemService } from './container'
+import { SystemRpcHandler } from '../../../shared/handlers/system-rpc-handler'
+import { createRendererContainer } from './container'
 
 const request = vi.fn()
 
@@ -14,16 +14,16 @@ afterEach(() => {
 })
 
 describe('renderer dependency container', () => {
-  it('injects one system service implemented by the RPC proxy', async () => {
+  it('injects one system RPC handler implemented by the generic proxy', async () => {
     request.mockResolvedValue({ platform: 'darwin', version: '0.1.0' })
     const container = createRendererContainer()
 
-    const firstService = getSystemService(container)
-    const secondService = getSystemService(container)
+    const firstHandler = container.get<SystemRpcHandler>(SystemRpcHandler)
+    const secondHandler = container.get<SystemRpcHandler>(SystemRpcHandler)
 
-    expect(firstService).toBe(secondService)
-    expect(SystemService).toBe(Symbol.for('folio.services.SystemService'))
-    await expect(firstService.getInfo()).resolves.toEqual({
+    expect(firstHandler).toBe(secondHandler)
+    expect(SystemRpcHandler).toBe(Symbol.for('folio.rpc.SystemRpcHandler'))
+    await expect(firstHandler.getInfo()).resolves.toEqual({
       platform: 'darwin',
       version: '0.1.0'
     })

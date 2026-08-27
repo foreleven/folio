@@ -1,20 +1,18 @@
 import { useState } from 'react'
 import { Button } from '@folio/ui'
-import type { SystemService } from '../../shared/services/system-service'
+import { SystemRpcHandler } from '../../shared/handlers/system-rpc-handler'
+import { useRpcClient } from './rpc/rpc-client-provider'
 import '@folio/ui/styles.css'
 
-interface AppProps {
-  systemService: SystemService
-}
-
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
-export function App({ systemService }: AppProps): React.JSX.Element {
+export function App(): React.JSX.Element {
+  const systemRpcHandler = useRpcClient<SystemRpcHandler>(SystemRpcHandler)
   const [runtime, setRuntime] = useState('Not checked')
 
-  /** Loads process-owned metadata through the injected system capability. */
+  /** Loads process-owned metadata through the injected RPC handler. */
   async function checkRuntime(): Promise<void> {
     try {
-      const info = await systemService.getInfo()
+      const info = await systemRpcHandler.getInfo()
       setRuntime(`${info.platform} · v${info.version}`)
     } catch (error: unknown) {
       console.error('Failed to load runtime information', error)

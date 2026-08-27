@@ -1,8 +1,6 @@
 import { Container } from 'inversify'
-import {
-  DefaultSystemRpcHandler,
-  SystemRpcHandler
-} from './handlers/system-rpc-handler'
+import { SystemRpcHandler } from '../../shared/handlers/system-rpc-handler'
+import { DefaultSystemRpcHandler } from './handlers/system-rpc-handler'
 import { JsonRpcServer, RpcServer } from './server'
 import { ElectronSystemService, SystemService } from '../services/system-service'
 
