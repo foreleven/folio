@@ -1,15 +1,20 @@
 import { useState } from 'react'
 import { Button } from '@folio/ui'
+import type { SystemService } from '../../shared/services/system-service'
 import '@folio/ui/styles.css'
 
+interface AppProps {
+  systemService: SystemService
+}
+
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
-export function App(): React.JSX.Element {
+export function App({ systemService }: AppProps): React.JSX.Element {
   const [runtime, setRuntime] = useState('Not checked')
 
-  /** Loads process-owned metadata through the typed JSON-RPC boundary. */
+  /** Loads process-owned metadata through the injected system capability. */
   async function checkRuntime(): Promise<void> {
     try {
-      const info = await window.desktop.request('system.getInfo')
+      const info = await systemService.getInfo()
       setRuntime(`${info.platform} · v${info.version}`)
     } catch (error: unknown) {
       console.error('Failed to load runtime information', error)

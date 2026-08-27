@@ -1,3 +1,7 @@
+import type { SystemInfo } from './services/system-service'
+
+export type { SystemInfo } from './services/system-service'
+
 /** The single Electron IPC channel carrying serialized JSON-RPC messages. */
 export const RPC_CHANNEL = 'folio:rpc'
 
@@ -36,23 +40,7 @@ export interface JsonRpcFailure {
 
 export type JsonRpcResponse<Result = unknown> = JsonRpcSuccess<Result> | JsonRpcFailure
 
-export interface SystemInfo {
-  platform:
-    | 'aix'
-    | 'android'
-    | 'darwin'
-    | 'freebsd'
-    | 'haiku'
-    | 'linux'
-    | 'openbsd'
-    | 'sunos'
-    | 'win32'
-    | 'cygwin'
-    | 'netbsd'
-  version: string
-}
-
-/** The shared method map is the compile-time contract between preload and renderer. */
+/** Transport method map used by main dispatch and the isolated preload bridge. */
 export interface RpcMethodDefinitions {
   'system.getInfo': {
     params: undefined
