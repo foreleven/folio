@@ -6,8 +6,8 @@ const electronMocks = vi.hoisted(() => ({
   createBrowserWindow: vi.fn(),
   destroyWindow: vi.fn(),
   isWindowDestroyed: vi.fn(() => false),
-  loadFile: vi.fn(),
-  loadURL: vi.fn(),
+  loadFile: vi.fn(() => Promise.resolve()),
+  loadURL: vi.fn(() => Promise.resolve()),
   openDevTools: vi.fn(),
   registerIpcListener: vi.fn(),
   removeAppListener: vi.fn((event: string) => {

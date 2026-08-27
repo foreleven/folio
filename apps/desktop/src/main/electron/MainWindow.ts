@@ -1,6 +1,12 @@
 import { BrowserWindow, shell } from 'electron'
-import { Context, Effect, Layer } from 'effect'
+import { Context, Effect, Layer, Schema } from 'effect'
 import { join } from 'node:path'
+
+/** Renderer navigation failed while opening an application window. */
+export class RendererLoadError extends Schema.TaggedError<RendererLoadError>()(
+  'RendererLoadError',
+  { cause: Schema.Defect() }
+) {}
 
 /**
  * Opens a renderer-provided URL only when it uses a web protocol. Invalid and
@@ -47,15 +53,27 @@ function createWindow(): BrowserWindow {
     openExternalUrl(url)
   })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  return mainWindow
+}
+
+/** Loads the configured renderer and keeps navigation failures in Effect. */
+function loadRenderer(
+  mainWindow: BrowserWindow
+): Effect.Effect<void, RendererLoadError> {
+  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+
+  if (rendererUrl) {
     // Development starts with diagnostics visible; packaged windows remain unaffected.
     mainWindow.webContents.openDevTools()
-  } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  return mainWindow
+  return Effect.tryPromise({
+    try: () =>
+      rendererUrl
+        ? mainWindow.loadURL(rendererUrl)
+        : mainWindow.loadFile(join(__dirname, '../renderer/index.html')),
+    catch: (cause) => new RendererLoadError({ cause })
+  })
 }
 
 /** Main-window boundary owned by the Electron application program. */
@@ -63,7 +81,7 @@ export class MainWindow extends Context.Service<
   MainWindow,
   {
     /** Opens a renderer window. */
-    readonly open: Effect.Effect<void>
+    readonly open: Effect.Effect<void, RendererLoadError>
     /** Reports whether an application window is currently open. */
     readonly isOpen: Effect.Effect<boolean>
   }
@@ -85,10 +103,11 @@ export class MainWindow extends Context.Service<
         })
       )
 
-      const open = Effect.sync(() => {
+      const open = Effect.gen(function*() {
         const window = createWindow()
         windows.add(window)
         window.once('closed', () => windows.delete(window))
+        yield* loadRenderer(window)
       })
 
       return MainWindow.of({

@@ -1,6 +1,4 @@
-import { Effect } from 'effect'
+import * as NodeRuntime from '@effect/platform-node/NodeRuntime'
 import { program } from './program'
 
-void Effect.runPromise(program).catch((error: unknown) => {
-  console.error('Failed to run main program', error)
-})
+NodeRuntime.runMain(program)

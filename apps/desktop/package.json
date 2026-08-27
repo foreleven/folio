@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
+    "@effect/platform-node": "^4.0.0-rc.112",
     "@folio/ui": "file:../../packages/ui",
     "effect": "^4.0.0-rc.112",
     "react": "19.2.8",

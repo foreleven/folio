@@ -1,4 +1,4 @@
-import { ManagedRuntime } from 'effect'
+import { Effect, ManagedRuntime } from 'effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MainWindow } from './MainWindow'
 
@@ -81,6 +81,22 @@ describe('MainWindow live service', () => {
 
     expect(electronMocks.loadFile).toHaveBeenCalledOnce()
     expect(electronMocks.openDevTools).not.toHaveBeenCalled()
+    await runtime.dispose()
+  })
+
+  it('reports renderer load failures through the Effect error channel', async () => {
+    vi.stubEnv('ELECTRON_RENDERER_URL', 'http://localhost:5173')
+    const loadError = new Error('renderer unavailable')
+    electronMocks.loadURL.mockRejectedValueOnce(loadError)
+    const runtime = ManagedRuntime.make(MainWindow.layer)
+    const mainWindow = await runtime.runPromise(MainWindow)
+
+    const error = await runtime.runPromise(Effect.flip(mainWindow.open))
+
+    expect(error).toMatchObject({
+      _tag: 'RendererLoadError',
+      cause: loadError
+    })
     await runtime.dispose()
   })
 })
