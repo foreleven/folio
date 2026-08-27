@@ -97,6 +97,9 @@ describe('MainWindow live service', () => {
       _tag: 'RendererLoadError',
       cause: loadError
     })
+    await expect(runtime.runPromise(mainWindow.isOpen)).resolves.toBe(false)
+    expect(electronMocks.destroy).toHaveBeenCalledOnce()
     await runtime.dispose()
+    expect(electronMocks.destroy).toHaveBeenCalledOnce()
   })
 })

@@ -92,14 +92,19 @@ export class MainWindow extends Context.Service<
     Effect.gen(function*() {
       const windows = new Set<BrowserWindow>()
 
+      /** Removes and destroys one window without double-closing it. */
+      const destroyWindow = (window: BrowserWindow): void => {
+        windows.delete(window)
+        if (!window.isDestroyed()) {
+          window.destroy()
+        }
+      }
+
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
-          for (const window of windows) {
-            if (!window.isDestroyed()) {
-              window.destroy()
-            }
+          for (const window of Array.from(windows)) {
+            destroyWindow(window)
           }
-          windows.clear()
         })
       )
 
@@ -107,7 +112,9 @@ export class MainWindow extends Context.Service<
         const window = createWindow()
         windows.add(window)
         window.once('closed', () => windows.delete(window))
-        yield* loadRenderer(window)
+        yield* loadRenderer(window).pipe(
+          Effect.tapError(() => Effect.sync(() => destroyWindow(window)))
+        )
       })
 
       return MainWindow.of({
