@@ -4,7 +4,14 @@ import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
   main: {},
-  preload: {},
+  preload: {
+    build: {
+      rollupOptions: {
+        // Sandboxed Electron preloads execute as CommonJS rather than native ESM.
+        output: { format: 'cjs', entryFileNames: '[name].cjs' }
+      }
+    }
+  },
   renderer: {
     resolve: {
       alias: {
@@ -14,4 +21,3 @@ export default defineConfig({
     plugins: [react()]
   }
 })
-

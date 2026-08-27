@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const electronMocks = vi.hoisted(() => ({
+  createBrowserWindow: vi.fn(),
   loadFile: vi.fn(),
   loadURL: vi.fn(),
   openDevTools: vi.fn(),
@@ -25,7 +26,8 @@ vi.mock('electron', () => {
       setWindowOpenHandler: electronMocks.setWindowOpenHandler
     }
   }
-  const BrowserWindow = vi.fn(function BrowserWindowMock() {
+  const BrowserWindow = vi.fn(function BrowserWindowMock(options: unknown) {
+    electronMocks.createBrowserWindow(options)
     return mainWindow
   })
   Object.assign(BrowserWindow, { getAllWindows: () => [mainWindow] })
@@ -66,6 +68,13 @@ describe('desktop main window', () => {
 
     expect(electronMocks.loadURL).toHaveBeenCalledWith('http://localhost:5173')
     expect(electronMocks.openDevTools).toHaveBeenCalledOnce()
+    expect(electronMocks.createBrowserWindow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        webPreferences: expect.objectContaining({
+          preload: expect.stringMatching(/index\.cjs$/)
+        })
+      })
+    )
   })
 
   it('keeps DevTools closed when loading the packaged renderer', async () => {
