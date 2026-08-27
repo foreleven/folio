@@ -1,9 +1,12 @@
 import { Container } from 'inversify'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import type { RpcHandlerToken } from '../../../shared/rpc'
 import { RpcClientProvider, useRpcClient } from './rpc-client-provider'
 
-const ExampleRpcHandler = Symbol.for('test.ExampleRpcHandler')
+const ExampleRpcHandler = Symbol.for(
+  'test.ExampleRpcHandler'
+) as RpcHandlerToken<ExampleRpcHandler>
 
 interface ExampleRpcHandler {
   getValue(): string
@@ -34,7 +37,7 @@ describe('RpcClientProvider', () => {
   it('rejects hook usage outside the provider boundary', () => {
     /** Attempts to resolve a client without a container in context. */
     function Probe(): null {
-      useRpcClient<ExampleRpcHandler>(ExampleRpcHandler)
+      useRpcClient(ExampleRpcHandler)
       return null
     }
 

@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineRpcClient } from '../../../shared/rpc'
 import { DesktopRpcProxy } from './rpc-proxy'
 
 const request = vi.fn()
 
 interface ExampleRpcHandler {
-  getInfo(params?: unknown): Promise<unknown>
+  getInfo(params: Record<string, unknown>): Promise<unknown>
 }
+
+const EXAMPLE_RPC_DEFINITION = defineRpcClient<ExampleRpcHandler>('example', {
+  getInfo: true
+})
 
 beforeEach(() => {
   request.mockReset()
@@ -19,7 +24,7 @@ afterEach(() => {
 describe('DesktopRpcProxy', () => {
   it('forwards one params argument through a generic namespace client', async () => {
     request.mockResolvedValue({ platform: 'darwin', version: '0.1.0' })
-    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>('example')
+    const client = new DesktopRpcProxy().createClient(EXAMPLE_RPC_DEFINITION.namespace)
 
     await expect(client.getInfo({ refresh: true })).resolves.toEqual({
       platform: 'darwin',
@@ -29,7 +34,7 @@ describe('DesktopRpcProxy', () => {
   })
 
   it('rejects calls with more than one params argument before transport', async () => {
-    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>('example')
+    const client = new DesktopRpcProxy().createClient(EXAMPLE_RPC_DEFINITION.namespace)
     const getInfo = client.getInfo as (...args: unknown[]) => Promise<unknown>
 
     await expect(getInfo('first', 'second')).rejects.toThrow(
@@ -39,12 +44,9 @@ describe('DesktopRpcProxy', () => {
   })
 
   it('does not expose then or symbol properties as remote methods', () => {
-    const client = new DesktopRpcProxy().createClient<ExampleRpcHandler>(
-      'example'
-    ) as unknown as Record<
-      PropertyKey,
-      unknown
-    >
+    const client = new DesktopRpcProxy().createClient(
+      EXAMPLE_RPC_DEFINITION.namespace
+    ) as unknown as Record<PropertyKey, unknown>
 
     expect(client.then).toBeUndefined()
     expect(client[Symbol.toStringTag]).toBeUndefined()

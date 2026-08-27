@@ -6,6 +6,7 @@ import type {
   JsonRpcParams,
   JsonRpcResponse
 } from '../../shared/rpc'
+import { RpcHandlerMethods, type RegisteredRpcHandler } from '../../shared/rpc'
 import { JsonRpcError } from './errors'
 
 const PARSE_ERROR = -32700
@@ -19,7 +20,7 @@ export const RpcServer = Symbol.for('folio.rpc.RpcServer')
 /** Registers namespace handlers and dispatches serialized JSON-RPC messages. */
 export interface RpcServer {
   /** Registers every method declared by one handler under a shared namespace. */
-  register(namespace: string, handler: object): void
+  register(namespace: string, handler: RegisteredRpcHandler): void
 
   /** Parses, validates, dispatches, and serializes one JSON-RPC message or batch. */
   handleMessage(message: unknown): Promise<string | undefined>
@@ -35,30 +36,22 @@ export class JsonRpcServer implements RpcServer {
   private readonly handlers = new Map<string, RegisteredRpcMethod>()
   private readonly namespaces = new Set<string>()
 
-  /** Registers function members declared by one handler under a shared RPC namespace. */
-  public register(namespace: string, handler: object): void {
+  /** Registers explicitly exposed handler methods under a shared RPC namespace. */
+  public register(namespace: string, handler: RegisteredRpcHandler): void {
     if (this.namespaces.has(namespace)) {
       throw new Error(`JSON-RPC namespace "${namespace}" is already registered`)
     }
 
-    const prototype: object | null = Object.getPrototypeOf(handler)
-    const owners =
-      prototype === null || prototype === Object.prototype
-        ? [handler]
-        : [prototype, handler]
     const registrations = new Map<string, RegisteredRpcMethod>()
-    for (const owner of owners) {
-      for (const methodName of Object.getOwnPropertyNames(owner)) {
-        const descriptor = Object.getOwnPropertyDescriptor(owner, methodName)
-        const method: unknown = descriptor?.value
-        if (methodName === 'constructor' || typeof method !== 'function') {
-          continue
-        }
-
-        const qualifiedMethod = `${namespace}.${methodName}`
-        // Calling with the original instance preserves injected handler dependencies.
-        registrations.set(qualifiedMethod, (params) => Reflect.apply(method, handler, [params]))
+    for (const methodName of handler[RpcHandlerMethods]) {
+      const method: unknown = Reflect.get(handler, methodName)
+      if (typeof method !== 'function') {
+        throw new Error(`JSON-RPC method "${namespace}.${methodName}" is not implemented`)
       }
+
+      const qualifiedMethod = `${namespace}.${methodName}`
+      // Calling with the original instance preserves injected handler dependencies.
+      registrations.set(qualifiedMethod, (params) => Reflect.apply(method, handler, [params]))
     }
 
     this.namespaces.add(namespace)

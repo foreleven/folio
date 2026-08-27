@@ -1,6 +1,6 @@
 import { Container } from 'inversify'
 import {
-  SYSTEM_RPC_NAMESPACE,
+  SYSTEM_RPC_DEFINITION,
   SystemRpcHandler
 } from '../../../shared/handlers/system-rpc-handler'
 import { DesktopRpcProxy, RpcProxy } from '../rpc/rpc-proxy'
@@ -13,7 +13,7 @@ export function createRendererContainer(): Container {
   container.bind<RpcProxy>(RpcProxy).toConstantValue(rpcProxy)
   container
     .bind<SystemRpcHandler>(SystemRpcHandler)
-    .toConstantValue(rpcProxy.createClient<SystemRpcHandler>(SYSTEM_RPC_NAMESPACE))
+    .toConstantValue(rpcProxy.createClient(SYSTEM_RPC_DEFINITION.namespace))
 
   return container
 }

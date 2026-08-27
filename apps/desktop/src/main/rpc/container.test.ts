@@ -29,5 +29,22 @@ describe('RPC dependency container', () => {
         id: 1
       })
     )
+
+    await expect(
+      firstServer.handleMessage(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'system.getInfo',
+          params: { unexpected: true },
+          id: 2
+        })
+      )
+    ).resolves.toBe(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        error: { code: -32602, message: 'Invalid params' },
+        id: 2
+      })
+    )
   })
 })

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SystemInfo } from '../../shared/handlers/system-rpc-handler'
-import type { JsonRpcParams } from '../../shared/rpc'
+import {
+  RpcHandlerMethods,
+  type JsonRpcParams,
+  type RegisteredRpcHandler
+} from '../../shared/rpc'
 import { JsonRpcError } from './errors'
 import { JsonRpcServer } from './server'
 
@@ -9,10 +13,14 @@ type TestRpcMethod = (params: JsonRpcParams | undefined) => unknown
 /** Registers a controllable system method for focused protocol tests. */
 function createServer(handle: TestRpcMethod = () => null): JsonRpcServer {
   const server = new JsonRpcServer()
-  server.register('system', {
+  const handler: RegisteredRpcHandler & {
+    getInfo(params?: JsonRpcParams): SystemInfo
+  } = {
+    [RpcHandlerMethods]: ['getInfo'],
     // Protocol failure tests deliberately return values outside the production result type.
     getInfo: (params?: JsonRpcParams) => handle(params) as SystemInfo
-  })
+  }
+  server.register('system', handler)
 
   return server
 }
@@ -30,8 +38,9 @@ afterEach(() => {
 })
 
 describe('JsonRpcServer', () => {
-  it('registers every handler method in one namespace and preserves this', async () => {
-    class TestSystemRpcHandler {
+  it('registers every declared handler method in one namespace and preserves this', async () => {
+    class TestSystemRpcHandler implements RegisteredRpcHandler {
+      public readonly [RpcHandlerMethods] = ['getInfo', 'helper']
       private readonly readiness = 'ready'
 
       /** Returns a contract-valid response while reading instance state. */
@@ -65,6 +74,37 @@ describe('JsonRpcServer', () => {
         JSON.stringify({ jsonrpc: '2.0', method: 'system.helper', id: 2 })
       )
     ).resolves.toBe(JSON.stringify({ jsonrpc: '2.0', result: 'ready', id: 2 }))
+  })
+
+  it('does not expose a public method omitted from handler metadata', async () => {
+    class TestSystemRpcHandler implements RegisteredRpcHandler {
+      public readonly [RpcHandlerMethods] = ['getInfo']
+
+      /** Returns the only remotely exposed result. */
+      public getInfo(): string {
+        return 'ready'
+      }
+
+      /** Represents local behavior that must stay outside the RPC surface. */
+      public helper(): string {
+        return 'private-to-process'
+      }
+    }
+
+    const server = new JsonRpcServer()
+    server.register('system', new TestSystemRpcHandler())
+
+    expect(
+      decode(
+        await server.handleMessage(
+          JSON.stringify({ jsonrpc: '2.0', method: 'system.helper', id: 1 })
+        )
+      )
+    ).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32601, message: 'Method not found' },
+      id: 1
+    })
   })
 
   it('does not expose inherited Object methods as RPC methods', async () => {
@@ -216,7 +256,10 @@ describe('JsonRpcServer', () => {
 
   it('rejects duplicate namespace registrations', () => {
     const server = new JsonRpcServer()
-    const handler = { getInfo: () => ({ platform: process.platform, version: 'test' }) }
+    const handler = {
+      [RpcHandlerMethods]: ['getInfo'],
+      getInfo: () => ({ platform: process.platform, version: 'test' })
+    }
     server.register('system', handler)
 
     expect(() => server.register('system', handler)).toThrow(

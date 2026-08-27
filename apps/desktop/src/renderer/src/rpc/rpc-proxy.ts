@@ -1,16 +1,18 @@
+import type { RpcClientNamespace } from '../../../shared/rpc'
+
 /** Stable DI token for the renderer's sole RPC service proxy. */
 export const RpcProxy = Symbol.for('folio.renderer.RpcProxy')
 
 /** Creates typed client implementations without knowing concrete RPC handlers. */
 export interface RpcProxy {
   /** Creates a typed client whose method calls are forwarded under one namespace. */
-  createClient<Client extends object>(namespace: string): Client
+  createClient<Client extends object>(namespace: RpcClientNamespace<Client>): Client
 }
 
 /** Maps injected service method calls onto the isolated preload RPC bridge. */
 export class DesktopRpcProxy implements RpcProxy {
   /** Creates a client that maps zero- or one-argument calls to namespace.method requests. */
-  public createClient<Client extends object>(namespace: string): Client {
+  public createClient<Client extends object>(namespace: RpcClientNamespace<Client>): Client {
     const client = new Proxy(Object.create(null) as object, {
       get: (_target, property) => {
         if (typeof property !== 'string' || property === 'then') {

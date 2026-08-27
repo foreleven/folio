@@ -1,3 +1,5 @@
+import { defineRpcClient, type RpcHandlerToken } from '../rpc'
+
 /** Application metadata returned by the system RPC handler. */
 export interface SystemInfo {
   platform:
@@ -15,14 +17,18 @@ export interface SystemInfo {
   version: string
 }
 
-/** JSON-RPC namespace shared by both process composition roots. */
-export const SYSTEM_RPC_NAMESPACE = 'system'
-
 /** Stable DI token for the system RPC handler in both process containers. */
-export const SystemRpcHandler = Symbol.for('folio.rpc.SystemRpcHandler')
+export const SystemRpcHandler = Symbol.for(
+  'folio.rpc.SystemRpcHandler'
+) as RpcHandlerToken<SystemRpcHandler>
 
 /** Client/server contract for methods exposed under the system namespace. */
 export interface SystemRpcHandler {
-  /** Returns current application metadata locally or through the renderer proxy. */
-  getInfo(): SystemInfo | Promise<SystemInfo>
+  /** Returns current application metadata through an asynchronous RPC boundary. */
+  getInfo(): Promise<SystemInfo>
 }
+
+/** Namespace and public method metadata shared by both process composition roots. */
+export const SYSTEM_RPC_DEFINITION = defineRpcClient<SystemRpcHandler>('system', {
+  getInfo: true
+})

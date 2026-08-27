@@ -6,7 +6,7 @@ import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
-  const systemRpcHandler = useRpcClient<SystemRpcHandler>(SystemRpcHandler)
+  const systemRpcHandler = useRpcClient(SystemRpcHandler)
   const [runtime, setRuntime] = useState('Not checked')
 
   /** Loads process-owned metadata through the injected RPC handler. */

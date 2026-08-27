@@ -1,5 +1,6 @@
 import { createContext, useContext, type ReactNode } from 'react'
-import type { Container, ServiceIdentifier } from 'inversify'
+import type { Container } from 'inversify'
+import type { RpcHandlerToken } from '../../../shared/rpc'
 
 const RpcClientContext = createContext<Container | undefined>(undefined)
 
@@ -21,7 +22,7 @@ export function RpcClientProvider({
 }
 
 /** Resolves one RPC handler by token using the lifecycle configured in the container. */
-export function useRpcClient<Client>(identifier: ServiceIdentifier<Client>): Client {
+export function useRpcClient<Client extends object>(identifier: RpcHandlerToken<Client>): Client {
   const container = useContext(RpcClientContext)
   if (!container) {
     throw new Error('useRpcClient must be used within RpcClientProvider')
