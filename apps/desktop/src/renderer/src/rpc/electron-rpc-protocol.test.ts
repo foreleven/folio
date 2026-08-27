@@ -58,7 +58,95 @@ describe('Electron Effect RPC client protocol', () => {
     }).pipe(Effect.provide(TestProtocol), Effect.scoped)
 
     await expect(Effect.runPromise(program)).resolves.toEqual(response)
-    expect(sent).toEqual([{ clientId: 9, data: JSON.stringify(request) }])
+    expect(sent).toEqual([
+      { clientId: 9, data: JSON.stringify(request) },
+      { clientId: 9, data: JSON.stringify({ _tag: 'Eof' }) }
+    ])
     expect(listener).toBeUndefined()
+  })
+
+  it('rejects malformed inner responses instead of routing unsafe data', async () => {
+    let listener: ((frame: ElectronRpcFrame) => void) | undefined
+    const bridge: ElectronRpcBridge = {
+      send: () => undefined,
+      listen: (nextListener) => {
+        listener = nextListener
+      },
+      clearListener: () => {
+        listener = undefined
+      }
+    }
+    const TestProtocol = ElectronRpcClientProtocolLive.pipe(
+      Layer.provide(Layer.succeed(ElectronRpcBridgeService)(bridge)),
+      Layer.provide(RpcSerialization.layerJson)
+    )
+    const program = Effect.gen(function*() {
+      const protocol = yield* RpcClient.Protocol
+      const received = yield* Deferred.make<RpcMessage.FromServerEncoded>()
+      yield* Effect.forkScoped(
+        protocol.run(4, (message) => Deferred.succeed(received, message).pipe(Effect.asVoid))
+      )
+
+      yield* Effect.yieldNow
+      listener?.({ clientId: 4, data: JSON.stringify({ _tag: 'Exit' }) })
+      return yield* Deferred.await(received)
+    }).pipe(Effect.provide(TestProtocol), Effect.scoped)
+
+    const message = await Effect.runPromise(program)
+    expect(message._tag).toBe('ClientProtocolError')
+  })
+
+  it('processes responses sequentially for one renderer runtime', async () => {
+    let listener: ((frame: ElectronRpcFrame) => void) | undefined
+    const bridge: ElectronRpcBridge = {
+      send: () => undefined,
+      listen: (nextListener) => {
+        listener = nextListener
+      },
+      clearListener: () => {
+        listener = undefined
+      }
+    }
+    const TestProtocol = ElectronRpcClientProtocolLive.pipe(
+      Layer.provide(Layer.succeed(ElectronRpcBridgeService)(bridge)),
+      Layer.provide(RpcSerialization.layerJson)
+    )
+    const program = Effect.gen(function*() {
+      const protocol = yield* RpcClient.Protocol
+      const firstStarted = yield* Deferred.make<void>()
+      const releaseFirst = yield* Deferred.make<void>()
+      const secondReceived = yield* Deferred.make<void>()
+      yield* Effect.forkScoped(
+        protocol.run(5, (message) =>
+          message._tag === 'Chunk'
+            ? Deferred.succeed(firstStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseFirst)),
+                Effect.asVoid
+              )
+            : Deferred.succeed(secondReceived, undefined).pipe(Effect.asVoid)
+        )
+      )
+
+      yield* Effect.yieldNow
+      listener?.({
+        clientId: 5,
+        data: JSON.stringify({ _tag: 'Chunk', requestId: 1, values: ['first'] })
+      })
+      listener?.({
+        clientId: 5,
+        data: JSON.stringify({
+          _tag: 'Exit',
+          requestId: 1,
+          exit: { _tag: 'Success', value: 'done' }
+        })
+      })
+      yield* Deferred.await(firstStarted)
+      const overtookFirst = yield* Deferred.isDone(secondReceived)
+      yield* Deferred.succeed(releaseFirst, undefined)
+      yield* Deferred.await(secondReceived)
+      return overtookFirst
+    }).pipe(Effect.provide(TestProtocol), Effect.scoped)
+
+    await expect(Effect.runPromise(program)).resolves.toBe(false)
   })
 })

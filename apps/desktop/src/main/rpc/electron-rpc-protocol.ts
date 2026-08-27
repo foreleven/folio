@@ -8,8 +8,10 @@ import {
 import {
   ELECTRON_RPC_REQUEST_CHANNEL,
   ELECTRON_RPC_RESPONSE_CHANNEL,
+  type ElectronRpcFrame,
   isElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
+import { isElectronRpcClientMessage } from '../../shared/rpc/electron-rpc-message'
 
 interface ElectronRpcConnection {
   readonly rendererClientId: number
@@ -21,20 +23,9 @@ interface TrackedWebContents {
   readonly onDestroyed: () => void
 }
 
-/** Narrows decoded transport data to messages accepted by an Effect RPC server. */
-function isClientMessage(value: unknown): value is RpcMessage.FromClientEncoded {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
-  }
-
-  const tag = (value as Record<string, unknown>)._tag
-  return (
-    tag === 'Request' ||
-    tag === 'Ack' ||
-    tag === 'Interrupt' ||
-    tag === 'Ping' ||
-    tag === 'Eof'
-  )
+interface IncomingFrame {
+  readonly frame: ElectronRpcFrame
+  readonly sender: WebContents
 }
 
 /** Effect RPC server Protocol implemented over Electron's duplex IPC channels. */
@@ -43,6 +34,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
     const serialization = yield* RpcSerialization.RpcSerialization
     const parser = serialization.makeUnsafe()
     const disconnects = yield* Queue.unbounded<number>()
+    const incoming = yield* Queue.unbounded<IncomingFrame>()
     const connections = new Map<number, ElectronRpcConnection>()
     const connectionIds = new Map<string, number>()
     const trackedWebContents = new Map<number, TrackedWebContents>()
@@ -56,7 +48,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
         }
         connections.delete(clientId)
         connectionIds.delete(`${senderId}:${connection.rendererClientId}`)
-        Effect.runFork(Queue.offer(disconnects, clientId).pipe(Effect.asVoid))
+        Queue.offerUnsafe(disconnects, clientId)
       }
       trackedWebContents.delete(senderId)
     }
@@ -97,30 +89,37 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
       return clientId
     }
 
-    /** Decodes one framed renderer message and feeds it into Effect RPC. */
+    /** Queues one validated outer frame; the scoped consumer preserves IPC order. */
     const onRequest = (event: IpcMainEvent, value: unknown): void => {
       if (!isElectronRpcFrame(value)) {
         return
       }
+      Queue.offerUnsafe(incoming, { frame: value, sender: event.sender })
+    }
 
-      const receive = Effect.try({
-        try: () => parser.decode(value.data),
+    /** Decodes one queued frame and feeds only valid inner messages into Effect RPC. */
+    const receive = ({ frame, sender }: IncomingFrame) =>
+      Effect.try({
+        try: () => parser.decode(frame.data),
         catch: (cause) => cause
       }).pipe(
         Effect.flatMap((messages) =>
           Effect.forEach(messages, (message) => {
-            if (!isClientMessage(message)) {
+            if (!isElectronRpcClientMessage(message)) {
               return Effect.logWarning('Ignored invalid Electron RPC client message')
             }
-            return writeRequest(getClientId(event.sender, value.clientId), message)
+            return writeRequest(getClientId(sender, frame.clientId), message)
           })
         ),
         Effect.catch((cause) => Effect.logWarning('Failed to decode Electron RPC request', cause)),
         Effect.asVoid
       )
 
-      Effect.runFork(receive)
-    }
+    // A single scoped consumer gives control frames deterministic ordering and
+    // guarantees that no detached receive fiber survives protocol shutdown.
+    yield* Effect.forkScoped(
+      Effect.forever(Effect.flatMap(Queue.take(incoming), receive))
+    )
 
     yield* Effect.acquireRelease(
       Effect.sync(() => ipcMain.on(ELECTRON_RPC_REQUEST_CHANNEL, onRequest)),
