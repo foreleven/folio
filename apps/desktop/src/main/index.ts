@@ -59,6 +59,8 @@ function createWindow(): void {
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    // Development starts with diagnostics visible; packaged windows remain unaffected.
+    mainWindow.webContents.openDevTools()
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
