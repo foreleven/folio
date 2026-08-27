@@ -10,7 +10,7 @@ function createServer(handle: TestRpcMethod = () => null): JsonRpcServer {
   const server = new JsonRpcServer()
   server.register('system', {
     // Protocol failure tests deliberately return values outside the production result type.
-    getInfo: (params: undefined) => handle(params) as SystemInfo
+    getInfo: (params?: JsonRpcParams) => handle(params) as SystemInfo
   })
 
   return server

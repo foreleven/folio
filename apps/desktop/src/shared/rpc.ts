@@ -1,6 +1,15 @@
-import type { SystemInfo } from './services/system-service'
+import type {
+  RpcMethod,
+  RpcMethodDefinitions
+} from './services/rpc-services'
 
 export type { SystemInfo } from './services/system-service'
+export type {
+  RpcMethod,
+  RpcMethodDefinitions,
+  RpcNamespace,
+  RpcNamespaceHandler
+} from './services/rpc-services'
 
 /** The single Electron IPC channel carrying serialized JSON-RPC messages. */
 export const RPC_CHANNEL = 'folio:rpc'
@@ -39,37 +48,6 @@ export interface JsonRpcFailure {
 }
 
 export type JsonRpcResponse<Result = unknown> = JsonRpcSuccess<Result> | JsonRpcFailure
-
-/** Transport method map used by main dispatch and the isolated preload bridge. */
-export interface RpcMethodDefinitions {
-  'system.getInfo': {
-    params: undefined
-    result: SystemInfo
-  }
-}
-
-export type RpcMethod = keyof RpcMethodDefinitions
-
-/** Runtime method allowlist kept type-checked against the renderer RPC contract. */
-export const RPC_METHODS = {
-  'system.getInfo': true
-} as const satisfies Record<RpcMethod, true>
-
-/** Namespace prefixes represented by the shared RPC method contract. */
-export type RpcNamespace = RpcMethod extends `${infer Namespace}.${string}`
-  ? Namespace
-  : never
-
-/** Methods a namespace handler must implement, derived from the shared RPC contract. */
-export type RpcNamespaceHandler<Namespace extends RpcNamespace> = {
-  [Method in RpcMethod as Method extends `${Namespace}.${infer MethodName}`
-    ? MethodName
-    : never]: (
-    params: RpcMethodDefinitions[Method]['params']
-  ) =>
-    | RpcMethodDefinitions[Method]['result']
-    | Promise<RpcMethodDefinitions[Method]['result']>
-}
 
 export interface DesktopRpcClient {
   /** Sends one JSON-RPC request and rejects with RpcClientError for protocol failures. */

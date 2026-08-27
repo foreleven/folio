@@ -1,10 +1,8 @@
-import type { SystemService } from '../../../shared/services/system-service'
-
-interface RendererRpcServices {
-  system: SystemService
-}
-
-type RpcNamespace = keyof RendererRpcServices
+import {
+  RPC_SERVICE_METHODS,
+  type RpcNamespace,
+  type RpcServices
+} from '../../../shared/services/rpc-services'
 
 /** Stable DI token for the renderer's sole RPC service proxy. */
 export const RpcProxy = Symbol.for('folio.renderer.RpcProxy')
@@ -14,30 +12,29 @@ export interface RpcProxy {
   /** Returns the cached client implementation for one server namespace. */
   getService<Namespace extends RpcNamespace>(
     namespace: Namespace
-  ): RendererRpcServices[Namespace]
+  ): RpcServices[Namespace]
 }
 
 /** Maps injected service method calls onto the isolated preload RPC bridge. */
 export class DesktopRpcProxy implements RpcProxy {
-  private readonly services = new Map<RpcNamespace, object>()
-
-  /** Returns one proxy per namespace so every injection shares the same service identity. */
+  /** Creates a typed service whose calls are restricted to the shared runtime route registry. */
   public getService<Namespace extends RpcNamespace>(
     namespace: Namespace
-  ): RendererRpcServices[Namespace] {
-    const existingService = this.services.get(namespace)
-    if (existingService) {
-      return existingService as RendererRpcServices[Namespace]
-    }
-
+  ): RpcServices[Namespace] {
+    const methods: Readonly<Record<string, string>> = RPC_SERVICE_METHODS[namespace]
     const service = new Proxy(Object.create(null) as object, {
       get: (_target, property) => {
-        if (typeof property !== 'string' || property === 'then') {
+        if (typeof property !== 'string') {
+          return undefined
+        }
+
+        const method = methods[property]
+        if (!method) {
+          // Only registered service methods are exposed, which also prevents thenable proxies.
           return undefined
         }
 
         return (...args: readonly unknown[]): Promise<unknown> => {
-          const method = `${namespace}.${property}`
           if (args.length === 0) {
             return window.desktop.request(method)
           }
@@ -52,7 +49,6 @@ export class DesktopRpcProxy implements RpcProxy {
       }
     })
 
-    this.services.set(namespace, service)
-    return service as RendererRpcServices[Namespace]
+    return service as RpcServices[Namespace]
   }
 }

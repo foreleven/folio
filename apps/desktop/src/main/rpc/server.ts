@@ -8,7 +8,7 @@ import type {
   RpcNamespace,
   RpcNamespaceHandler
 } from '../../shared/rpc'
-import { RPC_METHODS } from '../../shared/rpc'
+import { RPC_SERVICE_METHODS } from '../../shared/services/rpc-services'
 import { JsonRpcError } from './errors'
 
 const PARSE_ERROR = -32700
@@ -50,14 +50,10 @@ export class JsonRpcServer implements RpcServer {
       throw new Error(`JSON-RPC namespace "${namespace}" is already registered`)
     }
 
-    const methodPrefix = `${namespace}.`
     const registrations = new Map<string, RegisteredRpcMethod>()
-    for (const qualifiedMethod of Object.keys(RPC_METHODS)) {
-      if (!qualifiedMethod.startsWith(methodPrefix)) {
-        continue
-      }
-
-      const methodName = qualifiedMethod.slice(methodPrefix.length)
+    for (const [methodName, qualifiedMethod] of Object.entries(
+      RPC_SERVICE_METHODS[namespace]
+    )) {
       const method: unknown = Reflect.get(handler, methodName)
       if (typeof method !== 'function') {
         throw new Error(`JSON-RPC method "${qualifiedMethod}" is not implemented`)
