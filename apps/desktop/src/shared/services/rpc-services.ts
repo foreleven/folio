@@ -8,7 +8,13 @@ export interface RpcServices {
 export type RpcNamespace = Extract<keyof RpcServices, string>
 
 type RpcServiceMethodName<Namespace extends RpcNamespace> = Extract<
-  keyof RpcServices[Namespace],
+  {
+    [Method in keyof RpcServices[Namespace]]: RpcServices[Namespace][Method] extends (
+      ...args: never[]
+    ) => unknown
+      ? Method
+      : never
+  }[keyof RpcServices[Namespace]],
   string
 >
 
@@ -56,5 +62,12 @@ export type RpcMethodDefinitions = {
 }
 
 /** Server implementation required when registering one service namespace. */
-export type RpcNamespaceHandler<Namespace extends RpcNamespace> =
-  RpcServices[Namespace]
+export type RpcNamespaceHandler<Namespace extends RpcNamespace> = {
+  [Method in RpcServiceMethodName<Namespace>]: RpcServices[Namespace][Method] extends (
+    ...args: infer Args
+  ) => infer Result
+    ? (
+        params: Args extends [] ? undefined : Args extends [infer Params] ? Params : never
+      ) => Result
+    : never
+}

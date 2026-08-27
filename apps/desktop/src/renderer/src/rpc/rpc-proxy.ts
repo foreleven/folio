@@ -9,7 +9,7 @@ export const RpcProxy = Symbol.for('folio.renderer.RpcProxy')
 
 /** Creates typed client implementations for registered server namespaces. */
 export interface RpcProxy {
-  /** Returns the cached client implementation for one server namespace. */
+  /** Creates a typed client implementation for one registered server namespace. */
   getService<Namespace extends RpcNamespace>(
     namespace: Namespace
   ): RpcServices[Namespace]
