@@ -15,6 +15,9 @@ export interface SystemInfo {
   version: string
 }
 
+/** JSON-RPC namespace shared by both process composition roots. */
+export const SYSTEM_RPC_NAMESPACE = 'system'
+
 /** Stable DI token for the system RPC handler in both process containers. */
 export const SystemRpcHandler = Symbol.for('folio.rpc.SystemRpcHandler')
 

@@ -1,5 +1,6 @@
 import { inject, injectable } from 'inversify'
 import {
+  SYSTEM_RPC_NAMESPACE,
   SystemRpcHandler,
   type SystemInfo
 } from '../../../shared/handlers/system-rpc-handler'
@@ -18,7 +19,7 @@ export class DefaultSystemRpcHandler implements SystemRpcHandler {
     @inject(SystemService) private readonly systemService: SystemService
   ) {
     // A namespace is registered once so new system methods stay on this cohesive handler.
-    rpcServer.register('system', this)
+    rpcServer.register(SYSTEM_RPC_NAMESPACE, this)
   }
 
   /** Returns application metadata through the process-owned system service. */
