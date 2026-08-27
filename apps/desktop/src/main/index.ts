@@ -1,13 +1,22 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
-import {
-  createMainRpcRuntime,
-  startMainRpcRuntime
-} from './rpc/runtime'
+import { createMainRuntime, startMainRuntime, type MainApplication } from './runtime'
 
-const rpcRuntime = createMainRpcRuntime()
-void startMainRpcRuntime(rpcRuntime).catch((error: unknown) => {
-  console.error('Failed to start Effect RPC runtime', error)
+const mainRuntime = createMainRuntime()
+void startMainRuntime(mainRuntime, {
+  createWindow,
+  activate: () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
+  },
+  windowAllClosed: () => {
+    if (process.platform !== 'darwin') {
+      app.quit()
+    }
+  }
+} satisfies MainApplication).catch((error: unknown) => {
+  console.error('Failed to start main Effect runtime', error)
 })
 
 /**
@@ -68,23 +77,3 @@ function createWindow(): void {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
-
-app.whenReady().then(() => {
-  createWindow()
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-    }
-  })
-})
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
-
-app.on('before-quit', () => {
-  void rpcRuntime.dispose()
-})

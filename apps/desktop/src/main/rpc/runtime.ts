@@ -1,4 +1,4 @@
-import { Effect, Layer, ManagedRuntime } from 'effect'
+import { Layer } from 'effect'
 import { RpcSerialization, RpcServer } from 'effect/unstable/rpc'
 import { SystemRpcs } from '../../shared/rpc/system-rpc'
 import { SystemService } from '../services/system-service'
@@ -22,15 +22,3 @@ const RpcDependenciesLive = Layer.merge(
 export const MainRpcLive = RpcServer.layer(SystemRpcs).pipe(
   Layer.provide(RpcDependenciesLive)
 )
-
-export type MainRpcRuntime = ManagedRuntime.ManagedRuntime<never, never>
-
-/** Creates the scoped runtime that owns the main-process RPC server fiber. */
-export function createMainRpcRuntime(): MainRpcRuntime {
-  return ManagedRuntime.make(MainRpcLive)
-}
-
-/** Forces lazy Layer construction so Electron IPC begins accepting requests. */
-export function startMainRpcRuntime(runtime: MainRpcRuntime): Promise<void> {
-  return runtime.runPromise(Effect.void)
-}
