@@ -2,13 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ELECTRON_RPC_REQUEST_CHANNEL } from '../shared/rpc/electron-rpc'
 
 const electronMocks = vi.hoisted(() => ({
+  appListeners: new Map<string, () => void>(),
   createBrowserWindow: vi.fn(),
+  destroyWindow: vi.fn(),
+  isWindowDestroyed: vi.fn(() => false),
   loadFile: vi.fn(),
   loadURL: vi.fn(),
   openDevTools: vi.fn(),
   registerIpcListener: vi.fn(),
+  removeAppListener: vi.fn((event: string) => {
+    electronMocks.appListeners.delete(event)
+  }),
   removeIpcListener: vi.fn(),
-  onAppEvent: vi.fn(),
+  onAppEvent: vi.fn((event: string, listener: () => void) => {
+    electronMocks.appListeners.set(event, listener)
+  }),
   onWebContentsEvent: vi.fn(),
   openExternal: vi.fn(),
   setWindowOpenHandler: vi.fn(),
@@ -18,6 +26,8 @@ const electronMocks = vi.hoisted(() => ({
 
 vi.mock('electron', () => {
   const mainWindow = {
+    destroy: electronMocks.destroyWindow,
+    isDestroyed: electronMocks.isWindowDestroyed,
     loadFile: electronMocks.loadFile,
     loadURL: electronMocks.loadURL,
     once: electronMocks.once,
@@ -32,13 +42,15 @@ vi.mock('electron', () => {
     electronMocks.createBrowserWindow(options)
     return mainWindow
   })
-  Object.assign(BrowserWindow, { getAllWindows: () => [mainWindow] })
 
   return {
     app: {
+      getAppPath: () => '/test/folio',
       getVersion: () => '0.1.0',
+      isPackaged: false,
       on: electronMocks.onAppEvent,
       quit: vi.fn(),
+      removeListener: electronMocks.removeAppListener,
       whenReady: () => Promise.resolve()
     },
     BrowserWindow,
@@ -57,8 +69,21 @@ async function loadMain(): Promise<void> {
   await Promise.resolve()
 }
 
+/** Completes the running program through Electron's normal shutdown event. */
+async function shutdownMain(): Promise<void> {
+  await vi.waitFor(() =>
+    expect(electronMocks.appListeners.has('before-quit')).toBe(true)
+  )
+  electronMocks.appListeners.get('before-quit')?.()
+  await vi.waitFor(() =>
+    expect(electronMocks.removeIpcListener).toHaveBeenCalledOnce()
+  )
+}
+
 beforeEach(() => {
+  electronMocks.appListeners.clear()
   vi.clearAllMocks()
+  electronMocks.isWindowDestroyed.mockReturnValue(false)
 })
 
 afterEach(() => {
@@ -86,6 +111,9 @@ describe('desktop main window', () => {
         })
       })
     )
+    await shutdownMain()
+    expect(electronMocks.destroyWindow).toHaveBeenCalledOnce()
+    expect(electronMocks.removeAppListener).toHaveBeenCalledTimes(3)
   })
 
   it('keeps DevTools closed when loading the packaged renderer', async () => {
@@ -95,5 +123,6 @@ describe('desktop main window', () => {
 
     expect(electronMocks.loadFile).toHaveBeenCalledOnce()
     expect(electronMocks.openDevTools).not.toHaveBeenCalled()
+    await shutdownMain()
   })
 })

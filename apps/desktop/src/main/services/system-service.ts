@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from 'effect'
-import { app } from 'electron'
 import type { SystemInfo } from '../../shared/rpc/system-rpc'
+import { ElectronApp } from '../electron/ElectronApp'
 
 /** Effect service for process-owned application metadata. */
 export class SystemService extends Context.Service<
@@ -11,10 +11,19 @@ export class SystemService extends Context.Service<
   }
 >()('folio/services/SystemService') {
   /** Live adapter backed by Electron's application object and Node platform. */
-  static readonly layer = Layer.succeed(SystemService)({
-    getInfo: Effect.sync(() => ({
-      platform: process.platform,
-      version: app.getVersion()
-    }))
-  })
+  static readonly layer = Layer.effect(
+    SystemService,
+    Effect.gen(function*() {
+      const electronApp = yield* ElectronApp
+
+      return SystemService.of({
+        getInfo: electronApp.metadata.pipe(
+          Effect.map(({ version }) => ({
+            platform: process.platform,
+            version
+          }))
+        )
+      })
+    })
+  )
 }
