@@ -31,7 +31,7 @@ export const checkRuntimeStreamAtom = RendererAtomRuntime.atom(
       const registry = yield* AtomRegistry.AtomRegistry
       registry.set(runtimeStateAtom, { _tag: 'Checking' })
 
-      const info = yield* SystemRpcClient.use(SystemRpcClient.getInfo)
+      const info = yield* SystemRpcClient.getInfo
       registry.set(runtimeStateAtom, {
         _tag: 'Available',
         platform: info.platform,

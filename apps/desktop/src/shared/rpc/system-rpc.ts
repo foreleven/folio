@@ -39,9 +39,8 @@ export class SystemRpcClient extends Context.Service<
   SystemRpcClient,
   RpcClient.FromGroup<typeof SystemRpcs, RpcClientError.RpcClientError>
 >()('folio/rpc/SystemRpcClient') {
-  /** Retrieves system metadata without exposing the RPC wire tag to callers. */
-  static readonly getInfo = (client: SystemRpcClient['Service']) =>
-    client[GetSystemInfo._tag]()
+  /** Retrieves system metadata without exposing client lookup or the RPC wire tag to callers. */
+  static readonly getInfo = SystemRpcClient.use((client) => client[GetSystemInfo._tag]())
 
   /** Builds the generated client from the active Effect RPC protocol. */
   static readonly layer = Layer.effect(SystemRpcClient, RpcClient.make(SystemRpcs))
