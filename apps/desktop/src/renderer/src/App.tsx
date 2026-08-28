@@ -1,7 +1,6 @@
 import { useAtomMount, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui'
 import {
-  checkRuntimeAtom,
   checkRuntimeThrottleAtom,
   requestRuntimeCheckAtom,
   runtimeStateAtom
@@ -11,7 +10,6 @@ import '@folio/ui/styles.css'
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
   useAtomMount(checkRuntimeThrottleAtom)
-  useAtomMount(checkRuntimeAtom)
   const runtimeState = useAtomValue(runtimeStateAtom)
   const checkRuntime = useAtomSet(requestRuntimeCheckAtom)
 

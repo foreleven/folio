@@ -50,6 +50,18 @@ const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(func
   return info
 })
 
+const runCheckRuntimeAction = (registry: AtomRegistry.AtomRegistry) =>
+  runCheckRuntime(registry).pipe(
+    // A canceled request must not leave the independent value atom waiting.
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (registry.get(runtimeStateAtom)._tag === 'Checking') {
+          registry.set(runtimeStateAtom, { _tag: 'Unavailable' })
+        }
+      })
+    )
+  )
+
 /**
  * Async action atom for checking runtime metadata.
  *
@@ -58,17 +70,7 @@ const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(func
  * `useAtomSet` or use the throttled click entrypoint below.
  */
 export const checkRuntimeAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) => runCheckRuntime(get.registry).pipe(
-    // Keep the value atom coherent if Atom.fn interrupts a running request.
-    Effect.ensuring(
-      Effect.sync(() => {
-        if (get.registry.get(runtimeStateAtom)._tag === 'Checking') {
-          // FnContext writes are scoped to the action and may already be closed.
-          get.registry.set(runtimeStateAtom, { _tag: 'Unavailable' })
-        }
-      })
-    )
-  )
+  (_request: void, get: Atom.FnContext) => runCheckRuntimeAction(get.registry)
 )
 
 const checkRuntimeRequests = (get: Atom.AtomContext) =>
@@ -94,7 +96,10 @@ export const checkRuntimeThrottleAtom = RendererAtomRuntime.atom(
     Stream.runForEach(checkRuntimeRequests(get), () =>
       Effect.gen(function*() {
         const registry = yield* AtomRegistry.AtomRegistry
-        registry.set(checkRuntimeAtom, undefined)
+        yield* runCheckRuntimeAction(registry).pipe(
+          // A failed request updates runtimeStateAtom but must not stop the click consumer.
+          Effect.catchCause(() => Effect.void)
+        )
       })
     )
 )
