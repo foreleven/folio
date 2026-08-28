@@ -1,3 +1,4 @@
+import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -71,6 +72,14 @@ describe('renderer Effect atoms', () => {
         }
       })
     })
+
+    await vi.waitFor(() =>
+      expect(registry.get(runtimeStateAtom)).toEqual({ _tag: 'Unavailable' })
+    )
+
+    registry.set(checkRuntimeAtom, undefined)
+    await vi.waitFor(() => expect(sent).toHaveLength(3))
+    registry.set(checkRuntimeAtom, Atom.Interrupt)
 
     await vi.waitFor(() =>
       expect(registry.get(runtimeStateAtom)).toEqual({ _tag: 'Unavailable' })

@@ -43,8 +43,9 @@ export const checkRuntimeAtom = RendererAtomRuntime.fn(
     // Keep the value atom coherent if Atom.fn interrupts a running request.
     Effect.ensuring(
       Effect.sync(() => {
-        if (get(runtimeStateAtom)._tag === 'Checking') {
-          get.set(runtimeStateAtom, { _tag: 'Unavailable' })
+        if (get.registry.get(runtimeStateAtom)._tag === 'Checking') {
+          // FnContext writes are scoped to the action and may already be closed.
+          get.registry.set(runtimeStateAtom, { _tag: 'Unavailable' })
         }
       })
     )
