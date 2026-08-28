@@ -20,8 +20,5 @@ export class SystemRpcClient extends AtomRpc.Service<SystemRpcClient>()(
     protocol: SystemRpcProtocolLive
   }
 ) {
-  /** Retrieves system metadata without exposing the RPC tag to atom logic. */
-  static readonly getInfo = SystemRpcClient.use((client) =>
-    client(GetSystemInfo._tag, undefined)
-  )
+  static readonly getSystemInfo = SystemRpcClient.query(GetSystemInfo._tag, void 0, {})
 }

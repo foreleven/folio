@@ -53,3 +53,15 @@ export const makeThrottledAction = <R, A, B, E>(
       )
   )
 }
+
+/** Creates a throttled writable action that refreshes any readable atom. */
+export const makeThrottledRefresh = <R, A>(
+  runtime: Atom.AtomRuntime<R>,
+  atom: Atom.Atom<A>,
+  options: ThrottleOptions
+) =>
+  makeThrottledAction(
+    runtime,
+    (_value: void, registry) => Effect.sync(() => registry.refresh(atom)),
+    options
+  )

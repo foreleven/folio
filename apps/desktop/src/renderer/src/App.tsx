@@ -1,21 +1,19 @@
 import { useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui'
-import {
-  requestSystemInfoAtom,
-  systemInfoStateAtom
-} from './atoms/system-info'
+import { requestSystemInfoAtom } from './atoms/system-info'
+import { SystemRpcClient } from './rpc/system-rpc'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
-  const systemInfoState = useAtomValue(systemInfoStateAtom)
+  const systemInfoState = useAtomValue(SystemRpcClient.getSystemInfo)
   const requestSystemInfo = useAtomSet(requestSystemInfoAtom)
 
-  const systemInfoLabel = systemInfoState._tag === 'Available'
-    ? `${systemInfoState.platform} · v${systemInfoState.version}`
-    : systemInfoState._tag === 'Checking'
+  const systemInfoLabel = systemInfoState._tag === 'Success'
+    ? `${systemInfoState.value.platform} · v${systemInfoState.value.version}`
+    : systemInfoState.waiting
     ? 'Checking…'
-    : systemInfoState._tag === 'Unavailable'
+    : systemInfoState._tag === 'Failure'
     ? 'Unavailable'
     : 'Not checked'
 
@@ -32,7 +30,7 @@ export function App(): React.JSX.Element {
           <Button
             onClick={() => requestSystemInfo()}
           >
-            {systemInfoState._tag === 'Checking' ? 'Checking…' : 'Check platform'}
+            {systemInfoState.waiting ? 'Checking…' : 'Check platform'}
           </Button>
           <code>{systemInfoLabel}</code>
         </div>

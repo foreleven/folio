@@ -5,9 +5,9 @@ import type {
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
 import {
-  requestSystemInfoAtom,
-  systemInfoStateAtom
+  requestSystemInfoAtom
 } from './atoms/system-info'
+import { SystemRpcClient } from './rpc/system-rpc'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -29,11 +29,8 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    registry.mount(systemInfoStateAtom)
+    const releaseQuery = registry.mount(SystemRpcClient.getSystemInfo)
     const releaseRequests = registry.mount(requestSystemInfoAtom)
-    registry.set(requestSystemInfoAtom, undefined)
-    registry.set(requestSystemInfoAtom, undefined)
-    registry.set(requestSystemInfoAtom, undefined)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -51,52 +48,53 @@ describe('renderer Effect atoms', () => {
     })
 
     await vi.waitFor(() =>
-      expect(registry.get(systemInfoStateAtom)).toEqual({
-        _tag: 'Available',
-        platform: 'darwin',
-        version: '1.2.3'
+      expect(registry.get(SystemRpcClient.getSystemInfo)).toMatchObject({
+        _tag: 'Success',
+        value: { platform: 'darwin', version: '1.2.3' },
+        waiting: false
       })
     )
 
-    // The first burst is throttled to one RPC request.
-    expect(sent).toHaveLength(1)
-
-    // Once the one-second window expires, the next click is allowed through.
-    await new Promise((resolve) => setTimeout(resolve, 1100))
+    registry.set(requestSystemInfoAtom, undefined)
+    registry.set(requestSystemInfoAtom, undefined)
     registry.set(requestSystemInfoAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
-    const nextRequest = sent[1]
+    const refreshedRequest = sent[1]
+    const refreshedMessage = JSON.parse(refreshedRequest.data) as { readonly id: string | number }
+    listener?.({
+      clientId: refreshedRequest.clientId,
+      data: JSON.stringify({
+        _tag: 'Exit',
+        requestId: refreshedMessage.id,
+        exit: {
+          _tag: 'Success',
+          value: { platform: 'darwin', version: '1.2.4' }
+        }
+      })
+    })
+
+    await vi.waitFor(() =>
+      expect(registry.get(SystemRpcClient.getSystemInfo)).toMatchObject({
+        _tag: 'Success',
+        value: { platform: 'darwin', version: '1.2.4' },
+        waiting: false
+      })
+    )
+
+    // The click burst refreshes the query only once.
+    expect(sent).toHaveLength(2)
+
+    // Once the one-second window expires, the next refresh is allowed through.
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    registry.set(requestSystemInfoAtom, undefined)
+    await vi.waitFor(() => expect(sent).toHaveLength(3))
+    const nextRequest = sent[2]
     const nextMessage = JSON.parse(nextRequest.data) as { readonly id: string | number }
     listener?.({
       clientId: nextRequest.clientId,
       data: JSON.stringify({
         _tag: 'Exit',
         requestId: nextMessage.id,
-        exit: {
-          _tag: 'Success',
-          value: { platform: 'darwin', version: '1.2.3' }
-        }
-      })
-    })
-
-    await vi.waitFor(() =>
-      expect(registry.get(systemInfoStateAtom)).toEqual({
-        _tag: 'Available',
-        platform: 'darwin',
-        version: '1.2.3'
-      })
-    )
-
-    await new Promise((resolve) => setTimeout(resolve, 1100))
-    registry.set(requestSystemInfoAtom, undefined)
-    await vi.waitFor(() => expect(sent).toHaveLength(3))
-    const failedRequest = sent[2]
-    const failedMessage = JSON.parse(failedRequest.data) as { readonly id: string | number }
-    listener?.({
-      clientId: failedRequest.clientId,
-      data: JSON.stringify({
-        _tag: 'Exit',
-        requestId: failedMessage.id,
         exit: {
           _tag: 'Failure',
           cause: [{ _tag: 'Fail', error: { message: 'system unavailable' } }]
@@ -105,10 +103,14 @@ describe('renderer Effect atoms', () => {
     })
 
     await vi.waitFor(() =>
-      expect(registry.get(systemInfoStateAtom)).toEqual({ _tag: 'Unavailable' })
+      expect(registry.get(SystemRpcClient.getSystemInfo)).toMatchObject({
+        _tag: 'Failure',
+        waiting: false
+      })
     )
 
     releaseRequests()
+    releaseQuery()
     registry.dispose()
     expect(listener).toBeUndefined()
   })
