@@ -1,11 +1,14 @@
-import { Effect } from 'effect'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
   ElectronRpcBridge,
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
-import { checkSystemInfoAtom } from './runtime'
+import {
+  checkRequestAtom,
+  checkRuntimeStreamAtom,
+  runtimeStateAtom
+} from './runtime'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -27,8 +30,10 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    const release = registry.mount(checkSystemInfoAtom)
-    registry.set(checkSystemInfoAtom, undefined)
+    const release = registry.mount(checkRuntimeStreamAtom)
+    registry.mount(runtimeStateAtom)
+    const releaseRequests = registry.mount(checkRequestAtom)
+    registry.set(checkRequestAtom, 1)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -45,15 +50,16 @@ describe('renderer Effect atoms', () => {
       })
     })
 
-    const result = await Effect.runPromise(
-      AtomRegistry.getResult(registry, checkSystemInfoAtom)
+    await vi.waitFor(() =>
+      expect(registry.get(runtimeStateAtom)).toEqual({
+        _tag: 'Available',
+        platform: 'darwin',
+        version: '1.2.3'
+      })
     )
-    expect(result).toEqual({
-      platform: 'darwin',
-      version: '1.2.3'
-    })
 
     release()
+    releaseRequests()
     registry.dispose()
     expect(listener).toBeUndefined()
   })
