@@ -41,8 +41,8 @@ const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(func
  * Async action atom for checking runtime metadata.
  *
  * The state atom remains a plain writable value. `Atom.fn` owns one invocation
- * at a time by default, and the renderer decides when to trigger it through
- * `useAtomSet`; no long-lived stream is needed for this one-shot action.
+ * at a time by default; callers can trigger this action directly with
+ * `useAtomSet` or use the throttled click entrypoint below.
  */
 export const checkRuntimeAtom = RendererAtomRuntime.fn(
   (_request: void, get: Atom.FnContext) => runCheckRuntime(get.registry).pipe(

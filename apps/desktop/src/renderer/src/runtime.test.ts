@@ -66,9 +66,35 @@ describe('renderer Effect atoms', () => {
     // The first burst is throttled to one RPC request.
     expect(sent).toHaveLength(1)
 
-    registry.set(checkRuntimeAtom, undefined)
+    // Once the one-second window expires, the next click is allowed through.
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    registry.set(checkRuntimeRequestAtom, 4)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
-    const failedRequest = sent[1]
+    const nextRequest = sent[1]
+    const nextMessage = JSON.parse(nextRequest.data) as { readonly id: string | number }
+    listener?.({
+      clientId: nextRequest.clientId,
+      data: JSON.stringify({
+        _tag: 'Exit',
+        requestId: nextMessage.id,
+        exit: {
+          _tag: 'Success',
+          value: { platform: 'darwin', version: '1.2.3' }
+        }
+      })
+    })
+
+    await vi.waitFor(() =>
+      expect(registry.get(runtimeStateAtom)).toEqual({
+        _tag: 'Available',
+        platform: 'darwin',
+        version: '1.2.3'
+      })
+    )
+
+    registry.set(checkRuntimeAtom, undefined)
+    await vi.waitFor(() => expect(sent).toHaveLength(3))
+    const failedRequest = sent[2]
     const failedMessage = JSON.parse(failedRequest.data) as { readonly id: string | number }
     listener?.({
       clientId: failedRequest.clientId,
@@ -87,7 +113,7 @@ describe('renderer Effect atoms', () => {
     )
 
     registry.set(checkRuntimeAtom, undefined)
-    await vi.waitFor(() => expect(sent).toHaveLength(3))
+    await vi.waitFor(() => expect(sent).toHaveLength(4))
     registry.set(checkRuntimeAtom, Atom.Interrupt)
 
     await vi.waitFor(() =>
