@@ -1,18 +1,18 @@
 import { Effect } from 'effect'
+import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SystemRpcClient } from '../../shared/rpc/system-rpc'
 import type {
   ElectronRpcBridge,
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
-import { createRendererRuntime } from './runtime'
+import { checkSystemInfoAtom } from './runtime'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('renderer Effect runtime', () => {
-  it('provides the generated system client through the Electron RPC protocol', async () => {
+describe('renderer Effect atoms', () => {
+  it('runs the generated system client through the Atom registry', async () => {
     const sent: Array<ElectronRpcFrame> = []
     let listener: ((frame: ElectronRpcFrame) => void) | undefined
     const bridge: ElectronRpcBridge = {
@@ -25,13 +25,10 @@ describe('renderer Effect runtime', () => {
       }
     }
     vi.stubGlobal('window', { desktopRpc: bridge })
-    const runtime = createRendererRuntime()
-    const request = runtime.runPromise(
-      Effect.gen(function*() {
-        const client = yield* SystemRpcClient
-        return yield* client['system.getInfo']()
-      })
-    )
+
+    const registry = AtomRegistry.make()
+    const release = registry.mount(checkSystemInfoAtom)
+    registry.set(checkSystemInfoAtom, undefined)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -48,8 +45,16 @@ describe('renderer Effect runtime', () => {
       })
     })
 
-    await expect(request).resolves.toEqual({ platform: 'darwin', version: '1.2.3' })
-    await runtime.dispose()
+    const result = await Effect.runPromise(
+      AtomRegistry.getResult(registry, checkSystemInfoAtom)
+    )
+    expect(result).toEqual({
+      platform: 'darwin',
+      version: '1.2.3'
+    })
+
+    release()
+    registry.dispose()
     expect(listener).toBeUndefined()
   })
 })

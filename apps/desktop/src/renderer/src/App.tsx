@@ -1,32 +1,17 @@
-import { useState } from 'react'
+import { useAtom } from '@effect/atom-react'
 import { Button } from '@folio/ui'
-import { Effect } from 'effect'
-import { SystemRpcClient } from '../../shared/rpc/system-rpc'
-import { useEffectRuntime } from './effect-runtime-provider'
+import * as AsyncResult from 'effect/unstable/reactivity/AsyncResult'
+import { checkSystemInfoAtom } from './runtime'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
-  const effectRuntime = useEffectRuntime()
-  const [runtimeLabel, setRuntimeLabel] = useState('Not checked')
-
-  /** Runs the Effect RPC program that loads process-owned metadata. */
-  function checkRuntime(): void {
-    const program = Effect.gen(function*() {
-      const client = yield* SystemRpcClient
-      const info = yield* client['system.getInfo']()
-      yield* Effect.sync(() => setRuntimeLabel(`${info.platform} · v${info.version}`))
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.sync(() => {
-          console.error('Failed to load runtime information', cause)
-          setRuntimeLabel('Unavailable')
-        })
-      )
-    )
-
-    effectRuntime.runFork(program)
-  }
+  const [result, checkRuntime] = useAtom(checkSystemInfoAtom)
+  const runtimeLabel = AsyncResult.match(result, {
+    onInitial: () => 'Not checked',
+    onFailure: () => 'Unavailable',
+    onSuccess: ({ value }) => `${value.platform} · v${value.version}`
+  })
 
   return (
     <main className="app-shell">
@@ -38,8 +23,8 @@ export function App(): React.JSX.Element {
           wired together.
         </p>
         <div className="actions">
-          <Button onClick={checkRuntime}>
-            Check platform
+          <Button onClick={() => checkRuntime(undefined)} disabled={result.waiting}>
+            {result.waiting ? 'Checking…' : 'Check platform'}
           </Button>
           <code>{runtimeLabel}</code>
         </div>
