@@ -1,8 +1,8 @@
-import { Duration, Effect, Queue, Stream } from 'effect'
+import { Effect } from 'effect'
 import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
-import { SystemRpcClient } from '../../../shared/rpc/system-rpc'
-import { RendererAtomRuntime } from '../runtime'
+import { SystemRpcClient } from '../rpc/system-rpc'
+import { makeThrottledAction } from './throttle'
 
 /** Explicit renderer state; effects update this value through the registry. */
 export type SystemInfoState =
@@ -45,53 +45,9 @@ const loadSystemInfo = (registry: AtomRegistry.AtomRegistry) =>
     )
   )
 
-/**
- * Runs the renderer-wide click consumer until its owning atom scope closes.
- * Each queue event is throttled to one RPC per second; failures are converted
- * to completed iterations so one failed RPC cannot terminate the consumer.
- */
-const systemInfoRequestStream = (events: Queue.Queue<void>, registry: AtomRegistry.AtomRegistry) =>
-  Stream.fromQueue(events).pipe(
-    // Throttle individual clicks even when Queue emits a batch.
-    Stream.rechunk(1),
-    Stream.throttle({
-      cost: (clicks) => clicks.length,
-      units: 1,
-      duration: Duration.seconds(1),
-      strategy: 'enforce'
-    }),
-    Stream.runForEach(() =>
-      loadSystemInfo(registry).pipe(
-        // A failed request updates systemInfoStateAtom but must not stop the click consumer.
-        Effect.catchCause(() => Effect.void)
-      )
-    )
-  )
-
-/**
- * Internal event queue and long-lived throttle consumer for system-info requests.
- * `keepAlive` lets the request atom own this consumer without a second public
- * atom or an explicit mount in the React tree.
- */
-const systemInfoRequestQueueAtom = Atom.keepAlive(
-  RendererAtomRuntime.atom(
-    Effect.acquireRelease(
-      Effect.gen(function*() {
-        const events = yield* Queue.unbounded<void>()
-        const registry = yield* AtomRegistry.AtomRegistry
-        yield* systemInfoRequestStream(events, registry).pipe(Effect.forkScoped)
-        return events
-      }),
-      (events) => Queue.shutdown(events)
-    )
-  )
-)
-
-/** Event action used by UI callbacks to enqueue a system-info request. */
-export const requestSystemInfoAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) =>
-    get.result(systemInfoRequestQueueAtom).pipe(
-      Effect.flatMap((events) => Queue.offer(events, undefined)),
-      Effect.asVoid
-    )
+/** Event action used by UI callbacks to request system metadata. */
+export const requestSystemInfoAtom = makeThrottledAction(
+  SystemRpcClient.runtime,
+  (_value: void, registry) => loadSystemInfo(registry),
+  { duration: '1 second' }
 )

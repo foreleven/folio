@@ -1,10 +1,5 @@
-import { Context, Layer, Schema } from 'effect'
-import {
-  Rpc,
-  RpcClient,
-  RpcClientError,
-  RpcGroup
-} from 'effect/unstable/rpc'
+import { Schema } from 'effect'
+import { Rpc, RpcGroup } from 'effect/unstable/rpc'
 
 /** Schema and runtime type for metadata owned by the Electron main process. */
 export const SystemInfo = Schema.Struct({
@@ -31,17 +26,5 @@ export const GetSystemInfo = Rpc.make('system.getInfo', {
   success: SystemInfo
 })
 
-/** Complete system RPC interface shared by the client and server layers. */
+/** Complete system RPC contract shared by the renderer client and main server. */
 export class SystemRpcs extends RpcGroup.make(GetSystemInfo) {}
-
-/** Effect service containing the generated system RPC client. */
-export class SystemRpcClient extends Context.Service<
-  SystemRpcClient,
-  RpcClient.FromGroup<typeof SystemRpcs, RpcClientError.RpcClientError>
->()('folio/rpc/SystemRpcClient') {
-  /** Retrieves system metadata without exposing client lookup or the RPC wire tag to callers. */
-  static readonly getInfo = SystemRpcClient.use((client) => client[GetSystemInfo._tag]())
-
-  /** Builds the generated client from the active Effect RPC protocol. */
-  static readonly layer = Layer.effect(SystemRpcClient, RpcClient.make(SystemRpcs))
-}
