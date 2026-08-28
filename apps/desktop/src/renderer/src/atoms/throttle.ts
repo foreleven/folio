@@ -3,7 +3,9 @@ import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 
 export interface ThrottleOptions {
+  /** Minimum interval between admitted events. */
   readonly duration: Duration.Input
+  /** Number of events allowed per interval; defaults to one. */
   readonly units?: number
 }
 
@@ -12,9 +14,9 @@ export interface ThrottleOptions {
  * The stream is kept alive after the first write and is released with the
  * registry, so callers only need the returned atom's setter.
  */
-export const makeThrottledAction = <R, A, E>(
+export const makeThrottledAction = <R, A, B, E>(
   runtime: Atom.AtomRuntime<R>,
-  run: (value: A, registry: AtomRegistry.AtomRegistry) => Effect.Effect<void, E, R>,
+  run: (value: A, registry: AtomRegistry.AtomRegistry) => Effect.Effect<B, E, R>,
   options: ThrottleOptions
 ): Atom.AtomResultFn<A, void, E> => {
   const eventsAtom = Atom.keepAlive(
