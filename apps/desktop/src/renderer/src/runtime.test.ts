@@ -56,6 +56,26 @@ describe('renderer Effect atoms', () => {
       })
     )
 
+    registry.set(checkRuntimeAtom, undefined)
+    await vi.waitFor(() => expect(sent).toHaveLength(2))
+    const failedRequest = sent[1]
+    const failedMessage = JSON.parse(failedRequest.data) as { readonly id: string | number }
+    listener?.({
+      clientId: failedRequest.clientId,
+      data: JSON.stringify({
+        _tag: 'Exit',
+        requestId: failedMessage.id,
+        exit: {
+          _tag: 'Failure',
+          cause: [{ _tag: 'Fail', error: { message: 'system unavailable' } }]
+        }
+      })
+    })
+
+    await vi.waitFor(() =>
+      expect(registry.get(runtimeStateAtom)).toEqual({ _tag: 'Unavailable' })
+    )
+
     release()
     registry.dispose()
     expect(listener).toBeUndefined()
