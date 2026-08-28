@@ -1,9 +1,9 @@
-import { useAtom, useAtomMount, useAtomValue } from '@effect/atom-react'
+import { useAtomMount, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui'
 import {
   checkRuntimeAtom,
-  checkRuntimeRequestAtom,
   checkRuntimeThrottleAtom,
+  requestRuntimeCheckAtom,
   runtimeStateAtom
 } from './atoms/system-info'
 import '@folio/ui/styles.css'
@@ -13,7 +13,7 @@ export function App(): React.JSX.Element {
   useAtomMount(checkRuntimeThrottleAtom)
   useAtomMount(checkRuntimeAtom)
   const runtimeState = useAtomValue(runtimeStateAtom)
-  const [, setRequestId] = useAtom(checkRuntimeRequestAtom)
+  const checkRuntime = useAtomSet(requestRuntimeCheckAtom)
 
   const runtimeLabel = runtimeState._tag === 'Available'
     ? `${runtimeState.platform} · v${runtimeState.version}`
@@ -34,7 +34,7 @@ export function App(): React.JSX.Element {
         </p>
         <div className="actions">
           <Button
-            onClick={() => setRequestId((requestId) => requestId + 1)}
+            onClick={() => checkRuntime(undefined)}
           >
             {runtimeState._tag === 'Checking' ? 'Checking…' : 'Check platform'}
           </Button>

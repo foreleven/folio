@@ -7,8 +7,8 @@ import type {
 } from '../../shared/rpc/electron-rpc'
 import {
   checkRuntimeAtom,
-  checkRuntimeRequestAtom,
   checkRuntimeThrottleAtom,
+  requestRuntimeCheckAtom,
   runtimeStateAtom
 } from './atoms/system-info'
 
@@ -35,10 +35,10 @@ describe('renderer Effect atoms', () => {
     const releaseThrottle = registry.mount(checkRuntimeThrottleAtom)
     const release = registry.mount(checkRuntimeAtom)
     registry.mount(runtimeStateAtom)
-    const releaseRequests = registry.mount(checkRuntimeRequestAtom)
-    registry.set(checkRuntimeRequestAtom, 1)
-    registry.set(checkRuntimeRequestAtom, 2)
-    registry.set(checkRuntimeRequestAtom, 3)
+    const releaseRequests = registry.mount(requestRuntimeCheckAtom)
+    registry.set(requestRuntimeCheckAtom, undefined)
+    registry.set(requestRuntimeCheckAtom, undefined)
+    registry.set(requestRuntimeCheckAtom, undefined)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -68,7 +68,7 @@ describe('renderer Effect atoms', () => {
 
     // Once the one-second window expires, the next click is allowed through.
     await new Promise((resolve) => setTimeout(resolve, 1100))
-    registry.set(checkRuntimeRequestAtom, 4)
+    registry.set(requestRuntimeCheckAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     const nextRequest = sent[1]
     const nextMessage = JSON.parse(nextRequest.data) as { readonly id: string | number }

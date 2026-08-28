@@ -1,4 +1,4 @@
-import { Duration, Effect, Stream } from 'effect'
+import { Duration, Effect, Queue, Stream } from 'effect'
 import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 import { SystemRpcClient } from '../../../shared/rpc/system-rpc'
@@ -14,8 +14,21 @@ export type RuntimeState =
 /** Value atom intentionally independent from RPC and service implementations. */
 export const runtimeStateAtom = Atom.make<RuntimeState>({ _tag: 'NotChecked' })
 
-/** Monotonic click signal consumed by the optional throttled entrypoint. */
-export const checkRuntimeRequestAtom = Atom.make(0)
+const checkRuntimeEventsAtom = RendererAtomRuntime.atom(
+  Effect.acquireRelease(
+    Queue.unbounded<void>(),
+    (events) => Queue.shutdown(events)
+  )
+)
+
+/** Event action used by UI callbacks to enqueue a runtime check. */
+export const requestRuntimeCheckAtom = RendererAtomRuntime.fn(
+  (_request: void, get: Atom.FnContext) =>
+    get.result(checkRuntimeEventsAtom).pipe(
+      Effect.flatMap((events) => Queue.offer(events, undefined)),
+      Effect.asVoid
+    )
+)
 
 const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(function*() {
   registry.set(runtimeStateAtom, { _tag: 'Checking' })
@@ -58,27 +71,30 @@ export const checkRuntimeAtom = RendererAtomRuntime.fn(
   )
 )
 
-const checkRuntimeRequests = Atom.toStream(checkRuntimeRequestAtom).pipe(
-  Stream.filter((requestId) => requestId > 0),
-  // Throttle individual clicks even when Atom batches synchronous writes.
-  Stream.rechunk(1),
-  Stream.throttle({
-    cost: (clicks) => clicks.length,
-    units: 1,
-    duration: Duration.seconds(1),
-    strategy: 'enforce'
-  })
-)
+const checkRuntimeRequests = (get: Atom.AtomContext) =>
+  Stream.unwrap(
+    get.result(checkRuntimeEventsAtom).pipe(Effect.map(Stream.fromQueue))
+  ).pipe(
+    // Throttle individual clicks even when Queue emits a batch.
+    Stream.rechunk(1),
+    Stream.throttle({
+      cost: (clicks) => clicks.length,
+      units: 1,
+      duration: Duration.seconds(1),
+      strategy: 'enforce'
+    })
+  )
 
 /**
  * Optional throttled click entrypoint: at most one RPC starts per second and
  * additional clicks in that window are discarded by the stream policy.
  */
 export const checkRuntimeThrottleAtom = RendererAtomRuntime.atom(
-  Stream.runForEach(checkRuntimeRequests, () =>
-    Effect.gen(function*() {
-      const registry = yield* AtomRegistry.AtomRegistry
-      registry.set(checkRuntimeAtom, undefined)
-    })
-  )
+  (get) =>
+    Stream.runForEach(checkRuntimeRequests(get), () =>
+      Effect.gen(function*() {
+        const registry = yield* AtomRegistry.AtomRegistry
+        registry.set(checkRuntimeAtom, undefined)
+      })
+    )
 )
