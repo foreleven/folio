@@ -34,16 +34,15 @@ export const GetSystemInfo = Rpc.make('system.getInfo', {
 /** Complete system RPC interface shared by the client and server layers. */
 export class SystemRpcs extends RpcGroup.make(GetSystemInfo) {}
 
-/** Named client adapter; keeps the wire tag out of feature and UI modules. */
-export const systemGetInfo = (
-  client: RpcClient.FromGroup<typeof SystemRpcs, RpcClientError.RpcClientError>
-) => client[GetSystemInfo._tag]()
-
 /** Effect service containing the generated system RPC client. */
 export class SystemRpcClient extends Context.Service<
   SystemRpcClient,
   RpcClient.FromGroup<typeof SystemRpcs, RpcClientError.RpcClientError>
 >()('folio/rpc/SystemRpcClient') {
+  /** Retrieves system metadata without exposing the RPC wire tag to callers. */
+  static readonly getInfo = (client: SystemRpcClient['Service']) =>
+    client[GetSystemInfo._tag]()
+
   /** Builds the generated client from the active Effect RPC protocol. */
   static readonly layer = Layer.effect(SystemRpcClient, RpcClient.make(SystemRpcs))
 }

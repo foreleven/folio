@@ -1,7 +1,7 @@
 import { Effect, Stream } from 'effect'
 import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
-import { systemGetInfo, SystemRpcClient } from '../../../shared/rpc/system-rpc'
+import { SystemRpcClient } from '../../../shared/rpc/system-rpc'
 import { RendererAtomRuntime } from '../runtime'
 
 /** Explicit renderer state; effects update this value through the registry. */
@@ -31,7 +31,7 @@ export const checkRuntimeStreamAtom = RendererAtomRuntime.atom(
       const registry = yield* AtomRegistry.AtomRegistry
       registry.set(runtimeStateAtom, { _tag: 'Checking' })
 
-      const info = yield* SystemRpcClient.use(systemGetInfo)
+      const info = yield* SystemRpcClient.use(SystemRpcClient.getInfo)
       registry.set(runtimeStateAtom, {
         _tag: 'Available',
         platform: info.platform,
