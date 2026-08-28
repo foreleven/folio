@@ -5,8 +5,7 @@ import type {
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
 import {
-  checkRequestAtom,
-  checkRuntimeStreamAtom,
+  checkRuntimeAtom,
   runtimeStateAtom
 } from './atoms/system-info'
 
@@ -15,7 +14,7 @@ afterEach(() => {
 })
 
 describe('renderer Effect atoms', () => {
-  it('runs the generated system client through the Atom registry', async () => {
+  it('runs the generated system client through an async action atom', async () => {
     const sent: Array<ElectronRpcFrame> = []
     let listener: ((frame: ElectronRpcFrame) => void) | undefined
     const bridge: ElectronRpcBridge = {
@@ -30,10 +29,9 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    const release = registry.mount(checkRuntimeStreamAtom)
+    const release = registry.mount(checkRuntimeAtom)
     registry.mount(runtimeStateAtom)
-    const releaseRequests = registry.mount(checkRequestAtom)
-    registry.set(checkRequestAtom, 1)
+    registry.set(checkRuntimeAtom, undefined)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -59,7 +57,6 @@ describe('renderer Effect atoms', () => {
     )
 
     release()
-    releaseRequests()
     registry.dispose()
     expect(listener).toBeUndefined()
   })
