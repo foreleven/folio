@@ -34,6 +34,11 @@ export const GetSystemInfo = Rpc.make('system.getInfo', {
 /** Complete system RPC interface shared by the client and server layers. */
 export class SystemRpcs extends RpcGroup.make(GetSystemInfo) {}
 
+/** Named client adapter; keeps the wire tag out of feature and UI modules. */
+export const systemGetInfo = (
+  client: RpcClient.FromGroup<typeof SystemRpcs, RpcClientError.RpcClientError>
+) => client[GetSystemInfo._tag]()
+
 /** Effect service containing the generated system RPC client. */
 export class SystemRpcClient extends Context.Service<
   SystemRpcClient,
