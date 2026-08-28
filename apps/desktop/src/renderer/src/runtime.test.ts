@@ -1,4 +1,3 @@
-import * as Atom from 'effect/unstable/reactivity/Atom'
 import * as AtomRegistry from 'effect/unstable/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -6,7 +5,6 @@ import type {
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
 import {
-  loadSystemInfoAtom,
   requestSystemInfoAtom,
   systemInfoStateAtom
 } from './atoms/system-info'
@@ -16,7 +14,7 @@ afterEach(() => {
 })
 
 describe('renderer Effect atoms', () => {
-  it('runs the generated system client through an async action atom', async () => {
+  it('loads system info through the throttled request atom', async () => {
     const sent: Array<ElectronRpcFrame> = []
     let listener: ((frame: ElectronRpcFrame) => void) | undefined
     const bridge: ElectronRpcBridge = {
@@ -31,7 +29,6 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    const release = registry.mount(loadSystemInfoAtom)
     registry.mount(systemInfoStateAtom)
     const releaseRequests = registry.mount(requestSystemInfoAtom)
     registry.set(requestSystemInfoAtom, undefined)
@@ -90,7 +87,8 @@ describe('renderer Effect atoms', () => {
       })
     )
 
-    registry.set(loadSystemInfoAtom, undefined)
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    registry.set(requestSystemInfoAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(3))
     const failedRequest = sent[2]
     const failedMessage = JSON.parse(failedRequest.data) as { readonly id: string | number }
@@ -110,15 +108,6 @@ describe('renderer Effect atoms', () => {
       expect(registry.get(systemInfoStateAtom)).toEqual({ _tag: 'Unavailable' })
     )
 
-    registry.set(loadSystemInfoAtom, undefined)
-    await vi.waitFor(() => expect(sent).toHaveLength(4))
-    registry.set(loadSystemInfoAtom, Atom.Interrupt)
-
-    await vi.waitFor(() =>
-      expect(registry.get(systemInfoStateAtom)).toEqual({ _tag: 'Unavailable' })
-    )
-
-    release()
     releaseRequests()
     registry.dispose()
     expect(listener).toBeUndefined()

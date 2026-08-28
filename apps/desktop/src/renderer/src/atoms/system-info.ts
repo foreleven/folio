@@ -95,14 +95,3 @@ export const requestSystemInfoAtom = RendererAtomRuntime.fn(
       Effect.asVoid
     )
 )
-
-/**
- * Async action atom for loading system metadata without throttling.
- *
- * The state atom remains a plain writable value. `Atom.fn` owns one invocation
- * at a time by default; callers can trigger this action directly with
- * `useAtomSet` when bypassing the queued click entrypoint.
- */
-export const loadSystemInfoAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) => loadSystemInfo(get.registry)
-)
