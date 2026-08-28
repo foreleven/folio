@@ -6,9 +6,9 @@ import type {
   ElectronRpcFrame
 } from '../../shared/rpc/electron-rpc'
 import {
-  checkRuntimeAtom,
-  requestRuntimeCheckAtom,
-  runtimeStateAtom
+  loadSystemInfoAtom,
+  requestSystemInfoAtom,
+  systemInfoStateAtom
 } from './atoms/system-info'
 
 afterEach(() => {
@@ -31,12 +31,12 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    const release = registry.mount(checkRuntimeAtom)
-    registry.mount(runtimeStateAtom)
-    const releaseRequests = registry.mount(requestRuntimeCheckAtom)
-    registry.set(requestRuntimeCheckAtom, undefined)
-    registry.set(requestRuntimeCheckAtom, undefined)
-    registry.set(requestRuntimeCheckAtom, undefined)
+    const release = registry.mount(loadSystemInfoAtom)
+    registry.mount(systemInfoStateAtom)
+    const releaseRequests = registry.mount(requestSystemInfoAtom)
+    registry.set(requestSystemInfoAtom, undefined)
+    registry.set(requestSystemInfoAtom, undefined)
+    registry.set(requestSystemInfoAtom, undefined)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -54,7 +54,7 @@ describe('renderer Effect atoms', () => {
     })
 
     await vi.waitFor(() =>
-      expect(registry.get(runtimeStateAtom)).toEqual({
+      expect(registry.get(systemInfoStateAtom)).toEqual({
         _tag: 'Available',
         platform: 'darwin',
         version: '1.2.3'
@@ -66,7 +66,7 @@ describe('renderer Effect atoms', () => {
 
     // Once the one-second window expires, the next click is allowed through.
     await new Promise((resolve) => setTimeout(resolve, 1100))
-    registry.set(requestRuntimeCheckAtom, undefined)
+    registry.set(requestSystemInfoAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
     const nextRequest = sent[1]
     const nextMessage = JSON.parse(nextRequest.data) as { readonly id: string | number }
@@ -83,14 +83,14 @@ describe('renderer Effect atoms', () => {
     })
 
     await vi.waitFor(() =>
-      expect(registry.get(runtimeStateAtom)).toEqual({
+      expect(registry.get(systemInfoStateAtom)).toEqual({
         _tag: 'Available',
         platform: 'darwin',
         version: '1.2.3'
       })
     )
 
-    registry.set(checkRuntimeAtom, undefined)
+    registry.set(loadSystemInfoAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(3))
     const failedRequest = sent[2]
     const failedMessage = JSON.parse(failedRequest.data) as { readonly id: string | number }
@@ -107,15 +107,15 @@ describe('renderer Effect atoms', () => {
     })
 
     await vi.waitFor(() =>
-      expect(registry.get(runtimeStateAtom)).toEqual({ _tag: 'Unavailable' })
+      expect(registry.get(systemInfoStateAtom)).toEqual({ _tag: 'Unavailable' })
     )
 
-    registry.set(checkRuntimeAtom, undefined)
+    registry.set(loadSystemInfoAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(4))
-    registry.set(checkRuntimeAtom, Atom.Interrupt)
+    registry.set(loadSystemInfoAtom, Atom.Interrupt)
 
     await vi.waitFor(() =>
-      expect(registry.get(runtimeStateAtom)).toEqual({ _tag: 'Unavailable' })
+      expect(registry.get(systemInfoStateAtom)).toEqual({ _tag: 'Unavailable' })
     )
 
     release()

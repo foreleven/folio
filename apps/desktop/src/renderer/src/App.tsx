@@ -1,21 +1,21 @@
 import { useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui'
 import {
-  requestRuntimeCheckAtom,
-  runtimeStateAtom
+  requestSystemInfoAtom,
+  systemInfoStateAtom
 } from './atoms/system-info'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
-  const runtimeState = useAtomValue(runtimeStateAtom)
-  const checkRuntime = useAtomSet(requestRuntimeCheckAtom)
+  const systemInfoState = useAtomValue(systemInfoStateAtom)
+  const requestSystemInfo = useAtomSet(requestSystemInfoAtom)
 
-  const runtimeLabel = runtimeState._tag === 'Available'
-    ? `${runtimeState.platform} · v${runtimeState.version}`
-    : runtimeState._tag === 'Checking'
+  const systemInfoLabel = systemInfoState._tag === 'Available'
+    ? `${systemInfoState.platform} · v${systemInfoState.version}`
+    : systemInfoState._tag === 'Checking'
     ? 'Checking…'
-    : runtimeState._tag === 'Unavailable'
+    : systemInfoState._tag === 'Unavailable'
     ? 'Unavailable'
     : 'Not checked'
 
@@ -30,11 +30,11 @@ export function App(): React.JSX.Element {
         </p>
         <div className="actions">
           <Button
-            onClick={() => checkRuntime(undefined)}
+            onClick={() => requestSystemInfo()}
           >
-            {runtimeState._tag === 'Checking' ? 'Checking…' : 'Check platform'}
+            {systemInfoState._tag === 'Checking' ? 'Checking…' : 'Check platform'}
           </Button>
-          <code>{runtimeLabel}</code>
+          <code>{systemInfoLabel}</code>
         </div>
       </section>
     </main>

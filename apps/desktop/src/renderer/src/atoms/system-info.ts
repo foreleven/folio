@@ -5,42 +5,41 @@ import { SystemRpcClient } from '../../../shared/rpc/system-rpc'
 import { RendererAtomRuntime } from '../runtime'
 
 /** Explicit renderer state; effects update this value through the registry. */
-export type RuntimeState =
+export type SystemInfoState =
   | { readonly _tag: 'NotChecked' }
   | { readonly _tag: 'Checking' }
   | { readonly _tag: 'Available'; readonly platform: string; readonly version: string }
   | { readonly _tag: 'Unavailable' }
 
 /** Value atom intentionally independent from RPC and service implementations. */
-export const runtimeStateAtom = Atom.make<RuntimeState>({ _tag: 'NotChecked' })
+export const systemInfoStateAtom = Atom.make<SystemInfoState>({ _tag: 'NotChecked' })
 
-const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(function*() {
-  registry.set(runtimeStateAtom, { _tag: 'Checking' })
+/** Loads system metadata and settles the UI state on failure or interruption. */
+const loadSystemInfo = (registry: AtomRegistry.AtomRegistry) =>
+  Effect.gen(function*() {
+    registry.set(systemInfoStateAtom, { _tag: 'Checking' })
 
-  const info = yield* SystemRpcClient.getInfo.pipe(
-    Effect.catchCause((cause) =>
-      Effect.sync(() => registry.set(runtimeStateAtom, { _tag: 'Unavailable' })).pipe(
-        Effect.flatMap(() => Effect.failCause(cause))
+    const info = yield* SystemRpcClient.getInfo.pipe(
+      Effect.catchCause((cause) =>
+        Effect.sync(() => registry.set(systemInfoStateAtom, { _tag: 'Unavailable' })).pipe(
+          Effect.flatMap(() => Effect.failCause(cause))
+        )
       )
     )
-  )
 
-  registry.set(runtimeStateAtom, {
-    _tag: 'Available',
-    platform: info.platform,
-    version: info.version
-  })
+    registry.set(systemInfoStateAtom, {
+      _tag: 'Available',
+      platform: info.platform,
+      version: info.version
+    })
 
-  return info
-})
-
-const runCheckRuntimeAction = (registry: AtomRegistry.AtomRegistry) =>
-  runCheckRuntime(registry).pipe(
+    return info
+  }).pipe(
     // A canceled request must not leave the independent value atom waiting.
     Effect.ensuring(
       Effect.sync(() => {
-        if (registry.get(runtimeStateAtom)._tag === 'Checking') {
-          registry.set(runtimeStateAtom, { _tag: 'Unavailable' })
+        if (registry.get(systemInfoStateAtom)._tag === 'Checking') {
+          registry.set(systemInfoStateAtom, { _tag: 'Unavailable' })
         }
       })
     )
@@ -51,7 +50,7 @@ const runCheckRuntimeAction = (registry: AtomRegistry.AtomRegistry) =>
  * Each queue event is throttled to one RPC per second; failures are converted
  * to completed iterations so one failed RPC cannot terminate the consumer.
  */
-const runtimeCheckStream = (events: Queue.Queue<void>, registry: AtomRegistry.AtomRegistry) =>
+const systemInfoRequestStream = (events: Queue.Queue<void>, registry: AtomRegistry.AtomRegistry) =>
   Stream.fromQueue(events).pipe(
     // Throttle individual clicks even when Queue emits a batch.
     Stream.rechunk(1),
@@ -62,25 +61,25 @@ const runtimeCheckStream = (events: Queue.Queue<void>, registry: AtomRegistry.At
       strategy: 'enforce'
     }),
     Stream.runForEach(() =>
-      runCheckRuntimeAction(registry).pipe(
-        // A failed request updates runtimeStateAtom but must not stop the click consumer.
+      loadSystemInfo(registry).pipe(
+        // A failed request updates systemInfoStateAtom but must not stop the click consumer.
         Effect.catchCause(() => Effect.void)
       )
     )
   )
 
 /**
- * Internal event queue and long-lived throttle consumer for runtime checks.
+ * Internal event queue and long-lived throttle consumer for system-info requests.
  * `keepAlive` lets the request atom own this consumer without a second public
  * atom or an explicit mount in the React tree.
  */
-const checkRuntimeEventsAtom = Atom.keepAlive(
+const systemInfoRequestQueueAtom = Atom.keepAlive(
   RendererAtomRuntime.atom(
     Effect.acquireRelease(
       Effect.gen(function*() {
         const events = yield* Queue.unbounded<void>()
         const registry = yield* AtomRegistry.AtomRegistry
-        yield* runtimeCheckStream(events, registry).pipe(Effect.forkScoped)
+        yield* systemInfoRequestStream(events, registry).pipe(Effect.forkScoped)
         return events
       }),
       (events) => Queue.shutdown(events)
@@ -88,22 +87,22 @@ const checkRuntimeEventsAtom = Atom.keepAlive(
   )
 )
 
-/** Event action used by UI callbacks to enqueue a runtime check. */
-export const requestRuntimeCheckAtom = RendererAtomRuntime.fn(
+/** Event action used by UI callbacks to enqueue a system-info request. */
+export const requestSystemInfoAtom = RendererAtomRuntime.fn(
   (_request: void, get: Atom.FnContext) =>
-    get.result(checkRuntimeEventsAtom).pipe(
+    get.result(systemInfoRequestQueueAtom).pipe(
       Effect.flatMap((events) => Queue.offer(events, undefined)),
       Effect.asVoid
     )
 )
 
 /**
- * Async action atom for checking runtime metadata.
+ * Async action atom for loading system metadata without throttling.
  *
  * The state atom remains a plain writable value. `Atom.fn` owns one invocation
  * at a time by default; callers can trigger this action directly with
  * `useAtomSet` when bypassing the queued click entrypoint.
  */
-export const checkRuntimeAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) => runCheckRuntimeAction(get.registry)
+export const loadSystemInfoAtom = RendererAtomRuntime.fn(
+  (_request: void, get: Atom.FnContext) => loadSystemInfo(get.registry)
 )
