@@ -7,7 +7,6 @@ import type {
 } from '../../shared/rpc/electron-rpc'
 import {
   checkRuntimeAtom,
-  checkRuntimeThrottleAtom,
   requestRuntimeCheckAtom,
   runtimeStateAtom
 } from './atoms/system-info'
@@ -32,7 +31,6 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
-    const releaseThrottle = registry.mount(checkRuntimeThrottleAtom)
     const release = registry.mount(checkRuntimeAtom)
     registry.mount(runtimeStateAtom)
     const releaseRequests = registry.mount(requestRuntimeCheckAtom)
@@ -121,7 +119,6 @@ describe('renderer Effect atoms', () => {
     )
 
     release()
-    releaseThrottle()
     releaseRequests()
     registry.dispose()
     expect(listener).toBeUndefined()

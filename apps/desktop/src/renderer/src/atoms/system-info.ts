@@ -14,22 +14,6 @@ export type RuntimeState =
 /** Value atom intentionally independent from RPC and service implementations. */
 export const runtimeStateAtom = Atom.make<RuntimeState>({ _tag: 'NotChecked' })
 
-const checkRuntimeEventsAtom = RendererAtomRuntime.atom(
-  Effect.acquireRelease(
-    Queue.unbounded<void>(),
-    (events) => Queue.shutdown(events)
-  )
-)
-
-/** Event action used by UI callbacks to enqueue a runtime check. */
-export const requestRuntimeCheckAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) =>
-    get.result(checkRuntimeEventsAtom).pipe(
-      Effect.flatMap((events) => Queue.offer(events, undefined)),
-      Effect.asVoid
-    )
-)
-
 const runCheckRuntime = (registry: AtomRegistry.AtomRegistry) => Effect.gen(function*() {
   registry.set(runtimeStateAtom, { _tag: 'Checking' })
 
@@ -62,21 +46,8 @@ const runCheckRuntimeAction = (registry: AtomRegistry.AtomRegistry) =>
     )
   )
 
-/**
- * Async action atom for checking runtime metadata.
- *
- * The state atom remains a plain writable value. `Atom.fn` owns one invocation
- * at a time by default; callers can trigger this action directly with
- * `useAtomSet` or use the throttled click entrypoint below.
- */
-export const checkRuntimeAtom = RendererAtomRuntime.fn(
-  (_request: void, get: Atom.FnContext) => runCheckRuntimeAction(get.registry)
-)
-
-const checkRuntimeRequests = (get: Atom.AtomContext) =>
-  Stream.unwrap(
-    get.result(checkRuntimeEventsAtom).pipe(Effect.map(Stream.fromQueue))
-  ).pipe(
+const runtimeCheckStream = (events: Queue.Queue<void>, registry: AtomRegistry.AtomRegistry) =>
+  Stream.fromQueue(events).pipe(
     // Throttle individual clicks even when Queue emits a batch.
     Stream.rechunk(1),
     Stream.throttle({
@@ -84,22 +55,50 @@ const checkRuntimeRequests = (get: Atom.AtomContext) =>
       units: 1,
       duration: Duration.seconds(1),
       strategy: 'enforce'
-    })
+    }),
+    Stream.runForEach(() =>
+      runCheckRuntimeAction(registry).pipe(
+        // A failed request updates runtimeStateAtom but must not stop the click consumer.
+        Effect.catchCause(() => Effect.void)
+      )
+    )
   )
 
 /**
- * Optional throttled click entrypoint: at most one RPC starts per second and
- * additional clicks in that window are discarded by the stream policy.
+ * Internal event queue and long-lived throttle consumer for runtime checks.
+ * `keepAlive` lets the request atom own this consumer without a second public
+ * atom or an explicit mount in the React tree.
  */
-export const checkRuntimeThrottleAtom = RendererAtomRuntime.atom(
-  (get) =>
-    Stream.runForEach(checkRuntimeRequests(get), () =>
+const checkRuntimeEventsAtom = Atom.keepAlive(
+  RendererAtomRuntime.atom(
+    Effect.acquireRelease(
       Effect.gen(function*() {
+        const events = yield* Queue.unbounded<void>()
         const registry = yield* AtomRegistry.AtomRegistry
-        yield* runCheckRuntimeAction(registry).pipe(
-          // A failed request updates runtimeStateAtom but must not stop the click consumer.
-          Effect.catchCause(() => Effect.void)
-        )
-      })
+        yield* runtimeCheckStream(events, registry).pipe(Effect.forkScoped)
+        return events
+      }),
+      (events) => Queue.shutdown(events)
     )
+  )
+)
+
+/** Event action used by UI callbacks to enqueue a runtime check. */
+export const requestRuntimeCheckAtom = RendererAtomRuntime.fn(
+  (_request: void, get: Atom.FnContext) =>
+    get.result(checkRuntimeEventsAtom).pipe(
+      Effect.flatMap((events) => Queue.offer(events, undefined)),
+      Effect.asVoid
+    )
+)
+
+/**
+ * Async action atom for checking runtime metadata.
+ *
+ * The state atom remains a plain writable value. `Atom.fn` owns one invocation
+ * at a time by default; callers can trigger this action directly with
+ * `useAtomSet` when bypassing the queued click entrypoint.
+ */
+export const checkRuntimeAtom = RendererAtomRuntime.fn(
+  (_request: void, get: Atom.FnContext) => runCheckRuntimeAction(get.registry)
 )
