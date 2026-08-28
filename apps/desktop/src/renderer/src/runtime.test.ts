@@ -8,7 +8,7 @@ import {
   checkRequestAtom,
   checkRuntimeStreamAtom,
   runtimeStateAtom
-} from './runtime'
+} from './atoms/system-info'
 
 afterEach(() => {
   vi.unstubAllGlobals()

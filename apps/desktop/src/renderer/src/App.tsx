@@ -4,7 +4,7 @@ import {
   checkRequestAtom,
   checkRuntimeStreamAtom,
   runtimeStateAtom
-} from './runtime'
+} from './atoms/system-info'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
