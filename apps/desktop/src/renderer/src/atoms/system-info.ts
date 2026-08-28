@@ -46,6 +46,11 @@ const runCheckRuntimeAction = (registry: AtomRegistry.AtomRegistry) =>
     )
   )
 
+/**
+ * Runs the renderer-wide click consumer until its owning atom scope closes.
+ * Each queue event is throttled to one RPC per second; failures are converted
+ * to completed iterations so one failed RPC cannot terminate the consumer.
+ */
 const runtimeCheckStream = (events: Queue.Queue<void>, registry: AtomRegistry.AtomRegistry) =>
   Stream.fromQueue(events).pipe(
     // Throttle individual clicks even when Queue emits a batch.
