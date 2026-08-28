@@ -1,15 +1,19 @@
-import { useAtomSet, useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomMount, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui'
 import {
   checkRuntimeAtom,
+  checkRuntimeRequestAtom,
+  checkRuntimeThrottleAtom,
   runtimeStateAtom
 } from './atoms/system-info'
 import '@folio/ui/styles.css'
 
 /** Renders the desktop shell and proves the shared UI workspace is linked. */
 export function App(): React.JSX.Element {
+  useAtomMount(checkRuntimeThrottleAtom)
+  useAtomMount(checkRuntimeAtom)
   const runtimeState = useAtomValue(runtimeStateAtom)
-  const checkRuntime = useAtomSet(checkRuntimeAtom)
+  const [, setRequestId] = useAtom(checkRuntimeRequestAtom)
 
   const runtimeLabel = runtimeState._tag === 'Available'
     ? `${runtimeState.platform} · v${runtimeState.version}`
@@ -30,8 +34,7 @@ export function App(): React.JSX.Element {
         </p>
         <div className="actions">
           <Button
-            onClick={() => checkRuntime(undefined)}
-            disabled={runtimeState._tag === 'Checking'}
+            onClick={() => setRequestId((requestId) => requestId + 1)}
           >
             {runtimeState._tag === 'Checking' ? 'Checking…' : 'Check platform'}
           </Button>

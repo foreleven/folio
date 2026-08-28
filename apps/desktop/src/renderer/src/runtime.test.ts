@@ -7,6 +7,8 @@ import type {
 } from '../../shared/rpc/electron-rpc'
 import {
   checkRuntimeAtom,
+  checkRuntimeRequestAtom,
+  checkRuntimeThrottleAtom,
   runtimeStateAtom
 } from './atoms/system-info'
 
@@ -30,9 +32,13 @@ describe('renderer Effect atoms', () => {
     vi.stubGlobal('window', { desktopRpc: bridge })
 
     const registry = AtomRegistry.make()
+    const releaseThrottle = registry.mount(checkRuntimeThrottleAtom)
     const release = registry.mount(checkRuntimeAtom)
     registry.mount(runtimeStateAtom)
-    registry.set(checkRuntimeAtom, undefined)
+    const releaseRequests = registry.mount(checkRuntimeRequestAtom)
+    registry.set(checkRuntimeRequestAtom, 1)
+    registry.set(checkRuntimeRequestAtom, 2)
+    registry.set(checkRuntimeRequestAtom, 3)
 
     await vi.waitFor(() => expect(sent).toHaveLength(1))
     const frame = sent[0]
@@ -56,6 +62,9 @@ describe('renderer Effect atoms', () => {
         version: '1.2.3'
       })
     )
+
+    // The first burst is throttled to one RPC request.
+    expect(sent).toHaveLength(1)
 
     registry.set(checkRuntimeAtom, undefined)
     await vi.waitFor(() => expect(sent).toHaveLength(2))
@@ -86,6 +95,8 @@ describe('renderer Effect atoms', () => {
     )
 
     release()
+    releaseThrottle()
+    releaseRequests()
     registry.dispose()
     expect(listener).toBeUndefined()
   })
