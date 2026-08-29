@@ -19,8 +19,7 @@ export const makeThrottledAction = <R, A, B, E>(
   run: (value: A, registry: AtomRegistry.AtomRegistry) => Effect.Effect<B, E, R>,
   options: ThrottleOptions
 ): Atom.AtomResultFn<A, void, E> => {
-  const eventsAtom = Atom.keepAlive(
-    runtime.atom(
+  const eventsAtom = runtime.atom(
       Effect.acquireRelease(
         Effect.gen(function*() {
           const events = yield* Queue.unbounded<A>()
@@ -43,7 +42,7 @@ export const makeThrottledAction = <R, A, B, E>(
         (events) => Queue.shutdown(events)
       )
     )
-  )
+
 
   return runtime.fn(
     (_value: A, get: Atom.FnContext) =>

@@ -8,6 +8,7 @@ import '@folio/ui/styles.css'
 export function App(): React.JSX.Element {
   const systemInfoState = useAtomValue(SystemRpcClient.getSystemInfo)
   const requestSystemInfo = useAtomSet(requestSystemInfoAtom)
+  const count = useAtomSet(SystemRpcClient.count, {mode: 'promise'})
 
   const systemInfoLabel = systemInfoState._tag === 'Success'
     ? `${systemInfoState.value.platform} · v${systemInfoState.value.version}`

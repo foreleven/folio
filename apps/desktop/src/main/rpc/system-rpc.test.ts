@@ -8,7 +8,8 @@ import { SystemRpcHandlersLive } from './system-rpc'
 describe('System Effect RPC interface', () => {
   it('serves process metadata through the generated client and handler layer', async () => {
     const TestSystemService = Layer.succeed(SystemService)({
-      getInfo: Effect.succeed({ platform: 'darwin', version: '1.2.3' })
+      getInfo: Effect.succeed({ platform: 'darwin', version: '1.2.3' }),
+      count: (c) => Effect.succeed(c)
     })
     const TestHandlers = SystemRpcHandlersLive.pipe(Layer.provide(TestSystemService))
     const program = Effect.gen(function*() {

@@ -8,6 +8,7 @@ export class SystemService extends Context.Service<
   {
     /** Reads stable runtime metadata from the Electron main process. */
     readonly getInfo: Effect.Effect<SystemInfo>
+    readonly count: (c: number) => Effect.Effect<number>
   }
 >()('folio/services/SystemService') {
   /** Live adapter backed by Electron's application object and Node platform. */
@@ -22,7 +23,8 @@ export class SystemService extends Context.Service<
             platform: process.platform,
             version
           }))
-        )
+        ),
+        count: (c: number) => Effect.succeed(c)
       })
     })
   )
