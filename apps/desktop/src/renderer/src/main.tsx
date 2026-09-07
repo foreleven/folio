@@ -2,6 +2,9 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RegistryProvider } from '@effect/atom-react'
 import { App } from './App'
+import { Settings } from './Settings'
+import { PreferencesProvider } from './preferences'
+import '@folio/ui/styles.css'
 import './styles.css'
 
 const rootElement = document.getElementById('root')
@@ -13,7 +16,9 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     <RegistryProvider>
-      <App />
+      <PreferencesProvider>
+        {window.location.hash === '#settings' ? <Settings /> : <App />}
+      </PreferencesProvider>
     </RegistryProvider>
   </StrictMode>
 )

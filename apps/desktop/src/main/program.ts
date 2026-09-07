@@ -1,7 +1,16 @@
+import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
+import * as NodePath from '@effect/platform-node/NodePath'
 import { Effect, Layer, Stream } from 'effect'
 import { ElectronApp, type ElectronAppEvent } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
 import { MainRpcLive } from './rpc/runtime'
+import { ConfigService } from './services/config-service'
+import { SettingsWindow } from './electron/SettingsWindow'
+import { ApplicationMenuLive } from './electron/ApplicationMenu'
+
+const ConfigLive = ConfigService.layer.pipe(
+  Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer))
+)
 
 /** Handles one Electron lifecycle event through the injected application services. */
 const handleEvent = Effect.fn('main.handleElectronEvent')(
@@ -34,7 +43,9 @@ export const application = Effect.gen(function*() {
 })
 
 /** Complete main-process layer with one shared Electron application boundary. */
-export const MainLive = Layer.merge(MainWindow.layer, MainRpcLive).pipe(
+export const MainLive = Layer.mergeAll(MainWindow.layer, MainRpcLive, ApplicationMenuLive).pipe(
+  Layer.provide(SettingsWindow.layer),
+  Layer.provideMerge(ConfigLive),
   Layer.provideMerge(ElectronApp.layer)
 )
 

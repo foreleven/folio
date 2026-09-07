@@ -125,3 +125,9 @@ export const ElectronRpcClientProtocolLive = Layer.effect(
   RpcClient.Protocol,
   makeElectronRpcClientProtocol
 )
+
+/** Shared concrete transport so all domain clients use one preload listener per window. */
+export const ElectronRpcProtocolLive = ElectronRpcClientProtocolLive.pipe(
+  Layer.provide(ElectronRpcBridgeService.layer),
+  Layer.provide(RpcSerialization.layerJson)
+)

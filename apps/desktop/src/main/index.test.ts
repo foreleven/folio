@@ -44,6 +44,11 @@ vi.mock('electron', () => {
   })
 
   return {
+    Menu: {
+      getApplicationMenu: () => null,
+      buildFromTemplate: vi.fn((template) => template),
+      setApplicationMenu: vi.fn()
+    },
     app: {
       getAppPath: () => '/test/folio',
       getVersion: () => '0.1.0',
