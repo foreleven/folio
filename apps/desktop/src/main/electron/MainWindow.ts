@@ -6,7 +6,7 @@ import { createRendererWindow, loadRenderer, type RendererLoadError } from './re
 export class MainWindow extends Context.Service<
   MainWindow,
   {
-    /** Opens a renderer window. */
+    /** Opens the main renderer maximized within the current display's work area. */
     readonly open: Effect.Effect<void, RendererLoadError>
     /** Reports whether an application window is currently open. */
     readonly isOpen: Effect.Effect<boolean>
@@ -36,6 +36,8 @@ export class MainWindow extends Context.Service<
 
       const open = Effect.gen(function*() {
         const window = createRendererWindow()
+        // Maximize only when ready so startup does not reveal an unloaded renderer.
+        window.once('ready-to-show', () => window.maximize())
         windows.add(window)
         window.once('closed', () => windows.delete(window))
         yield* loadRenderer(window).pipe(

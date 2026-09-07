@@ -29,8 +29,8 @@ export class SettingsWindow extends Context.Service<SettingsWindow, {
 
       const current = createRendererWindow({
         title: 'Settings — Folio',
-        width: 680,
-        height: 520,
+        width: 960,
+        height: 720,
         minWidth: 560,
         minHeight: 440,
         maximizable: false,
