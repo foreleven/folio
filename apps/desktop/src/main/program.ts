@@ -7,6 +7,7 @@ import { MainRpcLive } from './rpc/runtime'
 import { ConfigService } from './services/config-service'
 import { SettingsWindow } from './electron/SettingsWindow'
 import { ApplicationMenuLive } from './electron/ApplicationMenu'
+import { ApplicationThemeLive } from './electron/ApplicationTheme'
 
 const ConfigLive = ConfigService.layer.pipe(
   Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer))
@@ -45,6 +46,7 @@ export const application = Effect.gen(function*() {
 /** Complete main-process layer with one shared Electron application boundary. */
 export const MainLive = Layer.mergeAll(MainWindow.layer, MainRpcLive, ApplicationMenuLive).pipe(
   Layer.provide(SettingsWindow.layer),
+  Layer.provide(ApplicationThemeLive),
   Layer.provideMerge(ConfigLive),
   Layer.provideMerge(ElectronApp.layer)
 )

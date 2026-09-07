@@ -1,4 +1,4 @@
-import { BrowserWindow, shell, type BrowserWindowConstructorOptions } from 'electron'
+import { BrowserWindow, nativeTheme, shell, type BrowserWindowConstructorOptions } from 'electron'
 import { Effect, Schema } from 'effect'
 import { join } from 'node:path'
 
@@ -28,7 +28,12 @@ function openExternalUrl(rawUrl: string): void {
   }
 }
 
-/** Creates and configures one isolated renderer window. */
+/** Matches the shared UI's background token for the current effective Electron theme. */
+export function getRendererBackgroundColor(): string {
+  return nativeTheme.shouldUseDarkColors ? '#0a0a0a' : '#ffffff'
+}
+
+/** Creates and configures one isolated renderer window with a matching native background. */
 export function createRendererWindow(options: BrowserWindowConstructorOptions = {}): BrowserWindow {
   const mainWindow = new BrowserWindow({
     width: 1100,
@@ -36,6 +41,7 @@ export function createRendererWindow(options: BrowserWindowConstructorOptions = 
     minWidth: 760,
     minHeight: 520,
     show: false,
+    backgroundColor: getRendererBackgroundColor(),
     ...options,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -77,4 +83,3 @@ export function loadRenderer(
     catch: (cause) => new RendererLoadError({ cause })
   })
 }
-

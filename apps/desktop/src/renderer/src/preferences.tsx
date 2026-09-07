@@ -1,5 +1,5 @@
 import { useAtomValue } from '@effect/atom-react'
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useState } from 'react'
 import type { GlobalConfig } from '../../shared/config'
 import { configAtom } from './rpc/config-rpc'
 
@@ -26,7 +26,7 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
   const language = config._tag === 'Success' ? config.value.language : 'system'
   const locale = resolveLocale(language, systemLanguage)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     /** Keeps CSS tokens and native controls on the same resolved color scheme. */
     const apply = (): void => {

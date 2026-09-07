@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ELECTRON_RPC_REQUEST_CHANNEL } from '../shared/rpc/electron-rpc'
 
 const electronMocks = vi.hoisted(() => ({
@@ -42,8 +45,15 @@ vi.mock('electron', () => {
     electronMocks.createBrowserWindow(options)
     return mainWindow
   })
+  Object.assign(BrowserWindow, { getAllWindows: () => [] })
 
   return {
+    nativeTheme: {
+      themeSource: 'system',
+      shouldUseDarkColors: false,
+      on: vi.fn(),
+      removeListener: vi.fn()
+    },
     Menu: {
       getApplicationMenu: () => null,
       buildFromTemplate: vi.fn((template) => template),
@@ -71,7 +81,7 @@ vi.mock('electron', () => {
 async function loadMain(): Promise<void> {
   vi.resetModules()
   await import('./index')
-  await Promise.resolve()
+  await vi.waitFor(() => expect(electronMocks.createBrowserWindow).toHaveBeenCalledOnce())
 }
 
 /** Completes the running program through Electron's normal shutdown event. */
@@ -85,14 +95,19 @@ async function shutdownMain(): Promise<void> {
   )
 }
 
-beforeEach(() => {
+let configDirectory: string
+
+beforeEach(async () => {
+  configDirectory = await mkdtemp(join(tmpdir(), 'folio-main-test-'))
+  vi.stubEnv('FOLIO_CONFIG_DIR', configDirectory)
   electronMocks.appListeners.clear()
   vi.clearAllMocks()
   electronMocks.isWindowDestroyed.mockReturnValue(false)
 })
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs()
+  await rm(configDirectory, { recursive: true, force: true })
 })
 
 describe('desktop main window', () => {

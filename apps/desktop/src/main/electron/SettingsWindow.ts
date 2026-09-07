@@ -4,8 +4,8 @@ import { createRendererWindow, loadRenderer, type RendererLoadError } from './re
 
 /** Owns one independent settings window for the lifetime of the main runtime. */
 export class SettingsWindow extends Context.Service<SettingsWindow, {
-  /** Opens settings, or restores and focuses the existing window; load failures allow retry. */
-  readonly open: Effect.Effect<void, RendererLoadError>
+  /** Opens settings when absent, or closes the existing window; serializes repeated requests. */
+  readonly toggle: Effect.Effect<void, RendererLoadError>
 }>()('folio/main/electron/SettingsWindow') {
   static readonly layer = Layer.effect(SettingsWindow, Effect.gen(function*() {
     let window: BrowserWindow | undefined
@@ -19,11 +19,16 @@ export class SettingsWindow extends Context.Service<SettingsWindow, {
     }
     yield* Effect.addFinalizer(() => Effect.sync(destroy))
 
-    const open = Effect.gen(function*() {
+    const toggle = Effect.gen(function*() {
       if (window && !window.isDestroyed()) {
-        if (window.isMinimized()) window.restore()
-        window.show()
-        window.focus()
+        const current = window
+        // Wait for native close completion before the next queued toggle can reopen it.
+        yield* Effect.callback<void>((resume) => {
+          const onClosed = () => resume(Effect.void)
+          current.once('closed', onClosed)
+          current.close()
+          return Effect.sync(() => current.removeListener('closed', onClosed))
+        })
         return
       }
 
@@ -45,6 +50,6 @@ export class SettingsWindow extends Context.Service<SettingsWindow, {
       )
     }).pipe(lock.withPermit)
 
-    return SettingsWindow.of({ open })
+    return SettingsWindow.of({ toggle })
   }))
 }

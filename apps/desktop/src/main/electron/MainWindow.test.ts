@@ -36,6 +36,7 @@ vi.mock('electron', () => {
 
   return {
     BrowserWindow,
+    nativeTheme: { shouldUseDarkColors: true },
     shell: { openExternal: electronMocks.openExternal }
   }
 })
@@ -62,6 +63,7 @@ describe('MainWindow live service', () => {
     expect(electronMocks.openDevTools).toHaveBeenCalledOnce()
     expect(electronMocks.createBrowserWindow).toHaveBeenCalledWith(
       expect.objectContaining({
+        backgroundColor: '#0a0a0a',
         webPreferences: expect.objectContaining({
           preload: expect.stringMatching(/index\.cjs$/)
         })

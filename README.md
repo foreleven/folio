@@ -63,8 +63,8 @@ coordinated. Reads always consult disk, so later reads see manual file edits.
 
 Open the independent settings window with **Cmd+,** on macOS or **Ctrl+,** on
 Windows/Linux, or choose **Settings…** from the application menu. Repeating the
-shortcut focuses/restores the existing settings window; closing it allows a fresh
-window to be opened. Changes save automatically through Effect RPC. The main
+shortcut closes the existing settings window; pressing it again opens a fresh
+window. Changes save automatically through Effect RPC. The main
 process broadcasts committed changes to all open windows; failed writes keep the
 previous preferences active. Manual file edits are picked up when a subscription
 is reopened; no filesystem watcher runs in the background.

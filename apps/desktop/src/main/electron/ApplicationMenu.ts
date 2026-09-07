@@ -11,8 +11,8 @@ export const ApplicationMenuLive = Layer.effectDiscard(Effect.gen(function*() {
   const requests = yield* Queue.unbounded<void>()
   yield* Effect.forkScoped(Effect.forever(
     Queue.take(requests).pipe(
-      Effect.andThen(settings.open),
-      Effect.catch((error) => Effect.logError('Failed to open settings', error))
+      Effect.andThen(settings.toggle),
+      Effect.catch((error) => Effect.logError('Failed to toggle settings', error))
     )
   ))
 

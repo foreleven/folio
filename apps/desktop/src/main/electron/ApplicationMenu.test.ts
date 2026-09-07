@@ -21,14 +21,14 @@ vi.mock('electron', () => ({
 describe('ApplicationMenu', () => {
   it('installs the settings accelerator after ready and restores the previous menu on disposal', async () => {
     const ready = vi.fn()
-    const open = vi.fn()
+    const toggle = vi.fn()
     const runtime = ManagedRuntime.make(ApplicationMenuLive.pipe(Layer.provide(Layer.merge(
       Layer.succeed(ElectronApp)({
         metadata: Effect.succeed({ version: '1', path: '/test', isPackaged: false }),
         whenReady: Effect.sync(ready), events: Stream.empty,
         quitOnWindowAllClosed: false, quit: Effect.void
       }),
-      Layer.succeed(SettingsWindow)({ open: Effect.sync(open) })
+      Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) })
     ))))
     try {
       await runtime.runPromise(Effect.void)
@@ -39,7 +39,7 @@ describe('ApplicationMenu', () => {
       expect(settings?.click).toBeTypeOf('function')
       // Electron supplies menu callback arguments; this handler intentionally ignores them.
       settings?.click?.(undefined as never, undefined as never, undefined as never)
-      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce())
+      await vi.waitFor(() => expect(toggle).toHaveBeenCalledOnce())
     } finally {
       await runtime.dispose()
     }
