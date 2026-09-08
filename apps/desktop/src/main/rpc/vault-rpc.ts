@@ -9,6 +9,7 @@ export const VaultRpcHandlersLive = VaultRpcs.toLayer(Effect.gen(function*() {
   const windows = yield* MainWindow
   return VaultRpcs.of({
     'vault.open': () => launcher.open,
+    'vault.openExisting': ({ id }) => launcher.openExisting(id),
     'vault.get': ({ id }) => windows.getVault(id)
   })
 }))

@@ -5,7 +5,6 @@ import { App } from './App'
 import { Settings } from './settings/Settings'
 import { PreferencesProvider } from './preferences'
 import '@folio/ui/styles.css'
-import './styles.css'
 
 const rootElement = document.getElementById('root')
 

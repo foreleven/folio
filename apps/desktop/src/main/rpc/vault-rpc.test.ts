@@ -12,7 +12,7 @@ const vault = { id: '407bc090-c297-4b3b-96bb-6ced8f64b89c', name: 'wiki', path: 
 /** Provides window context and a controllable selection result through the actual RPC handlers. */
 function handlers(open: VaultLauncher['Service']['open']) {
   return VaultRpcHandlersLive.pipe(Layer.provide(Layer.merge(
-    Layer.succeed(VaultLauncher)({ open }),
+    Layer.succeed(VaultLauncher)({ open, openExisting: (id) => id === vault.id ? Effect.succeed(vault) : Effect.fail(new VaultError({ message: 'Unknown vault', cause: id })) }),
     Layer.succeed(MainWindow)({ open: Effect.void, openVault: () => Effect.void, isOpen: Effect.succeed(true), getVault: (id) => Effect.succeed(id === vault.id ? vault : null) })
   )))
 }
@@ -38,5 +38,17 @@ describe('Vault RPC', () => {
       return yield* Effect.flip(client['vault.open']())
     }).pipe(Effect.provide(handlers(Effect.fail(new VaultError({ message: 'Permission denied', cause: 'EACCES' })))), Effect.scoped))
     expect(error).toMatchObject({ _tag: 'VaultError', message: 'Permission denied' })
+  })
+
+  it('routes saved vault IDs and preserves unknown-vault errors', async () => {
+    const results = await Effect.runPromise(Effect.gen(function*() {
+      const client = yield* RpcTest.makeClient(VaultRpcs)
+      return [
+        yield* client['vault.openExisting']({ id: vault.id }),
+        yield* Effect.flip(client['vault.openExisting']({ id: '407bc090-c297-4b3b-96bb-6ced8f64b89d' }))
+      ]
+    }).pipe(Effect.provide(handlers(Effect.succeed(null))), Effect.scoped))
+    expect(results[0]).toEqual(vault)
+    expect(results[1]).toMatchObject({ _tag: 'VaultError', message: 'Unknown vault' })
   })
 })

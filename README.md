@@ -24,6 +24,11 @@ npm run package
 
 `npm run package` creates platform installers in `apps/desktop/dist`.
 
+Reloading a renderer resets its Effect RPC session in the main process and
+interrupts the old document's subscriptions. Connections follow document
+lifetimes even when Electron reuses the same `WebContents`; in-page hash
+navigation keeps its session, and other windows keep their own subscriptions.
+
 ## Global configuration
 
 Preferences are stored in `~/.folio/config.json`. Override the directory for one
@@ -81,15 +86,24 @@ npx shadcn@latest add @shadcn/input --cwd packages/ui
 Import components from `@folio/ui/components/ui/button` (or the package barrel),
 and import `@folio/ui/styles.css` once in the renderer entry. Electron Vite's
 Tailwind plugin compiles the shared styles and application utilities.
+All page layouts, typography, responsive rules, and interaction styles use
+Tailwind CSS v4 utility classes in TSX. `packages/ui/src/styles.css` is the single
+stylesheet entry for Tailwind imports, shared theme tokens, and base styles;
+there is no separate page stylesheet. Tailwind Preflight supplies the CSS reset.
 
 ## Vaults
 
 A vault is an existing directory containing personal wiki files. The welcome page's
-**Open Folder** button or **Cmd/Ctrl+O** opens a native directory picker (which also
+**Open Vault** button under **Get Started** or **Cmd/Ctrl+O** opens a native directory picker (which also
 allows creating a folder). If the source window is at welcome, the selected vault
 loads in that window. If it already has a vault, the selection opens in a new
 window. Opening the same vault again restores and focuses its existing window.
 **Cmd/Ctrl+Shift+N** opens another welcome window.
+**Recent Vaults** lists registered vaults, newest registrations first, with names
+and full paths available on hover. Selecting one opens it directly without a
+folder picker, using its saved ID and path. Missing folders and configuration
+errors leave welcome open with a retryable error. The list follows the shared
+configuration stream, so vaults registered in other windows appear automatically.
 Closing a window does not delete its files or registration. Startup shows the
 welcome page; restoring the previous session is not implemented yet.
 

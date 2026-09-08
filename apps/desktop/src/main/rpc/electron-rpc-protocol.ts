@@ -1,4 +1,4 @@
-import { ipcMain, type IpcMainEvent, type WebContents } from 'electron'
+import { ipcMain, type IpcMainEvent, type WebContents, type WebContentsDidStartNavigationEventParams } from 'electron'
 import { Effect, Layer, Option, Queue } from 'effect'
 import {
   type RpcMessage,
@@ -21,9 +21,13 @@ interface ElectronRpcConnection {
 interface TrackedWebContents {
   readonly sender: WebContents
   readonly onDestroyed: () => void
+  readonly onNavigation: (details: WebContentsDidStartNavigationEventParams) => void
+  readonly onProcessGone: () => void
+  generation: number
 }
 
 interface IncomingFrame {
+  readonly generation: number
   readonly frame: ElectronRpcFrame
   readonly sender: WebContents
 }
@@ -40,7 +44,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
     const trackedWebContents = new Map<number, TrackedWebContents>()
     let nextClientId = 0
 
-    /** Removes all Effect RPC clients owned by a destroyed renderer process. */
+    /** Disconnects the old document and interrupts its streams without affecting other windows. */
     const disconnectSender = (senderId: number): void => {
       for (const [clientId, connection] of connections) {
         if (connection.sender.id !== senderId) {
@@ -50,22 +54,45 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
         connectionIds.delete(`${senderId}:${connection.rendererClientId}`)
         Queue.offerUnsafe(disconnects, clientId)
       }
+    }
+
+    /** Removes native lifecycle listeners only when the WebContents or protocol is disposed. */
+    const untrackSender = (senderId: number): void => {
+      const tracked = trackedWebContents.get(senderId)
+      if (!tracked) return
+      tracked.sender.removeListener('destroyed', tracked.onDestroyed)
+      tracked.sender.removeListener('did-start-navigation', tracked.onNavigation)
+      tracked.sender.removeListener('render-process-gone', tracked.onProcessGone)
       trackedWebContents.delete(senderId)
     }
 
-    /** Stops tracking a renderer once it owns no logical RPC clients. */
-    const untrackIdleSender = (senderId: number): void => {
-      for (const connection of connections.values()) {
-        if (connection.sender.id === senderId) {
-          return
+    /** Tracks document generations before queueing frames, so pre-reload frames cannot become new requests. */
+    const trackSender = (sender: WebContents): TrackedWebContents => {
+      const existing = trackedWebContents.get(sender.id)
+      if (existing) return existing
+      const tracked: TrackedWebContents = {
+        sender,
+        generation: 0,
+        onDestroyed: () => {
+          disconnectSender(sender.id)
+          untrackSender(sender.id)
+        },
+        onNavigation: (details) => {
+          // Hash changes bind welcome to a vault without replacing its runtime.
+          if (!details.isMainFrame || details.isSameDocument) return
+          tracked.generation++
+          disconnectSender(sender.id)
+        },
+        onProcessGone: () => {
+          tracked.generation++
+          disconnectSender(sender.id)
         }
       }
-
-      const tracked = trackedWebContents.get(senderId)
-      if (tracked) {
-        tracked.sender.removeListener('destroyed', tracked.onDestroyed)
-        trackedWebContents.delete(senderId)
-      }
+      trackedWebContents.set(sender.id, tracked)
+      sender.once('destroyed', tracked.onDestroyed)
+      sender.on('did-start-navigation', tracked.onNavigation)
+      sender.on('render-process-gone', tracked.onProcessGone)
+      return tracked
     }
 
     /** Finds or creates the server-side client identity for one renderer runtime. */
@@ -80,26 +107,22 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
       connectionIds.set(key, clientId)
       connections.set(clientId, { rendererClientId, sender })
 
-      if (!trackedWebContents.has(sender.id)) {
-        const onDestroyed = () => disconnectSender(sender.id)
-        trackedWebContents.set(sender.id, { sender, onDestroyed })
-        sender.once('destroyed', onDestroyed)
-      }
-
       return clientId
     }
 
     /** Queues one validated outer frame; the scoped consumer preserves IPC order. */
     const onRequest = (event: IpcMainEvent, value: unknown): void => {
-      if (!isElectronRpcFrame(value)) {
+      if (!isElectronRpcFrame(value) || event.sender.isDestroyed()) {
         return
       }
-      Queue.offerUnsafe(incoming, { frame: value, sender: event.sender })
+      const { generation } = trackSender(event.sender)
+      Queue.offerUnsafe(incoming, { frame: value, sender: event.sender, generation })
     }
 
     /** Decodes one queued frame and feeds only valid inner messages into Effect RPC. */
-    const receive = ({ frame, sender }: IncomingFrame) =>
-      Effect.try({
+    const receive = ({ frame, sender, generation }: IncomingFrame) => {
+      if (trackedWebContents.get(sender.id)?.generation !== generation) return Effect.void
+      return Effect.try({
         try: () => parser.decode(frame.data),
         catch: (cause) => cause
       }).pipe(
@@ -108,12 +131,17 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
             if (!isElectronRpcClientMessage(message)) {
               return Effect.logWarning('Ignored invalid Electron RPC client message')
             }
-            return writeRequest(getClientId(sender, frame.clientId), message)
+            // A previous message may have yielded while the document navigated.
+            if (trackedWebContents.get(sender.id)?.generation !== generation) return Effect.void
+            // Effect RPC rejects duplicate/ended requests by self-interrupting.
+            // Contain that exit to this message so HMR cannot stop all IPC traffic.
+            return writeRequest(getClientId(sender, frame.clientId), message).pipe(Effect.exit, Effect.asVoid)
           })
         ),
         Effect.catch((cause) => Effect.logWarning('Failed to decode Electron RPC request', cause)),
         Effect.asVoid
       )
+    }
 
     // A single scoped consumer gives control frames deterministic ordering and
     // guarantees that no detached receive fiber survives protocol shutdown.
@@ -126,8 +154,8 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
       () =>
         Effect.sync(() => {
           ipcMain.removeListener(ELECTRON_RPC_REQUEST_CHANNEL, onRequest)
-          for (const { onDestroyed, sender } of trackedWebContents.values()) {
-            sender.removeListener('destroyed', onDestroyed)
+          for (const senderId of trackedWebContents.keys()) {
+            untrackSender(senderId)
           }
         })
     )
@@ -159,7 +187,6 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
           }
           connections.delete(clientId)
           connectionIds.delete(`${connection.sender.id}:${connection.rendererClientId}`)
-          untrackIdleSender(connection.sender.id)
         }),
       clientIds: Effect.sync(() => new Set(connections.keys())),
       initialMessage: Effect.succeed(Option.none()),

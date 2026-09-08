@@ -1,6 +1,9 @@
-import { Deferred, Effect, Layer } from 'effect'
+import { Deferred, Effect, Layer, ManagedRuntime, Schema, Stream } from 'effect'
+import { EventEmitter } from 'node:events'
 import {
   RpcMessage,
+  Rpc,
+  RpcGroup,
   RpcSerialization,
   RpcServer
 } from 'effect/unstable/rpc'
@@ -28,6 +31,119 @@ beforeEach(() => {
 })
 
 describe('Electron Effect RPC server protocol', () => {
+  it.each([0, 1])('delivers a new stream snapshot after the same WebContents reloads and reuses request IDs (client %i)', async (nextClientId) => {
+    let activeSubscriptions = 0
+    const Rpcs = RpcGroup.make(Rpc.make('watch', { success: Schema.String, stream: true }))
+    const runtime = ManagedRuntime.make(RpcServer.layer(Rpcs).pipe(
+      Layer.provide(Rpcs.toLayerHandler('watch', () => Stream.unwrap(Effect.sync(() => {
+        activeSubscriptions++
+        return Stream.concat(Stream.make('snapshot'), Stream.never).pipe(
+          Stream.ensuring(Effect.sync(() => { activeSubscriptions-- }))
+        )
+      })))),
+      Layer.provide(ElectronRpcServerProtocolLive),
+      Layer.provide(RpcSerialization.layerJson)
+    ))
+    const sender = Object.assign(new EventEmitter(), {
+      id: 45, isDestroyed: () => false, send: vi.fn()
+    })
+    const otherWindow = Object.assign(new EventEmitter(), {
+      id: 46, isDestroyed: () => false, send: vi.fn()
+    })
+    try {
+      await runtime.runPromise(Effect.void)
+      const receive = electronMocks.on.mock.calls[0][1]
+      const request = { clientId: 0, data: JSON.stringify({
+        _tag: 'Request', id: 0, tag: 'watch', payload: null, headers: []
+      }) }
+      receive({ sender }, request)
+      await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(
+        ELECTRON_RPC_RESPONSE_CHANNEL,
+        { clientId: 0, data: JSON.stringify({ _tag: 'Chunk', requestId: 0, values: ['snapshot'] }) }
+      ))
+      receive({ sender }, { clientId: 0, data: JSON.stringify({ _tag: 'Ack', requestId: 0 }) })
+      receive({ sender: otherWindow }, request)
+      await vi.waitFor(() => expect(otherWindow.send).toHaveBeenCalled())
+
+      // In-place routes and subframe navigation keep the existing subscriptions.
+      for (const details of [
+        { isMainFrame: true, isSameDocument: true },
+        { isMainFrame: false, isSameDocument: false }
+      ]) {
+        sender.emit('did-start-navigation', details)
+        sender.send.mockClear()
+        receive({ sender }, { clientId: 0, data: JSON.stringify({ _tag: 'Ping' }) })
+        await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(
+          ELECTRON_RPC_RESPONSE_CHANNEL, { clientId: 0, data: JSON.stringify({ _tag: 'Pong' }) }
+        ))
+        expect(activeSubscriptions).toBe(2)
+      }
+
+      // Vite can replace an RPC module before requesting a full page reload.
+      // A rejected duplicate must not kill the shared IPC consumer in that gap.
+      receive({ sender }, request)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      // Reload destroys the JS runtime, not WebContents; its finalizers cannot
+      // send Eof and the new runtime starts client/request counters at zero.
+      for (let reload = 0; reload < 3; reload++) {
+        sender.send.mockClear()
+        sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+        receive({ sender }, { ...request, clientId: nextClientId })
+        await vi.waitFor(() => expect(sender.send).toHaveBeenCalledWith(
+          ELECTRON_RPC_RESPONSE_CHANNEL,
+          { clientId: nextClientId, data: JSON.stringify({ _tag: 'Chunk', requestId: 0, values: ['snapshot'] }) }
+        ), { timeout: 500 })
+        expect(sender.send).toHaveBeenCalledTimes(1)
+        // Later reloads interrupt streams awaiting Ack, and never accumulate subscriptions.
+        expect(activeSubscriptions).toBe(2)
+      }
+      otherWindow.send.mockClear()
+      receive({ sender: otherWindow }, { clientId: 0, data: JSON.stringify({ _tag: 'Ping' }) })
+      await vi.waitFor(() => expect(otherWindow.send).toHaveBeenCalledWith(
+        ELECTRON_RPC_RESPONSE_CHANNEL, { clientId: 0, data: JSON.stringify({ _tag: 'Pong' }) }
+      ))
+    } finally { await runtime.dispose() }
+    expect(activeSubscriptions).toBe(0)
+    expect(sender.eventNames()).toEqual([])
+    expect(otherWindow.eventNames()).toEqual([])
+  })
+
+  it.each(['did-start-navigation', 'render-process-gone', 'destroyed'])(
+    'drops old queued frames after %s without blocking another window', async (event) => {
+      let destroyed = false
+      const sender = Object.assign(new EventEmitter(), { id: 47, isDestroyed: () => destroyed, send: vi.fn() })
+      const other = Object.assign(new EventEmitter(), { id: 48, isDestroyed: () => false, send: vi.fn() })
+      const received: Array<string> = []
+      const TestProtocol = ElectronRpcServerProtocolLive.pipe(Layer.provide(RpcSerialization.layerJson))
+      await Effect.runPromise(Effect.gen(function*() {
+        const protocol = yield* RpcServer.Protocol
+        const barrier = yield* Deferred.make<void>()
+        yield* Effect.forkScoped(protocol.run((_clientId, message) => {
+          if (message._tag !== 'Request') return Effect.void
+          received.push(message.tag)
+          return message.tag === 'barrier' ? Deferred.succeed(barrier, undefined).pipe(Effect.asVoid) : Effect.void
+        }))
+        const receive = electronMocks.on.mock.calls[0][1]
+        const frame = (tag: string) => ({ clientId: 0, data: JSON.stringify({
+          _tag: 'Request', id: 0, tag, payload: null, headers: []
+        }) })
+        // Queue a request and destroy its document before the consumer gets a turn.
+        receive({ sender }, frame('stale'))
+        destroyed = event === 'destroyed'
+        sender.emit(event, { isMainFrame: true, isSameDocument: false })
+        if (destroyed) receive({ sender }, frame('after-destroy'))
+        receive({ sender: other }, frame('barrier'))
+        yield* Deferred.await(barrier)
+        expect(received).toEqual(['barrier'])
+        expect((yield* protocol.clientIds).size).toBe(1)
+        expect(sender.send).not.toHaveBeenCalled()
+      }).pipe(Effect.provide(TestProtocol), Effect.scoped))
+      expect(sender.eventNames()).toEqual([])
+      expect(other.eventNames()).toEqual([])
+    }
+  )
+
   it('routes renderer frames through an isolated server client connection', async () => {
     const send = vi.fn()
     const once = vi.fn()
@@ -36,6 +152,7 @@ describe('Electron Effect RPC server protocol', () => {
       id: 42,
       isDestroyed: () => false,
       once,
+      on: vi.fn(),
       removeListener: removeWebContentsListener,
       send
     }
@@ -56,13 +173,14 @@ describe('Electron Effect RPC server protocol', () => {
     )
     const program = Effect.gen(function*() {
       const protocol = yield* RpcServer.Protocol
+      const ended = yield* Deferred.make<void>()
       const received = yield* Deferred.make<
         readonly [number, RpcMessage.FromClientEncoded]
       >()
       yield* Effect.forkScoped(
         protocol.run((clientId, message) =>
           message._tag === 'Eof'
-            ? protocol.end(clientId)
+            ? protocol.end(clientId).pipe(Effect.andThen(Deferred.succeed(ended, undefined)))
             : Deferred.succeed(received, [clientId, message]).pipe(Effect.asVoid)
         )
       )
@@ -82,9 +200,8 @@ describe('Electron Effect RPC server protocol', () => {
         { sender },
         { clientId: 7, data: JSON.stringify({ _tag: 'Eof' }) }
       )
-      yield* Effect.promise(() =>
-        vi.waitFor(() => expect(removeWebContentsListener).toHaveBeenCalledOnce())
-      )
+      yield* Deferred.await(ended)
+      expect(removeWebContentsListener).not.toHaveBeenCalled()
 
       return { receivedRequest, clientIds: yield* protocol.clientIds }
     }).pipe(Effect.provide(TestProtocol), Effect.scoped)
@@ -102,7 +219,7 @@ describe('Electron Effect RPC server protocol', () => {
       data: JSON.stringify(response)
     })
     expect(electronMocks.removeListener).toHaveBeenCalledOnce()
-    expect(removeWebContentsListener).toHaveBeenCalledOnce()
+    expect(removeWebContentsListener).toHaveBeenCalledTimes(3)
   })
 
   it('ignores malformed inner messages without allocating a client connection', async () => {
@@ -110,6 +227,7 @@ describe('Electron Effect RPC server protocol', () => {
       id: 43,
       isDestroyed: () => false,
       once: vi.fn(),
+      on: vi.fn(),
       removeListener: vi.fn(),
       send: vi.fn()
     }
@@ -133,7 +251,8 @@ describe('Electron Effect RPC server protocol', () => {
     }).pipe(Effect.provide(TestProtocol), Effect.scoped)
 
     await expect(Effect.runPromise(program)).resolves.toEqual(new Set())
-    expect(sender.once).not.toHaveBeenCalled()
+    expect(sender.send).not.toHaveBeenCalled()
+    expect(sender.removeListener).toHaveBeenCalledTimes(3)
   })
 
   it('processes request and control frames in arrival order', async () => {
@@ -141,6 +260,7 @@ describe('Electron Effect RPC server protocol', () => {
       id: 44,
       isDestroyed: () => false,
       once: vi.fn(),
+      on: vi.fn(),
       removeListener: vi.fn(),
       send: vi.fn()
     }

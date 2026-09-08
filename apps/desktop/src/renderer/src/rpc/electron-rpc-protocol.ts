@@ -85,8 +85,8 @@ const makeElectronRpcClientProtocol = RpcClient.Protocol.make(
         () =>
           Effect.sync(() => {
             try {
-              // Eof releases main-process mappings during reload/HMR even though
-              // the underlying WebContents remains alive.
+              // Graceful runtime disposal sends Eof. A full page reload cannot
+              // await these finalizers; the main process handles document teardown.
               for (const clientId of knownClientIds) {
                 bridge.send({ clientId, data: encode({ _tag: 'Eof' }) })
               }

@@ -34,7 +34,7 @@ describe('ApplicationMenu', () => {
       }),
       Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) }),
       Layer.succeed(MainWindow)({ open: Effect.sync(newWindow), isOpen: Effect.succeed(false), openVault: () => Effect.void, getVault: () => Effect.succeed(null) }),
-      Layer.succeed(VaultLauncher)({ open: Effect.sync(() => { open(); return null }) })
+      Layer.succeed(VaultLauncher)({ open: Effect.sync(() => { open(); return null }), openExisting: () => Effect.die('unused') })
     ))))
     try {
       await runtime.runPromise(Effect.void)
