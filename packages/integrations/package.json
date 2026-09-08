@@ -1,0 +1,27 @@
+{
+  "name": "@folio/integrations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vault integrations and their installation lifecycles",
+  "exports": {
+    ".": "./src/index.ts",
+    "./lark": "./src/lark/index.ts"
+  },
+  "scripts": {
+    "install:lark": "node src/install-lark.ts",
+    "verify:lark": "node src/verify-lark.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@larksuiteoapi/node-sdk": "1.73.3",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}
