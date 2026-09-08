@@ -4,7 +4,16 @@ import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
-  main: {},
+  main: {
+    build: {
+      externalizeDeps: {
+        // Compile the workspace's TypeScript, but let Node load the SDK so ws can
+        // catch missing optional native dependencies (bufferutil/utf-8-validate).
+        exclude: ['@folio/integrations'],
+        include: ['@larksuiteoapi/node-sdk']
+      }
+    }
+  },
   preload: {
     build: {
       rollupOptions: {

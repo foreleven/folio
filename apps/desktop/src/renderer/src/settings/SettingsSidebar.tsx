@@ -12,7 +12,7 @@ import {
 import { useLocale } from '../preferences'
 import { settingsMessages } from './messages'
 
-export type SettingsPage = 'general' | 'models'
+export type SettingsPage = 'general' | 'models' | 'integrations'
 
 /** Navigates settings sections without changing the independent window's entry route. */
 export function SettingsSidebar({
@@ -40,6 +40,11 @@ export function SettingsSidebar({
                   onClick={() => onPageChange('general')}
                 >
                   {text.general}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton isActive={page === 'integrations'} aria-current={page === 'integrations' ? 'page' : undefined} onClick={() => onPageChange('integrations')}>
+                  {text.integrations}
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
