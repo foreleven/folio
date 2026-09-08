@@ -4,7 +4,7 @@ Electron desktop monorepo powered by npm workspaces.
 
 ## Requirements
 
-- Node.js 22.12 or newer
+- Node.js 24 or newer (required by the Effect SQLite driver's `node:sqlite` APIs)
 - npm 11 or newer
 
 ## Workspaces
@@ -116,10 +116,20 @@ settings live at `~/.folio/vaults/<id>/config.json`, initially `{}`. Identity an
 content paths live only in the global index. The whole structure inherits
 `FOLIO_CONFIG_DIR`; a missing `vaults` field defaults to an empty array.
 
+Each vault has its own SQLite database at `~/.folio/vaults/<id>/data.db`, created
+when the vault is opened, including vaults registered before database support.
+The main process uses `@effect/sql-sqlite-node` (backed by `node:sqlite`) and
+`effect/unstable/sql`. SQL consumers provide `vaultDatabaseLayer(directory)` with
+the vault's configuration directory to access `SqlClient.SqlClient`. Connections
+are closed when their Effect scope ends. The driver enables WAL, so SQLite may
+also create `data.db-wal` and `data.db-shm` alongside the database while it is open.
+No application tables are created yet.
+
 Registration and preference updates share the global config write lock and atomic
 replacement, so simultaneous operations preserve both. The index is committed
-before initializing vault settings; if initialization fails, reopening retries
-with the saved ID. Existing vault settings are never reset by opening a vault.
+before initializing vault settings and the database; if initialization fails,
+reopening retries with the saved ID. Existing vault settings and database contents
+are never reset by opening a vault. Database failures are reported as `VaultError`.
 The former folder-name registry is no longer read and is not automatically
 migrated or deleted. User content stays in the selected directory. This first
 increment establishes vault registration and window context; file browsing and

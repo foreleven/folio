@@ -43,6 +43,8 @@ describe('VaultService', () => {
     })
     const settingsFile = join(root, 'config/vaults', vault.id, 'config.json')
     expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
+    const databaseFile = join(root, 'config/vaults', vault.id, 'data.db')
+    expect((await readFile(databaseFile)).subarray(0, 16).toString()).toBe('SQLite format 3\0')
     expect(await readdir(selected)).toEqual(['note.md'])
     expect(await readFile(join(selected, 'note.md'), 'utf8')).toBe('# My note')
     await writeFile(settingsFile, '{"custom":"preserved"}')
@@ -162,5 +164,42 @@ describe('VaultService', () => {
       expect(await retry.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))).toEqual(registered)
       expect(JSON.parse(await readFile(join(root, 'config/vaults', registered.id, 'config.json'), 'utf8'))).toEqual({})
     } finally { await retry.dispose() }
+  })
+
+  it('creates a missing database for an existing vault without resetting its settings', async () => {
+    const selected = await folder('wiki')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const vault = await runtime.runPromise(store.register(selected))
+      const directory = join(root, 'config/vaults', vault.id)
+      await rm(join(directory, 'data.db'))
+      await writeFile(join(directory, 'config.json'), '{"custom":true}')
+      expect(await runtime.runPromise(store.register(selected))).toEqual(vault)
+      expect((await readFile(join(directory, 'data.db'))).subarray(0, 16).toString()).toBe('SQLite format 3\0')
+      expect(await readFile(join(directory, 'config.json'), 'utf8')).toBe('{"custom":true}')
+    } finally { await runtime.dispose() }
+  })
+
+  it.each(['corrupt file', 'directory'])('reports an unusable database (%s) and retries with the saved ID', async (kind) => {
+    const selected = await folder('wiki')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const vault = await runtime.runPromise(store.register(selected))
+      const databaseFile = join(root, 'config/vaults', vault.id, 'data.db')
+      await rm(databaseFile)
+      if (kind === 'directory') await mkdir(databaseFile)
+      else await writeFile(databaseFile, 'damaged database')
+
+      expect(await runtime.runPromise(Effect.flip(store.register(selected)))).toMatchObject({ _tag: 'VaultError' })
+      if (kind === 'corrupt file') expect(await readFile(databaseFile, 'utf8')).toBe('damaged database')
+      const config = await runtime.runPromise(ConfigService)
+      expect((await runtime.runPromise(config.get)).vaults).toEqual([vault])
+
+      await rm(databaseFile, { recursive: true })
+      expect(await runtime.runPromise(store.register(selected))).toEqual(vault)
+      expect((await readFile(databaseFile)).subarray(0, 16).toString()).toBe('SQLite format 3\0')
+    } finally { await runtime.dispose() }
   })
 })
