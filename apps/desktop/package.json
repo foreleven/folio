@@ -18,7 +18,8 @@
     "@folio/ui": "file:../../packages/ui",
     "effect": "^4.0.0-rc.112",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "uuid": "^14.0.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

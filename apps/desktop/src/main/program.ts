@@ -9,6 +9,9 @@ import { SettingsWindow } from './electron/SettingsWindow'
 import { ApplicationMenuLive } from './electron/ApplicationMenu'
 import { ApplicationThemeLive } from './electron/ApplicationTheme'
 
+import { VaultService } from './services/vault-service'
+import { VaultLauncher } from './electron/VaultLauncher'
+
 const ConfigLive = ConfigService.layer.pipe(
   Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer))
 )
@@ -44,7 +47,11 @@ export const application = Effect.gen(function*() {
 })
 
 /** Complete main-process layer with one shared Electron application boundary. */
-export const MainLive = Layer.mergeAll(MainWindow.layer, MainRpcLive, ApplicationMenuLive).pipe(
+export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive).pipe(
+  Layer.provide(VaultLauncher.layer),
+  Layer.provideMerge(MainWindow.layer),
+  Layer.provide(VaultService.layer),
+  Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)),
   Layer.provide(SettingsWindow.layer),
   Layer.provide(ApplicationThemeLive),
   Layer.provideMerge(ConfigLive),

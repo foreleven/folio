@@ -36,7 +36,8 @@ FOLIO_CONFIG_DIR=/tmp/folio-dev npm run dev
 ```json
 {
   "theme": "system",
-  "language": "system"
+  "language": "system",
+  "vaults": []
 }
 ```
 
@@ -80,3 +81,46 @@ npx shadcn@latest add @shadcn/input --cwd packages/ui
 Import components from `@folio/ui/components/ui/button` (or the package barrel),
 and import `@folio/ui/styles.css` once in the renderer entry. Electron Vite's
 Tailwind plugin compiles the shared styles and application utilities.
+
+## Vaults
+
+A vault is an existing directory containing personal wiki files. The welcome page's
+**Open Folder** button or **Cmd/Ctrl+O** opens a native directory picker (which also
+allows creating a folder). If the source window is at welcome, the selected vault
+loads in that window. If it already has a vault, the selection opens in a new
+window. Opening the same vault again restores and focuses its existing window.
+**Cmd/Ctrl+Shift+N** opens another welcome window.
+Closing a window does not delete its files or registration. Startup shows the
+welcome page; restoring the previous session is not implemented yet.
+
+The global `~/.folio/config.json` contains the vault index alongside preferences:
+
+```json
+{
+  "theme": "system",
+  "language": "system",
+  "vaults": [
+    {
+      "id": "01941f29-7c00-73e4-a310-744d2167fc5b",
+      "name": "My Wiki",
+      "path": "/Users/me/Documents/My Wiki"
+    }
+  ]
+}
+```
+
+New IDs use UUID v7 and are reused across restarts. Paths are absolute and
+canonicalized, so symlinks to the same folder reuse its registration. Different
+folders can have the same display name; each has an independent ID. Vault-level
+settings live at `~/.folio/vaults/<id>/config.json`, initially `{}`. Identity and
+content paths live only in the global index. The whole structure inherits
+`FOLIO_CONFIG_DIR`; a missing `vaults` field defaults to an empty array.
+
+Registration and preference updates share the global config write lock and atomic
+replacement, so simultaneous operations preserve both. The index is committed
+before initializing vault settings; if initialization fails, reopening retries
+with the saved ID. Existing vault settings are never reset by opening a vault.
+The former folder-name registry is no longer read and is not automatically
+migrated or deleted. User content stays in the selected directory. This first
+increment establishes vault registration and window context; file browsing and
+editing are not implemented yet.

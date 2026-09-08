@@ -64,7 +64,7 @@ describe('ConfigService', () => {
 
   it('returns defaults without creating the directory or file', async () => {
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system' })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system', vaults: [] })
       expect(await readdir(root)).toEqual([])
     }, makeRuntime(join(root, 'missing')))
   })
@@ -73,26 +73,26 @@ describe('ConfigService', () => {
     const directory = join(root, 'nested', 'config')
     await withStore(async (store) => {
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'system'
+        theme: 'dark', language: 'system', vaults: []
       })
       expect(JSON.parse(await readFile(store.filePath, 'utf8'))).toEqual({
-        theme: 'dark', language: 'system'
+        theme: 'dark', language: 'system', vaults: []
       })
       expect(await readdir(directory)).toEqual(['config.json'])
     }, makeRuntime(directory))
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'system' })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'system', vaults: [] })
     }, makeRuntime(directory))
   })
 
   it('defaults missing fields and sees later manual edits', async () => {
     await writeFile(join(root, 'config.json'), '{"theme":"light"}')
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system' })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system', vaults: [] })
       await writeFile(store.filePath, '{"language":"zh-CN"}')
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN' })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN', vaults: [] })
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'zh-CN'
+        theme: 'dark', language: 'zh-CN', vaults: []
       })
     })
   })
@@ -114,7 +114,7 @@ describe('ConfigService', () => {
   it('rejects invalid patches at runtime without creating a file', async () => {
     await withStore(async (store) => {
       // Simulate an untyped caller crossing the service boundary.
-      for (const patch of [{ theme: 'blue' }, { language: undefined }, { typo: 'dark' }]) {
+      for (const patch of [{ theme: 'blue' }, { language: undefined }, { typo: 'dark' }, { vaults: [] }]) {
         const error = await Effect.runPromise(Effect.flip(
           // @ts-expect-error Deliberately invalid input exercises runtime Schema validation.
           store.update(patch)
@@ -131,7 +131,7 @@ describe('ConfigService', () => {
         store.update({ theme: 'dark' }),
         store.update({ language: 'en' })
       ], { concurrency: 'unbounded' }))
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'en' })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'en', vaults: [] })
       expect(await readdir(root)).toEqual(['config.json'])
     })
   })

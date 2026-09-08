@@ -13,8 +13,9 @@ import { ConfigRpcHandlersLive } from './config-rpc'
 describe('Configuration RPC', () => {
   it('streams a snapshot and committed changes to two independent clients', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'folio-config-rpc-'))
+    const vault = { id: '01941f29-7c00-73e4-a310-744d2167fc5b', name: 'wiki', path: '/wiki' }
     const handlers = ConfigRpcHandlersLive.pipe(
-      Layer.provide(ConfigService.layer),
+      Layer.provideMerge(ConfigService.layer),
       Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord({ FOLIO_CONFIG_DIR: directory })))
     )
@@ -26,20 +27,23 @@ describe('Configuration RPC', () => {
         const secondReady = yield* Deferred.make<void>()
         const firstValues = yield* first['config.watch']().pipe(
           Stream.tap(() => Deferred.succeed(firstReady, undefined)),
-          Stream.take(2), Stream.runCollect, Effect.forkChild
+          Stream.take(3), Stream.runCollect, Effect.forkChild
         )
         const secondValues = yield* second['config.watch']().pipe(
           Stream.tap(() => Deferred.succeed(secondReady, undefined)),
-          Stream.take(2), Stream.runCollect, Effect.forkChild
+          Stream.take(3), Stream.runCollect, Effect.forkChild
         )
         yield* Deferred.await(firstReady)
         yield* Deferred.await(secondReady)
+        const config = yield* ConfigService
+        yield* config.addVault(vault)
         const saved = yield* first['config.update']({ theme: 'dark', language: 'zh-CN' })
         return { saved, first: yield* Fiber.join(firstValues), second: yield* Fiber.join(secondValues) }
       }).pipe(Effect.provide(handlers), Effect.scoped))
       const expected = [
-        { theme: 'system', language: 'system' },
-        { theme: 'dark', language: 'zh-CN' }
+        { theme: 'system', language: 'system', vaults: [] },
+        { theme: 'system', language: 'system', vaults: [vault] },
+        { theme: 'dark', language: 'zh-CN', vaults: [vault] }
       ]
       expect(results.first).toEqual(expected)
       expect(results.second).toEqual(expected)

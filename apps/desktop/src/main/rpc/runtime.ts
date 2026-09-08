@@ -1,3 +1,5 @@
+import { VaultRpcs } from '../../shared/rpc/vault-rpc'
+import { VaultRpcHandlersLive } from './vault-rpc'
 import { Layer } from 'effect'
 import { RpcSerialization, RpcServer } from 'effect/unstable/rpc'
 import { SystemRpcs } from '../../shared/rpc/system-rpc'
@@ -18,10 +20,11 @@ const ElectronRpcProtocolLive = ElectronRpcServerProtocolLive.pipe(
 const RpcDependenciesLive = Layer.mergeAll(
   SystemHandlersLive,
   ConfigRpcHandlersLive,
+  VaultRpcHandlersLive,
   ElectronRpcProtocolLive
 )
 
 /** Complete main-process Effect RPC server Layer. */
-export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ConfigRpcs)).pipe(
+export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ConfigRpcs, VaultRpcs)).pipe(
   Layer.provide(RpcDependenciesLive)
 )

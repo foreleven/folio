@@ -66,7 +66,7 @@ export function createRendererWindow(options: BrowserWindowConstructorOptions = 
 /** Loads the configured renderer and keeps navigation failures in Effect. */
 export function loadRenderer(
   mainWindow: BrowserWindow,
-  page?: 'settings'
+  page?: 'settings' | `vault/${string}`
 ): Effect.Effect<void, RendererLoadError> {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
 

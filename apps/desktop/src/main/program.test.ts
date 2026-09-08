@@ -26,6 +26,8 @@ describe('main application program', () => {
       })
     })
     const MainWindowTest = Layer.succeed(MainWindow)({
+      openVault: () => Effect.void,
+      getVault: () => Effect.succeed(null),
       open: Effect.sync(() => {
         actions.push('open')
       }),
@@ -65,6 +67,8 @@ describe('main application program', () => {
       })
     })
     const MainWindowTest = Layer.succeed(MainWindow)({
+      openVault: () => Effect.void,
+      getVault: () => Effect.succeed(null),
       open: Effect.sync(() => {
         actions.push('open')
       }),

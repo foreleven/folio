@@ -3,6 +3,8 @@ import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
 import { ApplicationMenuLive } from './ApplicationMenu'
 import { ElectronApp } from './ElectronApp'
+import { MainWindow } from './MainWindow'
+import { VaultLauncher } from './VaultLauncher'
 import { SettingsWindow } from './SettingsWindow'
 
 const mocks = vi.hoisted(() => ({
@@ -22,13 +24,17 @@ describe('ApplicationMenu', () => {
   it('installs the settings accelerator after ready and restores the previous menu on disposal', async () => {
     const ready = vi.fn()
     const toggle = vi.fn()
-    const runtime = ManagedRuntime.make(ApplicationMenuLive.pipe(Layer.provide(Layer.merge(
+    const open = vi.fn()
+    const newWindow = vi.fn()
+    const runtime = ManagedRuntime.make(ApplicationMenuLive.pipe(Layer.provide(Layer.mergeAll(
       Layer.succeed(ElectronApp)({
         metadata: Effect.succeed({ version: '1', path: '/test', isPackaged: false }),
         whenReady: Effect.sync(ready), events: Stream.empty,
         quitOnWindowAllClosed: false, quit: Effect.void
       }),
-      Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) })
+      Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) }),
+      Layer.succeed(MainWindow)({ open: Effect.sync(newWindow), isOpen: Effect.succeed(false), openVault: () => Effect.void, getVault: () => Effect.succeed(null) }),
+      Layer.succeed(VaultLauncher)({ open: Effect.sync(() => { open(); return null }) })
     ))))
     try {
       await runtime.runPromise(Effect.void)
@@ -40,6 +46,12 @@ describe('ApplicationMenu', () => {
       // Electron supplies menu callback arguments; this handler intentionally ignores them.
       settings?.click?.(undefined as never, undefined as never, undefined as never)
       await vi.waitFor(() => expect(toggle).toHaveBeenCalledOnce())
+      items.find((item) => item.accelerator === 'CommandOrControl+O')?.click?.(undefined as never, undefined as never, undefined as never)
+      items.find((item) => item.accelerator === 'CommandOrControl+Shift+N')?.click?.(undefined as never, undefined as never, undefined as never)
+      await vi.waitFor(() => {
+        expect(open).toHaveBeenCalledOnce()
+        expect(newWindow).toHaveBeenCalledOnce()
+      })
     } finally {
       await runtime.dispose()
     }

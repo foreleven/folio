@@ -1,0 +1,166 @@
+import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
+import * as NodePath from '@effect/platform-node/NodePath'
+import { ConfigProvider, Effect, FileSystem, Layer, ManagedRuntime } from 'effect'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { version } from 'uuid'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ConfigService } from './config-service'
+import { VaultService } from './vault-service'
+
+let root: string
+beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-vault-test-')) })
+afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+/** Shares an isolated config service so tests can interleave preference and registration writes. */
+function makeRuntime(filesystem = NodeFileSystem.layer) {
+  return ManagedRuntime.make(VaultService.layer.pipe(
+    Layer.provideMerge(ConfigService.layer),
+    Layer.provide(Layer.merge(filesystem, NodePath.layer)),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord({ FOLIO_CONFIG_DIR: join(root, 'config') })))
+  ))
+}
+
+/** Creates an existing content directory, including parents, for selection tests. */
+async function folder(relative: string): Promise<string> {
+  const directory = join(root, relative)
+  await mkdir(directory, { recursive: true })
+  return directory
+}
+
+describe('VaultService', () => {
+  it('persists a UUID v7 in the global index and keeps settings under its ID across restarts', async () => {
+    const selected = await folder('My Wiki')
+    await writeFile(join(selected, 'note.md'), '# My note')
+    const runtime = makeRuntime()
+    const vault = await runtime.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))
+    await runtime.dispose()
+    expect(version(vault.id)).toBe(7)
+    expect(vault).toMatchObject({ name: 'My Wiki', path: await realpath(selected) })
+    expect(JSON.parse(await readFile(join(root, 'config/config.json'), 'utf8'))).toEqual({
+      theme: 'system', language: 'system', vaults: [vault]
+    })
+    const settingsFile = join(root, 'config/vaults', vault.id, 'config.json')
+    expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
+    expect(await readdir(selected)).toEqual(['note.md'])
+    expect(await readFile(join(selected, 'note.md'), 'utf8')).toBe('# My note')
+    await writeFile(settingsFile, '{"custom":"preserved"}')
+    const restarted = makeRuntime()
+    try {
+      expect(await restarted.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))).toEqual(vault)
+      expect(await readFile(settingsFile, 'utf8')).toBe('{"custom":"preserved"}')
+    } finally { await restarted.dispose() }
+  })
+
+  it('deduplicates simultaneous selections and symlink aliases', async () => {
+    const selected = await folder('wiki')
+    const alias = join(root, 'alias')
+    await symlink(selected, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const values = await runtime.runPromise(Effect.all([
+        store.register(selected), store.register(alias), store.register(join(selected, '.'))
+      ], { concurrency: 'unbounded' }))
+      expect(values[1]).toEqual(values[0])
+      expect(values[2]).toEqual(values[0])
+      expect(await readdir(join(root, 'config/vaults'))).toEqual([values[0].id])
+      const config = await runtime.runPromise(ConfigService)
+      expect((await runtime.runPromise(config.get)).vaults).toEqual([values[0]])
+    } finally { await runtime.dispose() }
+  })
+
+  it('keeps same-name vaults independent without losing concurrent preference updates', async () => {
+    const a = await folder('a/wiki')
+    const b = await folder('b/wiki')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const config = await runtime.runPromise(ConfigService)
+      const [first, second] = await runtime.runPromise(Effect.all([
+        store.register(a), store.register(b), config.update({ theme: 'dark' }), config.update({ language: 'en' })
+      ], { concurrency: 'unbounded' }))
+      expect(first.id).not.toBe(second.id)
+      expect(first.name).toBe('wiki')
+      expect(second.name).toBe('wiki')
+      expect(version(first.id)).toBe(7)
+      expect(version(second.id)).toBe(7)
+      expect((await readdir(join(root, 'config/vaults'))).sort()).toEqual([first.id, second.id].sort())
+      expect(await runtime.runPromise(config.get)).toEqual({ theme: 'dark', language: 'en', vaults: [first, second] })
+      expect(await runtime.runPromise(store.register(b))).toEqual(second)
+    } finally { await runtime.dispose() }
+  })
+
+  it('rejects missing paths and regular files without creating configuration', async () => {
+    const file = join(root, 'note.md')
+    await writeFile(file, 'note')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      for (const path of ['', join(root, 'missing'), file]) {
+        expect(await runtime.runPromise(Effect.flip(store.register(path)))).toMatchObject({ _tag: 'VaultError' })
+      }
+      expect(await readdir(root)).toEqual(['note.md'])
+    } finally { await runtime.dispose() }
+  })
+
+  it.each(['{broken', '{"vaults":null}', '{"vaults":[{"id":"invalid","name":"wiki","path":"/wiki"}]}'])(
+    'reports a damaged global index without replacing it: %s', async (json) => {
+      const selected = await folder('wiki')
+      const configFolder = await folder('config')
+      const configFile = join(configFolder, 'config.json')
+      await writeFile(configFile, json)
+      const runtime = makeRuntime()
+      try {
+        const store = await runtime.runPromise(VaultService)
+        expect(await runtime.runPromise(Effect.flip(store.register(selected)))).toMatchObject({ _tag: 'VaultError' })
+        expect(await readFile(configFile, 'utf8')).toBe(json)
+        expect(await readdir(configFolder)).toEqual(['config.json'])
+      } finally { await runtime.dispose() }
+    }
+  )
+
+  it('preserves the previous index and cleans temporary files when its commit fails', async () => {
+    const selected = await folder('wiki')
+    await folder('config')
+    const previous = '{"theme":"dark","vaults":[]}'
+    await writeFile(join(root, 'config/config.json'), previous)
+    const failing = Layer.effect(FileSystem.FileSystem, Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      return FileSystem.FileSystem.of({ ...fs, rename: (_from, to) => fs.rename(join(root, 'missing'), to) })
+    })).pipe(Layer.provide(NodeFileSystem.layer))
+    const runtime = makeRuntime(failing)
+    try {
+      const store = await runtime.runPromise(VaultService)
+      expect(await runtime.runPromise(Effect.flip(store.register(selected)))).toMatchObject({ _tag: 'VaultError' })
+      expect(await readdir(join(root, 'config'))).toEqual(['config.json'])
+      expect(await readFile(join(root, 'config/config.json'), 'utf8')).toBe(previous)
+    } finally { await runtime.dispose() }
+  })
+
+  it('reuses the committed ID when settings initialization fails and is retried', async () => {
+    const selected = await folder('wiki')
+    const failing = Layer.effect(FileSystem.FileSystem, Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      return FileSystem.FileSystem.of({
+        ...fs,
+        /** Allows the global index commit but fails only the vault settings file commit. */
+        rename: (from, to) => fs.rename(to === join(root, 'config/config.json') ? from : join(root, 'missing'), to)
+      })
+    })).pipe(Layer.provide(NodeFileSystem.layer))
+    const runtime = makeRuntime(failing)
+    try {
+      const store = await runtime.runPromise(VaultService)
+      expect(await runtime.runPromise(Effect.flip(store.register(selected)))).toMatchObject({ _tag: 'VaultError' })
+    } finally { await runtime.dispose() }
+    const retry = makeRuntime()
+    try {
+      const config = await retry.runPromise(ConfigService)
+      const registered = (await retry.runPromise(config.get)).vaults[0]
+      expect(await readdir(join(root, 'config/vaults', registered.id))).toEqual([])
+      expect(await retry.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))).toEqual(registered)
+      expect(JSON.parse(await readFile(join(root, 'config/vaults', registered.id, 'config.json'), 'utf8'))).toEqual({})
+    } finally { await retry.dispose() }
+  })
+})

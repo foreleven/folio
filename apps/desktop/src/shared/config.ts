@@ -1,4 +1,5 @@
 import { Effect, Schema } from 'effect'
+import { Vault } from './vault'
 
 /** Persisted preferences; `system` delegates resolution to the consuming UI. */
 export const Theme = Schema.Literals(['system', 'light', 'dark'])
@@ -7,7 +8,8 @@ export const Language = Schema.Literals(['system', 'zh-CN', 'en'])
 /** Missing fields use defaults so older config files remain readable. */
 export const GlobalConfig = Schema.Struct({
   theme: Theme.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
-  language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system')))
+  language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
+  vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([])))
 })
 
 export type GlobalConfig = typeof GlobalConfig.Type
