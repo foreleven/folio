@@ -9,6 +9,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem
 } from '@folio/ui/components/ui/sidebar'
+import { BlocksIcon, BotIcon, Settings2Icon } from 'lucide-react'
 import { useLocale } from '../preferences'
 import { settingsMessages } from './messages'
 
@@ -24,45 +25,50 @@ export function SettingsSidebar({
 }): React.JSX.Element {
   const text = settingsMessages[useLocale()]
 
+  const itemClassName = 'px-2 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground'
+
   return (
-    <Sidebar collapsible="none" className="w-36 shrink-0 border-r min-[640px]:w-44">
-      <SidebarHeader className="h-10 justify-center border-b px-4 py-0">
-        <h1 className="flex items-center gap-2 text-sm leading-5 font-semibold"><span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />{text.title}</h1>
+    <Sidebar collapsible="none" className="w-36 shrink-0 border-r border-sidebar-border/70 min-[640px]:w-44">
+      <SidebarHeader className="h-10 justify-center px-3 py-0">
+        <h1 className="text-sm leading-5 font-semibold tracking-[-0.01em]">{text.title}</h1>
       </SidebarHeader>
-      <SidebarContent role="navigation" aria-label={text.title}>
-        <SidebarGroup>
+      <SidebarContent role="navigation" aria-label={text.title} className="px-1 pb-3">
+        <SidebarGroup className="p-1">
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={page === 'general'}
-                  className="data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary"
+                  className={itemClassName}
                   aria-current={page === 'general' ? 'page' : undefined}
                   onClick={() => onPageChange('general')}
                 >
-                  {text.general}
+                  <Settings2Icon aria-hidden="true" />
+                  <span>{text.general}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton className="data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary" isActive={page === 'integrations'} aria-current={page === 'integrations' ? 'page' : undefined} onClick={() => onPageChange('integrations')}>
-                  {text.integrations}
+                <SidebarMenuButton className={itemClassName} isActive={page === 'integrations'} aria-current={page === 'integrations' ? 'page' : undefined} onClick={() => onPageChange('integrations')}>
+                  <BlocksIcon aria-hidden="true" />
+                  <span>{text.integrations}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>{text.agent}</SidebarGroupLabel>
+        <SidebarGroup className="p-1 pt-3">
+          <SidebarGroupLabel className="h-6 px-2 text-[11px] font-medium text-muted-foreground/80">{text.agent}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={page === 'models'}
-                  className="data-active:before:absolute data-active:before:inset-y-1.5 data-active:before:left-0 data-active:before:w-0.5 data-active:before:rounded-full data-active:before:bg-primary"
+                  className={itemClassName}
                   aria-current={page === 'models' ? 'page' : undefined}
                   onClick={() => onPageChange('models')}
                 >
-                  {text.models}
+                  <BotIcon aria-hidden="true" />
+                  <span>{text.models}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>

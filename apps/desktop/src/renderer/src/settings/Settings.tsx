@@ -1,5 +1,4 @@
 import { IntegrationsSettings } from './integrations/IntegrationsSettings'
-import { Separator } from '@folio/ui/components/ui/separator'
 import { SidebarInset, SidebarProvider } from '@folio/ui/components/ui/sidebar'
 import { useEffect, useState } from 'react'
 import { useLocale } from '../preferences'
@@ -19,14 +18,13 @@ export function Settings(): React.JSX.Element {
   return (
     <SidebarProvider className="h-svh min-h-0">
       <SettingsSidebar page={page} onPageChange={setPage} />
-      <SidebarInset aria-labelledby="settings-page-title" className="min-h-0 min-w-0 overflow-hidden">
-        <header className="flex h-10 shrink-0 items-center px-4">
-          <h2 id="settings-page-title" className="text-sm leading-5 font-semibold">
+      <SidebarInset aria-labelledby="settings-page-title" className="min-h-0 min-w-0 overflow-hidden bg-background">
+        <header className="flex h-10 shrink-0 items-center px-5">
+          <h2 id="settings-page-title" className="text-sm leading-5 font-semibold tracking-[-0.01em]">
             {page === 'general' ? text.general : page === 'integrations' ? text.integrations : text.models}
           </h2>
         </header>
-        <Separator />
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-1 pb-5">
           <div className="w-full max-w-220">
             {page === 'general' ? <GeneralSettings /> : page === 'integrations' ? <IntegrationsSettings /> : <ModelsSettings />}
           </div>

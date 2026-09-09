@@ -6,7 +6,7 @@ export const integrationMessages = {
     failed: 'Couldn’t complete the operation. Please try again.',
     unknown: 'Needs attention', notInstalled: 'Not installed', working: 'Working…', checking: 'Checking…',
     more: 'More actions', details: 'Details', resources: 'Resources', scope: 'Installed on this device',
-    close: 'Close', cancel: 'Cancel', submit: 'Save and continue', required: 'Complete this field.',
+    openHomepage: 'Open homepage', close: 'Close', cancel: 'Cancel', submit: 'Save and continue', required: 'Complete this field.',
     stale: 'This action is no longer available. Close this window and check the connection.',
   },
   'zh-CN': {
@@ -15,7 +15,7 @@ export const integrationMessages = {
     failed: '操作未能完成，请重试。',
     unknown: '需要处理', notInstalled: '尚未安装', working: '正在处理…', checking: '正在检查…',
     more: '更多操作', details: '详情', resources: '资源', scope: '安装在此设备上',
-    close: '关闭', cancel: '取消', submit: '保存并继续', required: '请填写此字段。',
+    openHomepage: '打开主页', close: '关闭', cancel: '取消', submit: '保存并继续', required: '请填写此字段。',
     stale: '此操作已不可用，请关闭弹窗并检查连接状态。',
   }
 }

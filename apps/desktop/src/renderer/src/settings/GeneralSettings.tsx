@@ -51,9 +51,9 @@ export function GeneralSettings(): React.JSX.Element {
           <Skeleton className="h-14 w-full" />
         </div>
       ) : (
-        <section aria-label={text.general} className="flex flex-col gap-4">
-          <FieldGroup className="gap-0 divide-y border-y">
-            <Field orientation="setting" className="px-2" data-disabled={status === 'saving'}>
+        <section aria-label={text.general} className="flex flex-col gap-3">
+          <FieldGroup className="gap-1">
+            <Field orientation="setting" className="rounded-md px-2.5 transition-colors hover:bg-muted/45" data-disabled={status === 'saving'}>
               <FieldContent>
                 <FieldTitle id="theme-label">{text.theme}</FieldTitle>
                 <FieldDescription id="theme-description">{text.themeDescription}</FieldDescription>
@@ -61,10 +61,10 @@ export function GeneralSettings(): React.JSX.Element {
               <ToggleGroup
                 aria-labelledby="theme-label"
                 aria-describedby="theme-description"
-                variant="outline"
+                variant="default"
                 size="default"
-                spacing={0}
-                className="max-w-full flex-wrap overflow-hidden rounded-md border border-input [&_[data-slot=toggle]]:border-0"
+                spacing={1}
+                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] [&_[data-slot=toggle]]:h-6.5 [&_[data-slot=toggle]]:rounded-sm [&_[data-slot=toggle]]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
                 value={[config.value.theme]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {
@@ -79,7 +79,7 @@ export function GeneralSettings(): React.JSX.Element {
                 <ToggleGroupItem value="dark">{text.dark}</ToggleGroupItem>
               </ToggleGroup>
             </Field>
-            <Field orientation="setting" className="px-2" data-disabled={status === 'saving'}>
+            <Field orientation="setting" className="rounded-md px-2.5 transition-colors hover:bg-muted/45" data-disabled={status === 'saving'}>
               <FieldContent>
                 <FieldTitle id="language-label">{text.language}</FieldTitle>
                 <FieldDescription id="language-description">{text.languageDescription}</FieldDescription>
@@ -87,10 +87,10 @@ export function GeneralSettings(): React.JSX.Element {
               <ToggleGroup
                 aria-labelledby="language-label"
                 aria-describedby="language-description"
-                variant="outline"
+                variant="default"
                 size="default"
-                spacing={0}
-                className="max-w-full flex-wrap overflow-hidden rounded-md border border-input [&_[data-slot=toggle]]:border-0"
+                spacing={1}
+                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] [&_[data-slot=toggle]]:h-6.5 [&_[data-slot=toggle]]:rounded-sm [&_[data-slot=toggle]]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
                 value={[config.value.language]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {
@@ -112,9 +112,6 @@ export function GeneralSettings(): React.JSX.Element {
               <AlertDescription>{text.saveDetail}</AlertDescription>
             </Alert>
           ) : null}
-          <p role="status" aria-live="polite" className="text-support text-muted-foreground">
-            {status === 'saving' ? text.saving : status === 'saved' ? text.saved : text.automatic}
-          </p>
         </section>
       )}
     </>

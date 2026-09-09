@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { integrationText, type IntegrationActionDefinition } from '@folio/integrations/protocol'
 import { Button } from '@folio/ui/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@folio/ui/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@folio/ui/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from '@folio/ui/components/ui/dropdown-menu'
 import { ExternalLinkIcon, MoreHorizontalIcon } from 'lucide-react'
 import type { IntegrationView } from '../../../../shared/integration'
@@ -52,7 +52,7 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
   }
 
   return (
-    <article aria-label={integration.name} className="@container/integration min-w-0 bg-background"
+    <article aria-label={integration.name} className="@container/integration min-w-0 rounded-md transition-colors hover:bg-muted/35 focus-within:bg-muted/35"
       onFocusCapture={(event) => { focusedRef.current = event.target }}
       onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focusedRef.current = null }}>
       <div className="flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 px-2 py-2">
@@ -86,15 +86,21 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
           </DropdownMenu>
         </div>
       </div>
-      {failed || status?.description ? <div className="border-t bg-muted/30 pr-2 pl-11 py-2">
+      {failed || status?.description ? <div className="mx-2 mb-2 rounded-sm bg-muted/55 py-2 pr-2 pl-9">
         <p role={failed ? 'alert' : undefined} className={failed ? 'text-support text-destructive wrap-anywhere' : 'text-support text-muted-foreground wrap-anywhere'}>
           {failed ? text.failed : status?.description ? integrationText(status.description, locale) : null}
         </p>
       </div> : null}
       <Dialog open={dialog !== null} onOpenChange={(open) => { if (!open) setDialog(null) }}>
-        {dialog ? <DialogContent showCloseButton={false} finalFocus={moreRef} className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{form ? integrationText(form.label, locale) : integration.name}</DialogTitle>
+        {dialog ? <DialogContent showCloseButton={!form} finalFocus={moreRef} closeLabel={text.close} className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader className={form ? undefined : 'pr-8'}>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <DialogTitle className="min-w-0 wrap-anywhere">{form ? integrationText(form.label, locale) : integration.name}</DialogTitle>
+              {!form ? <a href={integration.homepage} target="_blank" rel="noreferrer" aria-label={`${text.openHomepage} · ${integration.name}`}
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <ExternalLinkIcon className="size-3.5" />
+              </a> : null}
+            </div>
             <DialogDescription>{form?.description ? integrationText(form.description, locale) : integrationText(integration.description, locale)}</DialogDescription>
           </DialogHeader>
           {form ? <IntegrationActionForm key={form.id} action={form} locale={locale}
@@ -103,10 +109,8 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
             {record ? <p className="text-support text-muted-foreground">{text.scope}</p> : null}
             <div className="flex flex-col gap-2">
               <h4 className="text-ui font-medium">{text.resources}</h4>
-              <ul className="divide-y border-y text-support">{integration.resources.map((resource) => <li className="py-1.5" key={resource.id}>{integrationText(resource.name, locale)}</li>)}</ul>
+              <ul className="space-y-0.5 text-support">{integration.resources.map((resource) => <li className="rounded-sm bg-muted/45 px-2 py-1.5" key={resource.id}>{integrationText(resource.name, locale)}</li>)}</ul>
             </div>
-            <a href={integration.homepage} target="_blank" rel="noreferrer" className="inline-flex w-fit items-center gap-1 text-support text-muted-foreground underline underline-offset-4">{integration.name}<ExternalLinkIcon className="size-3" /></a>
-            <DialogFooter><Button variant="outline" onClick={() => setDialog(null)}>{text.close}</Button></DialogFooter>
           </>}
         </DialogContent> : null}
       </Dialog>

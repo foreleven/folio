@@ -81,7 +81,7 @@ describe('IntegrationCard', () => {
     await menu('详情')
     const dialog = await screen.findByRole('dialog', { name: 'Notes' })
     expect(dialog.textContent).toContain('个人笔记')
-    expect(screen.getByRole('link', { name: /Notes/ }).getAttribute('href')).toBe(base.homepage)
+    expect(screen.getByRole('link', { name: '打开主页 · Notes' }).getAttribute('href')).toBe(base.homepage)
     fireEvent.click(screen.getByRole('button', { name: '关闭' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await menu('检查状态')

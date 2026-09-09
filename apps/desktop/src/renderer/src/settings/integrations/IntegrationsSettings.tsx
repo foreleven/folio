@@ -31,10 +31,10 @@ export function IntegrationsSettings(): React.JSX.Element {
   if (result._tag === 'Failure') return (
     <div role="alert" className="p-3"><p className="mb-3 text-ui">{text.loadFailed}</p><Button variant="outline" onClick={refresh}>{text.retry}</Button></div>
   )
-  if (result._tag !== 'Success') return <div role="status" aria-label={text.loading}><Skeleton className="h-16 w-full rounded-none" /></div>
+  if (result._tag !== 'Success') return <div role="status" aria-label={text.loading}><Skeleton className="h-16 w-full rounded-md" /></div>
   return (
     <section aria-label={text.available} className="@container/integrations">
-      <div className="divide-y border-y">
+      <div className="flex flex-col gap-1">
       {result.value.map((integration) => (
         <IntegrationCard key={integration.id} integration={integration} locale={locale} pending={pending.includes(integration.id)} error={errors.includes(integration.id)}
           onInstall={() => { void submit(integration.id, () => install({ payload: { id: integration.id } })).catch(() => undefined) }}
