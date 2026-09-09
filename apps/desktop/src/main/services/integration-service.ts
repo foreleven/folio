@@ -1,5 +1,6 @@
-import { IntegrationError, lark } from '@folio/integrations'
-import type { Integration, IntegrationContext, IntegrationEffect } from '@folio/integrations'
+import { IntegrationError } from '@folio/integrations/base'
+import type { Integration, IntegrationContext, IntegrationEffect } from '@folio/integrations/base'
+import { lark } from '@folio/integrations/lark'
 import { Context, Effect, FileSystem, Layer, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
@@ -41,6 +42,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       const rows = yield* store.list
       return catalog.map((integration) => ({
         id: integration.id, name: integration.name, actions: integration.actions,
+        description: integration.description, logo: integration.logo, homepage: integration.homepage,
         resources: integration.resources.map(({ id, name }) => ({ id, name })),
         record: rows.find((row) => row.id === integration.id) ?? null,
         busy: running.has(integration.id)

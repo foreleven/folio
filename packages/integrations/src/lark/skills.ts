@@ -1,7 +1,7 @@
 import { Effect, FileSystem } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
-import { IntegrationError } from '../integration.ts'
+import { IntegrationError } from '../base/index.ts'
 
 export const skillNames = ['lark-shared', 'lark-im', 'lark-mail'] as const
 const revision = 'f065bf5b645af381f9b7475ce721451e6ca36a23'

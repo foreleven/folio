@@ -1,6 +1,6 @@
 import { Effect, FileSystem, Schema } from 'effect'
 import { dirname, join } from 'node:path'
-import { IntegrationError } from '../integration.ts'
+import { IntegrationError } from '../base/index.ts'
 
 export const LarkApp = Schema.Struct({
   clientId: Schema.NonEmptyString,

@@ -1,7 +1,7 @@
 import { Effect, FileSystem } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
-import { IntegrationError } from '../integration.ts'
+import { IntegrationError } from '../base/index.ts'
 
 /** Finds and verifies a system or managed CLI without installing anything. */
 export const findCli = Effect.fn('Lark.findCli')(function*(directory: string) {

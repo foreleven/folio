@@ -3,6 +3,56 @@
 `Integration` represents a channel such as Lark. Its `Resource`s represent ingestion
 capabilities: `lark/im` and `lark/email`. Both currently expose an empty `onIngest`.
 
+## Package structure
+
+```text
+src/base/
+  integration.ts          # Metadata, contexts, resources and lifecycle contracts
+  define-integration.ts  # Shared lifecycle implementation
+  index.ts               # @folio/integrations/base, without provider SDK imports
+src/lark/
+  metadata.ts            # Name, description, bundled logo and homepage
+  index.ts               # Lark hooks composed with defineIntegration
+  ...                    # Lark CLI, skills, registration and authorization
+```
+
+Each provider defines `id`, `name`, `description`, `logo`, and `homepage`, alongside
+its static actions/resources and three lifecycle hooks. `id` is a stable storage
+key. `logo` is a bundled image data URI so the desktop can display it offline; do
+not use main-process filesystem paths or remote image URLs. Metadata is code-owned
+catalog content, not installation state, and does not require a database migration.
+
+`defineIntegration` composes those hooks with the common lifecycle. It serializes
+installation/actions per provider, checks action availability after acquiring the
+lock, forwards opaque callback payloads, tracks persisted progress by directory,
+and publishes a checked state after a successful operation. During a running
+operation, `check` immediately returns its live progress. Unknown failures are
+sanitized; failure/cancellation clears live state even if persistence fails. Late
+state callbacks from finished attempts are ignored. Providers own their resource
+registration, credentials, state names, and setup work.
+
+New providers import the base directly and export one definition:
+
+```ts
+import { defineIntegration } from '@folio/integrations/base'
+
+export const provider = defineIntegration({
+  id: 'provider', name: 'Provider', description: 'Provider description',
+  logo: bundledLogoDataUri, homepage: 'https://provider.example',
+  actions, resources,
+  install: installDependenciesAndRegisterResources,
+  check: inspectProviderFacts,
+  onActionCallback: handleProviderAction,
+})
+```
+
+Hooks receive the same host context. They do not need a second lifecycle wrapper,
+lock, live-state map, or final check. Optional provider context fields can be typed
+with `defineIntegration<ProviderContext>(...)`, as Lark does for a supplied app.
+Register the resulting integration in the desktop's `IntegrationCatalog`; the
+generic card reads its metadata and action labels. Provider-specific setup steps
+and authorization UI remain separate concerns (currently supplied only for Lark).
+
 ## Protocol
 
 - `actions` statically defines IDs, labels, and descriptions for UI rendering.
@@ -71,8 +121,8 @@ are requested together; resource selection is not implemented yet. A host-provid
   installed.json   # Written after dependencies and resource registration complete
   app.json         # App credentials
   app-auth.json    # App/tenant tokens and expiry
-  state.json       # Standalone host: persisted UI state
-  resources.json   # Standalone host: resource metadata
+  state.json       # Live test host: persisted UI state
+  resources.json   # Live test host: resource metadata
   auth.json        # User tokens, expiry, scope, and identity
   cli/             # Only when no system CLI is available
   skills/
@@ -82,7 +132,7 @@ are requested together; resource selection is not implemented yet. A host-provid
     LICENSE
 ```
 
-The host chooses `directory`. The standalone CLI uses this default layout and honors
+The host chooses `directory`. The live tests use this default layout and honor
 `FOLIO_CONFIG_DIR`. Private state is atomically written with mode `0600` under a `0700`
 directory. Tokens are not encrypted. Expired app tokens offer `verify_app`; expired user tokens offer `refresh_auth`
 when a usable refresh token exists, as well as explicit reauthorization. Refresh
@@ -110,11 +160,13 @@ yield* lark.onActionCallback(context, selectedActionId)
 // Only a subsequent check returning readyState authorizes ingestion.
 ```
 
-The standalone host confirms each action, persists UI state and resource metadata,
-and displays authorization URLs:
+The explicit live installation test confirms each action, persists UI state and resource
+metadata, and displays authorization URLs. It passes only after reaching `ready` and
+registering both resources; declining an action fails the test rather than reporting
+an incomplete installation as success:
 
 ```sh
-npm run install:lark --workspace=@folio/integrations
+npm run test:lark:install --workspace=@folio/integrations
 ```
 
 ## Verification
@@ -123,7 +175,7 @@ npm run install:lark --workspace=@folio/integrations
 npm run typecheck --workspace=@folio/integrations
 npm run test --workspace=@folio/integrations
 # After real setup: performs one read-only CLI listing per Resource, prints counts only.
-npm run verify:lark --workspace=@folio/integrations
+npm run test:lark:verify --workspace=@folio/integrations
 ```
 
 Tests use temporary directories, simulated processes, SDK fixtures, and mocked HTTP
@@ -133,3 +185,11 @@ pending/denial/expiry, app token exchange/retry/expiry, refresh token rotation,
 nonblocking checks, registration status ordering, credential privacy, and empty
 ingestion hooks.
 No real account registration or OAuth is performed by tests.
+
+The two live cases live in `tests/install-lark.test.ts` and
+`tests/verify-lark.test.ts`. They are skipped by the default `npm test` run. The
+explicit commands use `vitest.live.config.ts` to enable them, serialize test files,
+and show interactive prompts. Run installation in a terminal; its timeout is 15
+minutes, while verification has a 90-second timeout. Test cancellation interrupts
+Effect operations, child processes, and pending authorization. Use `FOLIO_CONFIG_DIR`
+to select another configuration directory. Normal fixture tests remain offline.

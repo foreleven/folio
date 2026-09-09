@@ -1,6 +1,6 @@
 import { registerApp } from '@larksuiteoapi/node-sdk'
 import { Effect, Schema } from 'effect'
-import { IntegrationError } from '../integration.ts'
+import { IntegrationError } from '../base/index.ts'
 import { larkScopes } from './auth.ts'
 import { LarkApp } from './state.ts'
 

@@ -1,6 +1,6 @@
 import { Client, Domain, withUserAccessToken } from '@larksuiteoapi/node-sdk'
 import { Clock, Effect, Schema } from 'effect'
-import { IntegrationError } from '../integration.ts'
+import { IntegrationError } from '../base/index.ts'
 import { AppAuth, LarkApp } from './state.ts'
 import type { UserAuth } from './state.ts'
 

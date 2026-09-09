@@ -6,11 +6,12 @@
   "description": "Vault integrations and their installation lifecycles",
   "exports": {
     ".": "./src/index.ts",
+    "./base": "./src/base/index.ts",
     "./lark": "./src/lark/index.ts"
   },
   "scripts": {
-    "install:lark": "node src/install-lark.ts",
-    "verify:lark": "node src/verify-lark.ts",
+    "test:lark:install": "vitest run --config vitest.live.config.ts tests/install-lark.test.ts",
+    "test:lark:verify": "vitest run --config vitest.live.config.ts tests/verify-lark.test.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

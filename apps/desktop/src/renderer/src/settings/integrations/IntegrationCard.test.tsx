@@ -7,6 +7,7 @@ import { IntegrationCard } from './IntegrationCard'
 afterEach(cleanup)
 const base: IntegrationView = {
   id: 'lark', name: 'Lark', busy: false, record: null,
+  description: 'Connect conversations and email.', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://www.larksuite.com/',
   actions: [{ id: 'authorize', label: 'Authorize' }], resources: [{ id: 'im', name: 'Messages' }, { id: 'email', name: 'Email' }]
 }
 /** Creates a card around a committed server snapshot with observable action handlers. */
@@ -20,6 +21,22 @@ const installed = (state: string): IntegrationView => ({ ...base, record: {
 } })
 
 describe('IntegrationCard', () => {
+  it('renders another provider’s metadata and install control without Lark branding', () => {
+    const ui = show({ ...base, id: 'notes', name: 'Notes', description: 'Bring your notes into Folio.',
+      logo: 'data:image/png;base64,logo', homepage: 'https://notes.example', resources: [{ id: 'notes', name: 'Personal notes' }] })
+    expect(screen.getByRole('img', { name: 'Notes logo' }).getAttribute('src')).toBe('data:image/png;base64,logo')
+    expect(screen.getByRole('link', { name: 'Notes' }).getAttribute('href')).toBe('https://notes.example')
+    expect(screen.getByText('Bring your notes into Folio.')).toBeTruthy()
+    expect(screen.getByText('Personal notes')).toBeTruthy()
+    expect(screen.queryByText(/Lark/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Install Notes' }))
+    expect(ui.onInstall).toHaveBeenCalledOnce()
+  })
+  it('uses another provider’s action label without assuming Lark setup steps', () => {
+    show({ ...installed('login_required'), id: 'notes', name: 'Notes', actions: [{ id: 'authorize', label: 'Connect Notes account' }] })
+    expect(screen.getByRole('button', { name: 'Connect Notes account' })).toBeTruthy()
+    expect(screen.queryByRole('list', { name: 'Setup progress' })).toBeNull()
+  })
   it('does not install on render and requires the explicit install button', () => {
     const ui = show()
     expect(ui.onInstall).not.toHaveBeenCalled()

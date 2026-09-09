@@ -1,5 +1,5 @@
 import { NodeServices } from '@effect/platform-node'
-import { IntegrationError, type Integration } from '@folio/integrations'
+import { IntegrationError, type Integration } from '@folio/integrations/base'
 import { ConfigProvider, Deferred, Effect, Layer, ManagedRuntime, Option, Stream } from 'effect'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -23,7 +23,8 @@ function fixture() {
   const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, url: 'https://accounts.feishu.cn/authorize' }
   const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
-    id: 'lark', name: 'Lark', resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize' }],
+    id: 'lark', name: 'Lark', description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
+    resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize' }],
     install: (context) => Effect.gen(function*() {
       state.installs++
       yield* context.writeState('installing', { progress: 1 })
@@ -76,6 +77,9 @@ describe('desktop integration lifecycle', () => {
       const s = await f.service()
       const initial = await f.runtime.runPromise(Stream.runHead(s.watch))
       expect(initial).toBeDefined()
+      expect(Option.getOrThrow(initial)[0]).toMatchObject({
+        description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test'
+      })
       expect(rows()).toEqual([])
       expect(f.state.installs).toBe(0)
       await f.runtime.runPromise(s.install('lark'))

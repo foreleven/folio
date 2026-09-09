@@ -16,6 +16,7 @@ export type IntegrationRecord = typeof IntegrationRecord.Type
 /** Public catalog plus committed setup state. No app credentials cross RPC. */
 export const IntegrationView = Schema.Struct({
   id: Schema.String, name: Schema.String,
+  description: Schema.String, logo: Schema.String, homepage: Schema.String,
   actions: Schema.Array(IntegrationAction), resources: Schema.Array(IntegrationResource),
   record: Schema.NullOr(IntegrationRecord), busy: Schema.Boolean
 })
