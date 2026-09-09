@@ -25,9 +25,9 @@ export function SettingsSidebar({
   const text = settingsMessages[useLocale()]
 
   return (
-    <Sidebar collapsible="none" className="w-40 shrink-0 sm:w-52">
-      <SidebarHeader className="px-4 py-6">
-        <h1 className="text-base font-semibold">{text.title}</h1>
+    <Sidebar collapsible="none" className="w-36 shrink-0 min-[640px]:w-44">
+      <SidebarHeader className="h-10 justify-center px-4 py-0">
+        <h1 className="text-sm leading-5 font-semibold">{text.title}</h1>
       </SidebarHeader>
       <SidebarContent role="navigation" aria-label={text.title}>
         <SidebarGroup>

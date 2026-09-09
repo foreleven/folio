@@ -1,7 +1,7 @@
 import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Alert, AlertDescription, AlertTitle } from '@folio/ui/components/ui/alert'
 import { Button } from '@folio/ui/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldTitle } from '@folio/ui/components/ui/field'
+import { Field, FieldContent, FieldDescription, FieldGroup, FieldTitle } from '@folio/ui/components/ui/field'
 import { Skeleton } from '@folio/ui/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@folio/ui/components/ui/toggle-group'
 import { Schema } from 'effect'
@@ -45,25 +45,30 @@ export function GeneralSettings(): React.JSX.Element {
           <Button variant="outline" onClick={refresh} className="mt-3 w-fit">{text.retry}</Button>
         </Alert>
       ) : config._tag !== 'Success' ? (
-        <div role="status" aria-label={text.loading} className="flex flex-col gap-5">
+        <div role="status" aria-label={text.loading} className="flex flex-col gap-2">
           <Skeleton className="h-5 w-24" />
-          <Skeleton className="h-20 w-full" />
-          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
         </div>
       ) : (
-        <section aria-label={text.general} className="flex flex-col gap-6">
-          <FieldGroup>
-            <Field data-disabled={status === 'saving'}>
-              <FieldTitle id="theme-label">{text.theme}</FieldTitle>
-              <FieldDescription id="theme-description">{text.themeDescription}</FieldDescription>
+        <section aria-label={text.general} className="flex flex-col gap-4">
+          <FieldGroup className="gap-0 divide-y">
+            <Field orientation="setting" data-disabled={status === 'saving'}>
+              <FieldContent>
+                <FieldTitle id="theme-label">{text.theme}</FieldTitle>
+                <FieldDescription id="theme-description">{text.themeDescription}</FieldDescription>
+              </FieldContent>
               <ToggleGroup
                 aria-labelledby="theme-label"
                 aria-describedby="theme-description"
                 variant="outline"
-                size="lg"
+                size="default"
+                className="max-w-full flex-wrap"
                 value={[config.value.theme]}
-                disabled={status === 'saving'}
-                onValueChange={(values) => {
+                aria-disabled={status === 'saving'}
+                onValueChange={(values, details) => {
+                  // Keep the focused control mounted and focusable while rejecting duplicate saves.
+                  if (saving.current) { details.cancel(); return }
                   const value = values[0]
                   if (Schema.is(Theme)(value) && value !== config.value.theme) void save({ theme: value })
                 }}
@@ -73,17 +78,22 @@ export function GeneralSettings(): React.JSX.Element {
                 <ToggleGroupItem value="dark">{text.dark}</ToggleGroupItem>
               </ToggleGroup>
             </Field>
-            <Field data-disabled={status === 'saving'}>
-              <FieldTitle id="language-label">{text.language}</FieldTitle>
-              <FieldDescription id="language-description">{text.languageDescription}</FieldDescription>
+            <Field orientation="setting" data-disabled={status === 'saving'}>
+              <FieldContent>
+                <FieldTitle id="language-label">{text.language}</FieldTitle>
+                <FieldDescription id="language-description">{text.languageDescription}</FieldDescription>
+              </FieldContent>
               <ToggleGroup
                 aria-labelledby="language-label"
                 aria-describedby="language-description"
                 variant="outline"
-                size="lg"
+                size="default"
+                className="max-w-full flex-wrap"
                 value={[config.value.language]}
-                disabled={status === 'saving'}
-                onValueChange={(values) => {
+                aria-disabled={status === 'saving'}
+                onValueChange={(values, details) => {
+                  // Keep the focused control mounted and focusable while rejecting duplicate saves.
+                  if (saving.current) { details.cancel(); return }
                   const value = values[0]
                   if (Schema.is(Language)(value) && value !== config.value.language) void save({ language: value })
                 }}
@@ -100,7 +110,7 @@ export function GeneralSettings(): React.JSX.Element {
               <AlertDescription>{text.saveDetail}</AlertDescription>
             </Alert>
           ) : null}
-          <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+          <p role="status" aria-live="polite" className="text-support text-muted-foreground">
             {status === 'saving' ? text.saving : status === 'saved' ? text.saved : text.automatic}
           </p>
         </section>

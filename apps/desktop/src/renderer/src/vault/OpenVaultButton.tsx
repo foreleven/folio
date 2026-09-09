@@ -8,8 +8,8 @@ export function OpenVaultButton(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const { openVault, opening, failed } = useVaultOpen()
   return (
-    <div className="grid justify-items-center gap-3">
-      <Button size="lg" disabled={opening !== null} onClick={() => void openVault()}>
+    <div className="grid justify-items-start gap-2">
+      <Button variant="outline" disabled={opening !== null} onClick={() => void openVault()}>
         {opening ? (chinese ? '正在打开…' : 'Opening…') : (chinese ? '打开知识库' : 'Open Vault')}
       </Button>
       {failed ? <VaultOpenError /> : null}

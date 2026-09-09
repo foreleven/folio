@@ -30,12 +30,12 @@ export function IntegrationsSettings(): React.JSX.Element {
     finally { inFlight.current.delete(id); setPending([...inFlight.current]) }
   }
   if (result._tag === 'Failure') return (
-    <div role="alert" className="rounded-lg border p-5"><p className="mb-3 text-sm">{text.loadFailed}</p><Button variant="outline" onClick={refresh}>{text.retry}</Button></div>
+    <div role="alert" className="p-3"><p className="mb-3 text-ui">{text.loadFailed}</p><Button variant="outline" onClick={refresh}>{text.retry}</Button></div>
   )
-  if (result._tag !== 'Success') return <div role="status" aria-label={text.loading}><Skeleton className="h-64 w-full rounded-xl" /></div>
+  if (result._tag !== 'Success') return <div role="status" aria-label={text.loading}><Skeleton className="h-16 w-full rounded-none" /></div>
   return (
-    <section aria-label={text.available} className="flex flex-col gap-4">
-      <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{text.available}</p>
+    <section aria-label={text.available} className="flex flex-col">
+      <div className="divide-y border-y">
       {result.value.map((integration) => (
         <IntegrationCard key={integration.id} integration={integration} locale={locale} pending={pending.includes(integration.id)} error={errors.includes(integration.id)}
           onInstall={() => { void submit(integration.id, () => install({ payload: { id: integration.id } })) }}
@@ -44,6 +44,7 @@ export function IntegrationsSettings(): React.JSX.Element {
           onOpenAuthorization={() => { void submit(integration.id, () => open({ payload: { id: integration.id } })) }}
         />
       ))}
+      </div>
     </section>
   )
 }

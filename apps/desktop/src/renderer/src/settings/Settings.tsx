@@ -1,5 +1,4 @@
 import { IntegrationsSettings } from './integrations/IntegrationsSettings'
-import { integrationMessages } from './integrations/messages'
 import { Separator } from '@folio/ui/components/ui/separator'
 import { SidebarInset, SidebarProvider } from '@folio/ui/components/ui/sidebar'
 import { useEffect, useState } from 'react'
@@ -20,16 +19,17 @@ export function Settings(): React.JSX.Element {
   return (
     <SidebarProvider className="h-svh min-h-0">
       <SettingsSidebar page={page} onPageChange={setPage} />
-      <SidebarInset aria-labelledby="settings-page-title" className="min-w-0 overflow-y-auto">
-        <header className="flex flex-col gap-2 px-6 py-6 sm:px-8">
-          <h2 id="settings-page-title" className="text-xl font-semibold tracking-tight">
-            {page === 'general' ? text.general : page === 'integrations' ? text.integrations : text.models}
+      <SidebarInset aria-labelledby="settings-page-title" className="min-h-0 min-w-0 overflow-hidden">
+        <header className="flex h-10 shrink-0 items-center px-4">
+          <h2 id="settings-page-title" className="text-sm leading-5 font-semibold">
+              {page === 'general' ? text.general : page === 'integrations' ? text.integrations : text.models}
           </h2>
-          {page !== 'models' ? <p className="text-sm text-muted-foreground">{page === 'integrations' ? integrationMessages[locale].subtitle : text.subtitle}</p> : null}
         </header>
         <Separator />
-        <div className="w-full max-w-2xl p-6 sm:p-8">
-          {page === 'general' ? <GeneralSettings /> : page === 'integrations' ? <IntegrationsSettings /> : <ModelsSettings />}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <div className="w-full max-w-220">
+            {page === 'general' ? <GeneralSettings /> : page === 'integrations' ? <IntegrationsSettings /> : <ModelsSettings />}
+          </div>
         </div>
       </SidebarInset>
     </SidebarProvider>

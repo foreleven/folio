@@ -11,15 +11,15 @@ export function Welcome(): React.JSX.Element {
   const { openVault, opening, failed } = useVaultOpen()
 
   return (
-    <main className="grid min-h-screen place-items-center bg-background p-10 max-[600px]:p-6">
+    <main className="flex min-h-svh justify-center bg-background px-6 pt-12 pb-6 [@media(max-height:599px)]:pt-6">
       <section className="w-full max-w-140 text-center">
         <WelcomeHeader />
-        <div className="flex flex-col gap-7 text-left">
+        <div className="flex flex-col gap-4 text-left">
           <GetStarted opening={opening} onOpen={openVault} />
           <RecentVaults opening={opening} onOpen={openVault} />
         </div>
         {opening !== null ? <span role="status" className="sr-only">{chinese ? '正在打开知识库…' : 'Opening vault…'}</span> : null}
-        {failed ? <VaultOpenError className="mx-auto mt-6 leading-[1.7]" /> : null}
+        {failed ? <VaultOpenError className="mx-auto mt-4" /> : null}
       </section>
     </main>
   )

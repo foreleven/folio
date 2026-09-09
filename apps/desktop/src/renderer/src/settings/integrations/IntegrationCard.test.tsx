@@ -55,7 +55,7 @@ describe('IntegrationCard', () => {
     fireEvent.click(screen.getByRole('button', { name: /Open authorization page/ }))
     expect(ui.onOpenAuthorization).toHaveBeenCalledOnce()
     expect(screen.queryByRole('button', { name: 'Authorize Lark' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Check status' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Check status' }).getAttribute('aria-disabled')).toBe('true')
   })
   it('renders connected state in Chinese and retains a manual recheck', () => {
     const connected = installed('ready')
@@ -70,4 +70,33 @@ describe('IntegrationCard', () => {
     expect(screen.getByRole('alert').textContent).toContain('Couldn’t complete')
     expect(screen.getByRole('button', { name: 'Authorize Lark' }).hasAttribute('disabled')).toBe(false)
   })
+  it('reveals secondary details on request without installing or checking', () => {
+    const ui = show()
+    const toggle = screen.getByRole('button', { name: 'Details' })
+    const panel = document.getElementById(toggle.getAttribute('aria-controls')!)!
+    expect(panel.hidden).toBe(true)
+    expect(screen.getByText(/Installs missing Lark CLI/).closest('[hidden]')).toBeNull()
+    fireEvent.click(toggle)
+    expect(panel.hidden).toBe(false)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(toggle)
+    expect(panel.hidden).toBe(true)
+    expect(ui.onInstall).not.toHaveBeenCalled()
+    expect(ui.onCheck).not.toHaveBeenCalled()
+  })
+  it('automatically reveals failures and never labels an errored ready record as connected', () => {
+    const view = installed('ready')
+    show({ ...view, record: { ...view.record!, error: 'request failed' } })
+    expect(screen.getByRole('alert').closest('[hidden]')).toBeNull()
+    expect(screen.queryByText('Connected')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Details' }).getAttribute('aria-expanded')).toBe('true')
+  })
+  it('retains keyboard focus in the row when a completed action disappears', () => {
+    const ui = show(installed('login_required'))
+    screen.getByRole('button', { name: 'Authorize Lark' }).focus()
+    const view = installed('ready')
+    ui.rerender(<IntegrationCard integration={{ ...view, record: { ...view.record!, actionIds: [] } }} locale="en" pending={false} error={false} {...ui} />)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Details' }))
+  })
+
 })
