@@ -1,6 +1,6 @@
 import { IntegrationContext, IntegrationError } from '@folio/integrations/base'
 import type { Integration, IntegrationEffect } from '@folio/integrations/base'
-import { Context, Effect, FileSystem, Layer, Match, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
+import { Context, Effect, Fiber, FileSystem, Layer, Match, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
 import { IntegrationSettingsError, type IntegrationView } from '../../shared/integration'
@@ -31,10 +31,22 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     const commands = yield* Semaphore.make(1)
     const writes = yield* Semaphore.make(1)
     const running = new Set<string>()
-    const runtimes = new Set<string>()
+    const setupFibers = new Map<string, Fiber.Fiber<void, never>>()
     const revisions = new Map<string, number>()
     const changes = yield* PubSub.unbounded<readonly IntegrationView[]>()
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes))
+    yield* Effect.addFinalizer(() => Effect.gen(function*() {
+      const fibers = Array.from(setupFibers.values())
+      if (!fibers.length) return
+      yield* Effect.logInfo('Stopping integration provider setups').pipe(
+        Effect.annotateLogs({ setupCount: fibers.length })
+      )
+      yield* Fiber.interruptAll(fibers)
+      setupFibers.clear()
+      yield* Effect.logInfo('Integration provider setups stopped').pipe(
+        Effect.annotateLogs({ setupCount: fibers.length })
+      )
+    }))
     yield* Effect.logDebug('Integration service initialization started').pipe(
       Effect.annotateLogs({ integrationCount: catalog.length })
     )
@@ -133,18 +145,20 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         return yield* new IntegrationSettingsError({ message: 'Unknown integration action.' })
       }
       if (!row) yield* commit(store.create(id))
-      if (integration.run && !runtimes.has(id)) {
-        runtimes.add(id)
-        yield* Effect.logInfo('Integration provider runtime started').pipe(Effect.annotateLogs({ integration: id }))
-        // The host owns cancellation only. Providers choose their own timers, retries and work.
-        yield* withContext(id, integration.run()).pipe(
-          Effect.tapError(() => Effect.logError('Integration provider runtime failed').pipe(
+      if (integration.setup && !setupFibers.has(id)) {
+        yield* Effect.logInfo('Integration provider setup started').pipe(Effect.annotateLogs({ integration: id }))
+        // Provider setup outlives the requesting RPC and is interrupted by the service finalizer before process exit.
+        const fiber = yield* withContext(id, integration.setup()).pipe(
+          Effect.tapError(() => Effect.logError('Integration provider setup failed').pipe(
             Effect.annotateLogs({ integration: id })
           )),
           Effect.catch(() => commit(store.update(id, 'check_failed', {}, [], 'The connection could not be maintained. Check its status.'))),
-          Effect.ensuring(Effect.logInfo('Integration provider runtime stopped').pipe(Effect.annotateLogs({ integration: id }))),
-          Effect.catch(() => Effect.void), Effect.interruptible, Effect.forkIn(scope)
+          Effect.ensuring(Effect.sync(() => setupFibers.delete(id))),
+          Effect.ensuring(Effect.logInfo('Integration provider setup stopped').pipe(Effect.annotateLogs({ integration: id }))),
+          Effect.catch(() => Effect.void), Effect.interruptible,
+          Effect.forkDetach({ startImmediately: false })
         )
+        setupFibers.set(id, fiber)
       }
       running.add(id)
       yield* Effect.logInfo('Integration operation scheduled').pipe(

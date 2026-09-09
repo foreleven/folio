@@ -153,8 +153,8 @@ function harness(options: {
   }
   const controller = new AbortController()
   let background: Promise<void> | undefined
-  /** Starts the real provider lifetime; tests observe committed states rather than calling private renewal helpers. */
-  const start = () => { background ??= runtime.runPromise(lark.run!().pipe(Effect.provideService(IntegrationContext, context)), { signal: controller.signal }).catch(() => undefined) }
+  /** Starts the real provider setup lifetime; tests observe committed states rather than calling private renewal helpers. */
+  const start = () => { background ??= runtime.runPromise(lark.setup!().pipe(Effect.provideService(IntegrationContext, context)), { signal: controller.signal }).catch(() => undefined) }
   const stop = async () => { controller.abort(); await background; await runtime.runPromise(releaseSession.pipe(Effect.provideService(IntegrationContext, context))) }
   const checked = () => runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, context)))
   const settled = (state: string) => vi.waitFor(() => expect(states.at(-1)?.state).toBe(state))
@@ -751,7 +751,7 @@ describe('Lark integration lifecycle', () => {
     try {
       await h.runtime.runPromise(Effect.gen(function*() {
         yield* TestClock.setTime(now)
-        yield* lark.run!().pipe(Effect.provideService(IntegrationContext, h.context), Effect.forkScoped)
+        yield* lark.setup!().pipe(Effect.provideService(IntegrationContext, h.context), Effect.forkScoped)
         yield* Effect.promise(() => h.settled('ready'))
         yield* TestClock.adjust(50_000)
         yield* Effect.promise(() => h.settled('recovering'))
@@ -772,7 +772,7 @@ describe('Lark integration lifecycle', () => {
       await h.runtime.runPromise(Effect.gen(function*() {
         yield* TestClock.setTime(now)
         const scope = yield* Scope.make()
-        yield* lark.run!().pipe(Effect.provideService(IntegrationContext, h.context), Effect.forkIn(scope))
+        yield* lark.setup!().pipe(Effect.provideService(IntegrationContext, h.context), Effect.forkIn(scope))
         try {
           yield* Effect.promise(() => h.settled('ready'))
           expect(fetchMock).not.toHaveBeenCalled()

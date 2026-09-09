@@ -50,7 +50,7 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
     if ((yield* readPrivateState(directory)).installed) {
       for (const resource of lark.resources) yield* context.registerResource(resource)
     }
-    yield* lark.run!().pipe(Effect.provideService(IntegrationContext, context), Effect.forkScoped)
+    yield* lark.setup!().pipe(Effect.provideService(IntegrationContext, context), Effect.forkScoped)
     while (true) {
       const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, context))
       if (result.state === 'ready') {

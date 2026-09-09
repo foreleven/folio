@@ -78,5 +78,5 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
   }, lock.withPermit, Effect.mapError(sanitize))
 
   return { ...definition, install, check, inspect, onActionCallback,
-    run: definition.run ? () => Effect.suspend(definition.run!).pipe(Effect.mapError(sanitize)) : undefined }
+    setup: definition.setup ? () => Effect.suspend(definition.setup!).pipe(Effect.mapError(sanitize)) : undefined }
 }

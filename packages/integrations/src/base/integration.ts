@@ -46,8 +46,8 @@ export interface IntegrationResource {
   readonly onIngest: (context: IngestContext) => Effect.Effect<void, IntegrationError>
 }
 export interface Integration<R = never> extends IntegrationMetadata {
-  /** Optional provider-owned background lifetime. Host starts it once for installed integrations and interrupts on exit. */
-  readonly run?: () => IntegrationEffect<void, IntegrationError, R>
+  /** Optional provider-owned background lifetime. Host starts setup once for installed integrations and interrupts it on exit. */
+  readonly setup?: () => IntegrationEffect<void, IntegrationError, R>
   readonly actions: readonly IntegrationActionDefinition[]
   /** Static implementations allow the host to rebind persisted resources after restart. */
   readonly resources: readonly IntegrationResource[]
@@ -63,8 +63,8 @@ export interface Integration<R = never> extends IntegrationMetadata {
 
 /** Provider hooks contain only provider-specific work; the base wraps their lifecycle and errors. */
 export interface IntegrationDefinition<R = never> extends IntegrationMetadata {
-  /** Owns background work and retry policy; never requires a host scheduler. */
-  readonly run?: () => IntegrationEffect<void, unknown, R>
+  /** Starts the provider-owned background lifetime; it remains active until interrupted by the host. */
+  readonly setup?: () => IntegrationEffect<void, unknown, R>
   readonly actions: readonly IntegrationActionDefinition[]
   readonly resources: readonly IntegrationResource[]
   /** Installs dependencies and upserts resources; the base publishes the final inspect. */

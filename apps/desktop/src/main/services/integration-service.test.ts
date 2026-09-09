@@ -28,7 +28,7 @@ function fixture(background = false, form = false) {
   const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
     id: 'notes', name: 'Notes', description: 'Test provider', states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
-    run: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
+    setup: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
     resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }, { id: 'open', label: 'Open account page' }],
     install: () => Effect.gen(function*() {
       const context = yield* IntegrationContext
@@ -304,7 +304,7 @@ describe('desktop integration lifecycle', () => {
     } finally { await f.runtime.dispose() }
   })
 
-  it('starts a provider lifetime once after installation and stops it with the host scope', async () => {
+  it('starts provider setup once after installation and stops it with the host scope', async () => {
     const f = fixture(true)
     const s = await f.service()
     expect(f.state.starts).toBe(0)
