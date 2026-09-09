@@ -1,8 +1,9 @@
 import { Clock, Context, Effect, Schema, Semaphore } from 'effect'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { IntegrationContext } from '../base/index.ts'
 import { AuthorizationRejected, authorizeApp, larkScopes, refreshUser, userIdentity } from './auth.ts'
-import { AppAuth, LarkApp, readState, UserAuth, writeState } from './state.ts'
+import { LarkApp, readPrivateState, updatePrivateState } from './state.ts'
+import type { UserAuth } from './state.ts'
 
 /** Optional host credentials; omitted values reuse the existing private application file. */
 export const LarkApplication = Context.Reference<LarkApp | undefined>('@folio/integrations/lark/LarkApplication', {
@@ -29,7 +30,7 @@ export const session = Effect.fn('Lark.session')(function*() {
 export const getApp = Effect.fn('Lark.getApp')(function*() {
   const { directory } = yield* IntegrationContext
   const supplied = yield* LarkApplication
-  const app = supplied === undefined ? yield* readState(join(directory, 'app.json'), LarkApp)
+  const app = supplied === undefined ? (yield* readPrivateState(directory)).app
     : yield* Schema.decodeUnknownEffect(LarkApp)(supplied)
   yield* Effect.logDebug('Lark application credentials resolved').pipe(
     Effect.annotateLogs({ source: supplied === undefined ? 'saved' : 'host', present: app !== undefined })
@@ -64,14 +65,15 @@ export const maintain = Effect.fn('Lark.maintain')(function*() {
     return
   }
   const now = yield* Clock.currentTimeMillis
-  const appAuth = yield* readState(join(directory, 'app-auth.json'), AppAuth)
+  let privateState = yield* readPrivateState(directory)
+  const appAuth = privateState.appAuth
   if (!appAuth || !belongsToApp(appAuth, app) || appAuth.expiresAt <= now + 60_000) {
     yield* Effect.logInfo('Lark application credentials require authorization').pipe(
       Effect.annotateLogs({ reason: !appAuth ? 'missing' : !belongsToApp(appAuth, app) ? 'application_changed' : 'expiring' })
     )
-    yield* writeState(join(directory, 'app-auth.json'), yield* authorizeApp(app))
+    privateState = yield* updatePrivateState(directory, { appAuth: yield* authorizeApp(app) })
   }
-  let saved = yield* readState(join(directory, 'auth.json'), UserAuth)
+  let saved = privateState.userAuth
   if (!saved || !belongsToApp(saved, app) || !hasPermissions(saved)) {
     yield* Effect.logDebug('Lark user credentials are not maintainable').pipe(
       Effect.annotateLogs({ reason: !saved ? 'missing' : !belongsToApp(saved, app) ? 'application_changed' : 'scope_changed' })
@@ -83,7 +85,7 @@ export const maintain = Effect.fn('Lark.maintain')(function*() {
     yield* Effect.logInfo('Lark user credentials require refresh')
     saved = { ...yield* refreshUser(app, saved), verified: false }
     // Rotating the refresh token may invalidate the old pair. Commit before remote verification.
-    yield* writeState(join(directory, 'auth.json'), saved)
+    yield* updatePrivateState(directory, { userAuth: saved })
   }
   if (saved.expiresAt <= now) {
     yield* Effect.logWarning('Lark user credentials expired without a usable refresh grant')
@@ -91,11 +93,11 @@ export const maintain = Effect.fn('Lark.maintain')(function*() {
   }
   const identity = yield* userIdentity(app, saved.accessToken)
   if (identity !== saved.openId) {
-    yield* writeState(join(directory, 'auth.json'), { ...saved, verified: false })
+    yield* updatePrivateState(directory, { userAuth: { ...saved, verified: false } })
     yield* Effect.logWarning('Lark user credential verification rejected')
     return yield* new AuthorizationRejected({ target: 'user' })
   }
-  if (saved.verified === false) yield* writeState(join(directory, 'auth.json'), { ...saved, verified: true })
+  if (saved.verified === false) yield* updatePrivateState(directory, { userAuth: { ...saved, verified: true } })
   yield* Effect.logDebug('Lark credential maintenance completed')
 }, Effect.annotateLogs({ integration: 'lark', subsystem: 'credential-maintenance' }),
 Effect.withLogSpan('lark.maintain'))
@@ -121,8 +123,9 @@ export const nextMaintenance = Effect.fn('Lark.nextMaintenance')(function*() {
   const { directory } = yield* IntegrationContext
   const current = yield* session()
   const now = yield* Clock.currentTimeMillis
-  const app = yield* readState(join(directory, 'app-auth.json'), AppAuth)
-  const user = yield* readState(join(directory, 'auth.json'), UserAuth)
+  const privateState = yield* readPrivateState(directory)
+  const app = privateState.appAuth
+  const user = privateState.userAuth
   if (current.failures) {
     // Retry before a still-valid token expires so the UI can reflect actual loss of availability.
     const expiresIn = Math.min(app?.expiresAt ?? Infinity, user?.expiresAt ?? Infinity) - now

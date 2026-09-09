@@ -141,15 +141,18 @@ async function seed(directory: string, extra = {}) {
     await mkdir(join(directory, 'skills', name), { recursive: true })
     await writeFile(join(directory, 'skills', name, 'SKILL.md'), 'fixture skill')
   }
-  await writeFile(join(directory, 'installed.json'), 'true')
-  await writeFile(join(directory, 'app.json'), JSON.stringify(app))
-  await writeFile(join(directory, 'app-auth.json'), JSON.stringify({
-    clientId: app.clientId, brand: app.brand, appAccessToken: 'test-app-token', expiresAt: Date.now() + 7200000
+  await writeFile(join(directory, 'private.json'), JSON.stringify({
+    version: 1, installed: true, app,
+    appAuth: { clientId: app.clientId, brand: app.brand, appAccessToken: 'test-app-token', expiresAt: Date.now() + 7200000 },
+    userAuth: {
+      clientId: app.clientId, brand: app.brand, accessToken: 'saved-token', expiresAt: Date.now() + 7200000,
+      openId: 'test-user', scope: larkScopes.join(' '), ...extra
+    }
   }))
-  await writeFile(join(directory, 'auth.json'), JSON.stringify({
-    clientId: app.clientId, brand: app.brand, accessToken: 'saved-token', expiresAt: Date.now() + 7200000,
-    openId: 'test-user', scope: larkScopes.join(' '), ...extra
-  }))
+}
+
+async function privateState(directory: string) {
+  return JSON.parse(await readFile(join(directory, 'private.json'), 'utf8'))
 }
 
 describe('Lark integration lifecycle', () => {
@@ -173,7 +176,7 @@ describe('Lark integration lifecycle', () => {
       await h.runtime.runPromise(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
       await expect(h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))).rejects.toThrow()
       expect(h.states.some((entry) => entry.state === 'waiting_for_app')).toBe(false)
-      await expect(stat(join(h.directory, 'app.json'))).rejects.toThrow()
+      await expect(stat(join(h.directory, 'private.json'))).rejects.toThrow()
       expect((await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context)))).state).toBe('app_required')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -203,7 +206,7 @@ describe('Lark integration lifecycle', () => {
       expect(h.states.map((item) => item.state)).toEqual(expect.arrayContaining(['waiting_for_app', 'waiting_for_user', 'ready']))
       expect(await h.checked()).toEqual({ state: 'ready', actions: [] })
       for (const secret of ['test-secret', 'test-user-token', 'test-refresh']) expect(JSON.stringify(h.states)).not.toContain(secret)
-      for (const file of ['auth.json', 'app.json']) expect((await stat(join(h.directory, file))).mode & 0o777).toBe(0o600)
+      expect((await stat(join(h.directory, 'private.json'))).mode & 0o777).toBe(0o600)
       expect((await stat(h.directory)).mode & 0o777).toBe(0o700)
       expect(vi.mocked(registerApp).mock.calls[0][0].addons?.scopes?.user).toEqual(larkScopes)
     } finally { await h.stop(); await h.runtime.dispose() }
@@ -261,7 +264,7 @@ describe('Lark integration lifecycle', () => {
         expect(await h.runtime.runPromise(Effect.flip(lark.install().pipe(Effect.provideService(IntegrationContext, h.context))))).toMatchObject({ _tag: 'IntegrationError' })
         expect(h.resources.size).toBe(0)
         expect(registerApp).not.toHaveBeenCalled()
-        await expect(stat(join(h.directory, 'installed.json'))).rejects.toThrow()
+        await expect(stat(join(h.directory, 'private.json'))).rejects.toThrow()
       } finally { await h.stop(); await h.runtime.dispose() }
     }
   )
@@ -278,6 +281,34 @@ describe('Lark integration lifecycle', () => {
       fail = false
       await h.runtime.runPromise(lark.onActionCallback('install').pipe(Effect.provideService(IntegrationContext, context)))
       expect(h.resources.size).toBe(2)
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it('migrates the legacy split state into one private document at runtime startup', async () => {
+    const h = harness()
+    await mkdir(h.directory, { recursive: true })
+    for (const name of skillNames) {
+      await mkdir(join(h.directory, 'skills', name), { recursive: true })
+      await writeFile(join(h.directory, 'skills', name, 'SKILL.md'), 'fixture skill')
+    }
+    await writeFile(join(h.directory, 'installed.json'), 'true')
+    await writeFile(join(h.directory, 'app.json'), JSON.stringify(app))
+    await writeFile(join(h.directory, 'app-auth.json'), JSON.stringify({
+      clientId: app.clientId, brand: app.brand, appAccessToken: 'test-app-token', expiresAt: Date.now() + 7200000
+    }))
+    await writeFile(join(h.directory, 'auth.json'), JSON.stringify({
+      clientId: app.clientId, brand: app.brand, accessToken: 'saved-token', expiresAt: Date.now() + 7200000,
+      openId: 'test-user', scope: larkScopes.join(' ')
+    }))
+    try {
+      expect(await h.checked()).toEqual({ state: 'ready', actions: [] })
+      h.start()
+      await h.settled('ready')
+      expect(await privateState(h.directory)).toMatchObject({ version: 1, installed: true, app,
+        appAuth: { appAccessToken: 'test-app-token' }, userAuth: { accessToken: 'saved-token' } })
+      for (const file of ['installed.json', 'app.json', 'app-auth.json', 'auth.json']) {
+        await expect(stat(join(h.directory, file))).rejects.toThrow()
+      }
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
@@ -327,9 +358,9 @@ describe('Lark integration lifecycle', () => {
     fetchMock.mockImplementation(async (input, init) => String(input).endsWith('/oauth/token')
       ? response({ error: 'access_denied' }, 400) : normal(input, init))
     try {
-      const before = await readFile(join(h.directory, 'auth.json'), 'utf8')
+      const before = (await privateState(h.directory)).userAuth
       await h.runtime.runPromise(Effect.flip(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context))))
-      expect(await readFile(join(h.directory, 'auth.json'), 'utf8')).toBe(before)
+      expect((await privateState(h.directory)).userAuth).toEqual(before)
       expect((await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context)))).state).toBe('login_required')
       fetchMock.mockImplementation(normal)
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
@@ -359,7 +390,7 @@ describe('Lark integration lifecycle', () => {
     try {
       const error = await h.runtime.runPromise(Effect.flip(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, context))))
       expect(error.message).not.toContain('private persistence failure')
-      await expect(stat(join(h.directory, 'app.json'))).rejects.toThrow()
+      expect((await privateState(h.directory)).app).toBeUndefined()
       expect((await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context)))).state).toBe('app_required')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -444,7 +475,7 @@ describe('Lark integration lifecycle', () => {
       expect(h.states.filter((item) => item.state === 'waiting_for_app')).toHaveLength(4)
       expect(h.states.every((item) => JSON.stringify(item.data) === '{}')).toBe(true)
       expect(sdk.appToken).toHaveBeenCalledTimes(1)
-      expect(JSON.parse(await readFile(join(h.directory, 'app-auth.json'), 'utf8'))).toMatchObject({ clientId: app.clientId, appAccessToken: 'test-app-token' })
+      expect((await privateState(h.directory)).appAuth).toMatchObject({ clientId: app.clientId, appAccessToken: 'test-app-token' })
       expect(JSON.stringify(h.states)).not.toContain('test-app-token')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -481,7 +512,7 @@ describe('Lark integration lifecycle', () => {
       await h.runtime.runPromise(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
       await expect(h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))).rejects.toThrow()
       expect(await h.checked()).toEqual({ state: 'recovering', actions: [] })
-      expect(JSON.parse(await readFile(join(h.directory, 'app.json'), 'utf8'))).toEqual(app)
+      expect((await privateState(h.directory)).app).toEqual(app)
       h.start()
       await h.settled('login_required')
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
@@ -494,7 +525,9 @@ describe('Lark integration lifecycle', () => {
   it('automatically renews an expired app token before publishing ready', async () => {
     const h = harness()
     await seed(h.directory)
-    await writeFile(join(h.directory, 'app-auth.json'), JSON.stringify({ clientId: app.clientId, brand: app.brand, appAccessToken: 'old-app-token', expiresAt: 1 }))
+    const state = await privateState(h.directory)
+    state.appAuth.expiresAt = 1
+    await writeFile(join(h.directory, 'private.json'), JSON.stringify(state))
     try {
       expect(await h.checked()).toEqual({ state: 'recovering', actions: [] })
       h.start()
@@ -511,7 +544,7 @@ describe('Lark integration lifecycle', () => {
       expect(await h.checked()).toEqual({ state: 'recovering', actions: [] })
       h.start()
       await h.settled('ready')
-      expect(JSON.parse(await readFile(join(h.directory, 'auth.json'), 'utf8'))).toMatchObject({ accessToken: 'test-user-token', refreshToken: 'test-refresh', verified: true })
+      expect((await privateState(h.directory)).userAuth).toMatchObject({ accessToken: 'test-user-token', refreshToken: 'test-refresh', verified: true })
       expect(new URLSearchParams(String(fetchMock.mock.calls[0][1]?.body)).get('grant_type')).toBe('refresh_token')
       expect(h.states.some((item) => item.state === 'waiting_for_user')).toBe(false)
     } finally { await h.stop(); await h.runtime.dispose() }
@@ -522,10 +555,10 @@ describe('Lark integration lifecycle', () => {
     await seed(h.directory, { expiresAt: 1, refreshToken: 'old-refresh', refreshExpiresAt: Date.now() + 3600000 })
     fetchMock.mockResolvedValue(response({ error: 'invalid_grant' }, 400))
     try {
-      const previous = await readFile(join(h.directory, 'auth.json'), 'utf8')
+      const previous = (await privateState(h.directory)).userAuth
       h.start()
       await h.settled('login_required')
-      expect(await readFile(join(h.directory, 'auth.json'), 'utf8')).toBe(previous)
+      expect((await privateState(h.directory)).userAuth).toEqual(previous)
       expect(await h.checked()).toEqual({ state: 'login_required', actions: [callback('connect')] })
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -558,7 +591,7 @@ describe('Lark integration lifecycle', () => {
       await h.runtime.runPromise(Effect.flip(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context))))
       expect((await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context)))).state).toBe('recovering')
       expect(fetchMock).not.toHaveBeenCalled()
-      await expect(stat(join(h.directory, 'app-auth.json'))).rejects.toThrow()
+      expect((await privateState(h.directory)).appAuth).toBeUndefined()
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
@@ -569,7 +602,7 @@ describe('Lark integration lifecycle', () => {
     try {
       h.start()
       await h.settled('recovering')
-      expect(JSON.parse(await readFile(join(h.directory, 'auth.json'), 'utf8'))).toMatchObject({ accessToken: 'test-user-token', refreshToken: 'test-refresh', verified: false })
+      expect((await privateState(h.directory)).userAuth).toMatchObject({ accessToken: 'test-user-token', refreshToken: 'test-refresh', verified: false })
       expect((await h.checked()).state).toBe('recovering')
       await h.stop()
       const next = harness()
@@ -589,18 +622,18 @@ describe('Lark integration lifecycle', () => {
       h.start()
       await h.settled('login_required')
       expect(h.states.some((item) => item.state === 'ready')).toBe(false)
-      expect(JSON.parse(await readFile(join(h.directory, 'auth.json'), 'utf8')).verified).toBe(false)
+      expect((await privateState(h.directory)).userAuth.verified).toBe(false)
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
   it('does not overwrite malformed state or leak its contents', async () => {
     const h = harness()
     await seed(h.directory)
-    await writeFile(join(h.directory, 'app.json'), '{"clientSecret":"never-log-this"}')
+    await writeFile(join(h.directory, 'private.json'), '{"app":{"clientSecret":"never-log-this"}}')
     try {
       const error = await h.runtime.runPromise(Effect.flip(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context))))
       expect(JSON.stringify(error)).not.toContain('never-log-this')
-      expect(await readFile(join(h.directory, 'app.json'), 'utf8')).toContain('never-log-this')
+      expect(await readFile(join(h.directory, 'private.json'), 'utf8')).toContain('never-log-this')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
   it('retries transient refresh failures across expiry, then recovers without asking for OAuth', async () => {

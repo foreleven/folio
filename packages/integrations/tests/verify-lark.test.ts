@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { IntegrationContext, IntegrationError } from '../src/base/index.ts'
 import { lark } from '../src/lark/index.ts'
 import { findCli } from '../src/lark/cli.ts'
-import { AppAuth, LarkApp, readState, UserAuth } from '../src/lark/state.ts'
+import { readPrivateState } from '../src/lark/state.ts'
 
 const execute = promisify(execFile)
 const CliResult = Schema.Struct({
@@ -27,9 +27,7 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('reads IM and Email using the sav
     const directory = join(process.env.FOLIO_CONFIG_DIR || join(homedir(), '.folio'), 'integrations', 'lark')
     const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, { directory, writeState: () => Effect.void, registerResource: () => Effect.void }))
     expect(result.state, 'Complete Lark setup before running live verification').toBe('ready')
-    const app = yield* readState(join(directory, 'app.json'), LarkApp)
-    const appAuth = yield* readState(join(directory, 'app-auth.json'), AppAuth)
-    const user = yield* readState(join(directory, 'auth.json'), UserAuth)
+    const { app, appAuth, userAuth: user } = yield* readPrivateState(directory)
     const command = yield* findCli(directory)
     if (!app || !appAuth || !user || !command) return yield* new IntegrationError({ message: 'Integration credentials are missing.' })
     // Environment is scoped to each child process. The user's global CLI account is untouched.

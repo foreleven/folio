@@ -1,6 +1,5 @@
-import { Clock, Effect, FileSystem, Schema } from 'effect'
+import { Clock, Effect, FileSystem } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
-import { join } from 'node:path'
 import { defineIntegration, IntegrationContext, IntegrationError } from '../base/index.ts'
 import type { CheckResult, IngestContext, IntegrationAction } from '../base/index.ts'
 import { authorizeUser } from './auth.ts'
@@ -8,7 +7,7 @@ import { larkMetadata } from './metadata.ts'
 import { createApp } from './app-registration.ts'
 import { ensureCli, findCli } from './cli.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
-import { AppAuth, readState, UserAuth, writeState } from './state.ts'
+import { migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
 import { belongsToApp, getApp, hasPermissions, nextMaintenance, recover, releaseSession, session } from './connection.ts'
 
 /** Agent context enrichment remains outside the connection/settings lifecycle. */
@@ -19,7 +18,7 @@ const resources = [
 ] as const
 const actions = [
   { id: 'open_authorization', label: { en: 'Continue in browser', 'zh-CN': '前往授权' } },
-  { id: 'install', label: { en: 'Complete installation', 'zh-CN': '完成安装' } },
+  { id: 'install', label: { en: 'Install', 'zh-CN': '安装' } },
   { id: 'connect', label: { en: 'Connect Lark', 'zh-CN': '连接飞书' },
     description: { en: 'Continue from your saved connection progress.', 'zh-CN': '从已保存的进度继续连接。' } }
 ] as const
@@ -42,13 +41,13 @@ function result(state: string, action?: 'install' | 'connect'): CheckResult {
 /** Reads durable facts only. Expiry recovery belongs to the provider runtime, not host inspection. */
 const inspect = Effect.fn('Lark.inspect')(function*(): Effect.fn.Return<CheckResult, unknown, IntegrationContext | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> {
   const { directory } = yield* IntegrationContext
-  if (!(yield* findCli(directory)) || !(yield* hasSkills(directory)) ||
-      !(yield* readState(join(directory, 'installed.json'), Schema.Boolean))) return result('install_required', 'install')
+  const privateState = yield* readPrivateState(directory)
+  if (!(yield* findCli(directory)) || !(yield* hasSkills(directory)) || !privateState.installed) return result('install_required', 'install')
   const app = yield* getApp()
   if (!app) return result('app_required', 'connect')
   const current = yield* session()
-  const appAuth = yield* readState(join(directory, 'app-auth.json'), AppAuth)
-  const saved = yield* readState(join(directory, 'auth.json'), UserAuth)
+  const appAuth = privateState.appAuth
+  const saved = privateState.userAuth
   const now = yield* Clock.currentTimeMillis
   if (current.rejected === 'app') return result('app_authorization_required', 'connect')
   if (!appAuth || !belongsToApp(appAuth, app) || appAuth.expiresAt <= now) return result('recovering')
@@ -88,7 +87,7 @@ const install = Effect.fn('Lark.install')(function*() {
       yield* context.registerResource(resource)
       yield* Effect.logDebug('Lark resource registered').pipe(Effect.annotateLogs({ resource: resource.id }))
     }
-    yield* writeState(join(context.directory, 'installed.json'), true)
+    yield* updatePrivateState(context.directory, { installed: true })
     yield* recover
     yield* Effect.logInfo('Lark installation completed')
   }).pipe(current.lock.withPermit)
@@ -117,7 +116,7 @@ const connect = Effect.fn('Lark.connect')(function*() {
       yield* Effect.logDebug('Reusing saved Lark application').pipe(Effect.annotateLogs({ brand: app.brand }))
     }
     // Commit registered/supplied credentials before any exchange so retries never create another app.
-    yield* writeState(join(context.directory, 'app.json'), app)
+    yield* updatePrivateState(context.directory, { app })
     yield* context.writeState('verifying_app', {})
     yield* recover
     const checked = yield* inspect()
@@ -135,7 +134,7 @@ const connect = Effect.fn('Lark.connect')(function*() {
       yield* context.writeState('waiting_for_user', {}, yield* authorizationActions(url))
     }, Effect.annotateLogs({ integration: 'lark', subsystem: 'user-authorization' })))
     yield* Effect.logInfo('Lark user authorization completed')
-    yield* writeState(join(context.directory, 'auth.json'), auth)
+    yield* updatePrivateState(context.directory, { userAuth: auth })
     current.rejected = undefined
     current.failures = 0
     yield* Effect.logInfo('Lark connection completed').pipe(Effect.annotateLogs({ authorization: 'new' }))
@@ -146,12 +145,14 @@ const connect = Effect.fn('Lark.connect')(function*() {
 const run = Effect.fn('Lark.run')(function*() {
   const context = yield* IntegrationContext
   const current = yield* session()
+  yield* migratePrivateState(context.directory).pipe(current.lock.withPermit)
   yield* Effect.logInfo('Lark maintenance runtime started')
   while (true) {
     yield* Effect.logDebug('Lark maintenance check started')
     yield* Effect.gen(function*() {
       // Merely loading the catalog must not install tools, create an app or initiate OAuth.
-      if (!(yield* readState(join(context.directory, 'installed.json'), Schema.Boolean))) return
+      const privateState = yield* readPrivateState(context.directory)
+      if (!privateState.installed) return
       yield* recover
       const checked = yield* inspect()
       yield* context.writeState(checked.state, {}, checked.actions)

@@ -8,7 +8,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { lark } from '../src/lark/index.ts'
 import { IntegrationText, integrationText, IntegrationContext, IntegrationError } from '../src/base/index.ts'
-import { readState, writeState } from '../src/lark/state.ts'
+import { readPrivateState, readState, writeState } from '../src/lark/state.ts'
 
 /** Live installation test: confirms each action and passes only after readiness and resource registration. */
 it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed actions and reaches ready', async ({ signal }) => {
@@ -47,7 +47,7 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
         Effect.mapError(() => new IntegrationError({ message: 'Could not register integration resource.' })))
     }
     // Rebind runtime resources even when shared dependencies were installed by an earlier host.
-    if (yield* readState(join(directory, 'installed.json'), Schema.Boolean)) {
+    if ((yield* readPrivateState(directory)).installed) {
       for (const resource of lark.resources) yield* context.registerResource(resource)
     }
     yield* lark.run!().pipe(Effect.provideService(IntegrationContext, context), Effect.forkScoped)

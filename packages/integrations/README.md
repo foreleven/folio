@@ -23,7 +23,7 @@ src/lark/
   index.ts                # Installation, connection flow and provider lifetime
   connection.ts           # Credential verification, renewal, backoff and coordination
   auth.ts                 # SDK/HTTP authorization transport
-  state.ts                # Schemas and atomic private file persistence
+  state.ts                # Schemas, consolidated private state and legacy migration
 ```
 
 ## Protocol
@@ -139,21 +139,20 @@ SDK 1.73.3 handles application registration, app token exchange, and user identi
 verification. Device OAuth uses the official HTTP endpoints because the SDK does
 not expose that flow. SDK logging is suppressed to avoid raw credential-bearing
 transport diagnostics. `LarkApplication` optionally supplies existing application
-credentials; otherwise Lark reads its private `app.json`.
+credentials; otherwise Lark reads its private consolidated state.
 
 ```text
 ~/.folio/integrations/lark/
-  installed.json   # Dependencies/resources completed
-  app.json         # Application credentials
-  app-auth.json    # Application/tenant tokens and expiry
-  auth.json        # User tokens, expiry, scope, identity and verification
+  private.json     # Versioned installation, application and token state
   cli/
   skills/
 ```
 
-Files use atomic replacement with mode `0600` inside a `0700` directory. They are
-not encrypted. Vault linkage and ingestion are outside this change. The historical
-`lark-im` directory is not automatically migrated.
+The former `installed.json`, `app.json`, `app-auth.json`, and `auth.json` layout is
+read-compatible and migrates atomically to `private.json` when the provider runtime
+starts or state next changes. Files use atomic replacement with mode `0600` inside a
+`0700` directory. They are not encrypted. Vault linkage and ingestion are outside
+this change. The historical `lark-im` directory is not automatically migrated.
 
 ## Verification
 
