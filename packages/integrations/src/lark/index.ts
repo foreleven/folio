@@ -7,7 +7,7 @@ import { authorizeUser } from './auth.ts'
 import { larkMetadata } from './metadata.ts'
 import { createApp } from './app-registration.ts'
 import { ensureCli, findCli } from './cli.ts'
-import { hasSkills, installSkills } from './skills.ts'
+import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { AppAuth, readState, UserAuth, writeState } from './state.ts'
 import { belongsToApp, getApp, hasPermissions, nextMaintenance, recover, releaseSession, session } from './connection.ts'
 
@@ -83,7 +83,7 @@ const install = Effect.fn('Lark.install')(function*() {
     yield* ensureCli(context.directory)
     yield* Effect.logInfo('Lark CLI ready')
     yield* installSkills(context.directory)
-    yield* Effect.logInfo('Lark skills ready').pipe(Effect.annotateLogs({ skillCount: 3 }))
+    yield* Effect.logInfo('Lark skills ready').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
     for (const resource of resources) {
       yield* context.registerResource(resource)
       yield* Effect.logDebug('Lark resource registered').pipe(Effect.annotateLogs({ resource: resource.id }))

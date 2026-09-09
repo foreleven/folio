@@ -74,7 +74,6 @@ export const application = Effect.gen(function*() {
   const electronApp = yield* ElectronApp
   const mainWindow = yield* MainWindow
 
-  yield* Effect.logInfo('Folio main process starting').pipe(Effect.annotateLogs({ subsystem: 'application' }))
   yield* electronApp.whenReady
   yield* Effect.logInfo('Electron application ready').pipe(Effect.annotateLogs({ subsystem: 'application' }))
   yield* mainWindow.open
@@ -96,8 +95,10 @@ export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive).pipe(
 )
 
 /** Fully wired process program; completion releases every scoped main resource. */
-export const program = application.pipe(
-  Effect.provide(MainLive),
+export const program = Effect.logInfo('Folio main process starting').pipe(
+  Effect.annotateLogs({ subsystem: 'application' }),
+  // This marker runs before MainLive acquisition so layer-construction failures still have a startup boundary.
+  Effect.andThen(application.pipe(Effect.provide(MainLive))),
   // Development keeps lifecycle diagnostics visible in the terminal; packaged builds retain operational events.
   Effect.provideService(References.MinimumLogLevel, app.isPackaged ? 'Info' : 'Debug')
 )

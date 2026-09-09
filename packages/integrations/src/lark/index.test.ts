@@ -121,6 +121,19 @@ function harness(options: { missingCli?: boolean; systemExit?: number; tarExit?:
   return { runtime, commands, states, resources, directory, context, start, stop, checked, settled }
 }
 
+/** Captures Debug-and-above Effect logs for one harness without changing its provider dependencies. */
+function logCollector(h: ReturnType<typeof harness>) {
+  const lines: string[] = []
+  const logger = Logger.formatJson.pipe(Logger.map((line) => { lines.push(line) }))
+  const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => h.runtime.runPromise(
+    effect.pipe(
+      Effect.provide(Logger.layer([logger])),
+      Effect.provideService(References.MinimumLogLevel, 'Debug')
+    )
+  )
+  return { lines, run }
+}
+
 /** Seeds usable private state so reuse and CLI-only paths do not run a device flow. */
 async function seed(directory: string, extra = {}) {
   await mkdir(directory, { recursive: true })
@@ -198,19 +211,11 @@ describe('Lark integration lifecycle', () => {
 
   it('logs lifecycle stages without exposing Lark credentials or identity', async () => {
     const h = harness()
-    const lines: string[] = []
-    const logger = Logger.formatJson.pipe(Logger.map((line) => { lines.push(line) }))
-    /** Runs a provider operation with an isolated collector so assertions see only this lifecycle. */
-    const runLogged = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => h.runtime.runPromise(
-      effect.pipe(
-        Effect.provide(Logger.layer([logger])),
-        Effect.provideService(References.MinimumLogLevel, 'Debug')
-      )
-    )
+    const logs = logCollector(h)
     try {
-      await runLogged(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
-      await runLogged(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
-      const output = lines.join('\n')
+      await logs.run(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
+      await logs.run(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
+      const output = logs.lines.join('\n')
       for (const message of [
         'Lark installation started', 'Lark CLI ready', 'Lark skills ready',
         'Reusing installed Lark CLI', 'Lark skills installation completed',
@@ -222,6 +227,19 @@ describe('Lark integration lifecycle', () => {
         'test-refresh', 'test-user', 'test-device']) {
         expect(output).not.toContain(secret)
       }
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it('logs dependency setup failures without exposing private installation details', async () => {
+    const h = harness({ missingCli: true, tarExit: 1 })
+    const logs = logCollector(h)
+    try {
+      await logs.run(Effect.flip(lark.install().pipe(Effect.provideService(IntegrationContext, h.context))))
+      const output = logs.lines.join('\n')
+      for (const message of ['Lark CLI installation started', 'Lark CLI installation failed',
+        'Lark installation failed']) expect(output).toContain(message)
+      expect(output).not.toContain(root)
+      expect(output).not.toContain('lark-cli-1.0.94-darwin-arm64.tar.gz')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
