@@ -11,7 +11,7 @@ export function Welcome(): React.JSX.Element {
   const { openVault, opening, failed } = useVaultOpen()
 
   return (
-    <main className="grid min-h-svh [place-items:safe_center] overflow-y-auto bg-background px-6 py-12 max-[480px]:px-4 [@media(max-height:599px)]:py-6">
+    <main className="grid min-h-svh place-items-center-safe overflow-y-auto bg-background px-6 py-12 max-[480px]:px-4 [@media(max-height:599px)]:py-6">
       <section className="w-full max-w-160">
         <WelcomeHeader />
         <div className="flex flex-col gap-8 text-left">

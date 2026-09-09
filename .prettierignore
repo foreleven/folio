@@ -1,0 +1,8 @@
+node_modules
+out
+dist
+coverage
+repos
+packages/integrations/src/lark/assets
+package-lock.json
+*.tsbuildinfo

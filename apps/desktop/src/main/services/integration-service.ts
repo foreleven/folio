@@ -1,6 +1,6 @@
 import { IntegrationContext, IntegrationError } from '@folio/integrations/base'
 import type { Integration, IntegrationEffect } from '@folio/integrations/base'
-import { Context, Effect, FileSystem, Layer, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
+import { Context, Effect, FileSystem, Layer, Match, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
 import { IntegrationSettingsError, type IntegrationView } from '../../shared/integration'
@@ -203,8 +203,8 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       if (!(yield* store.list).some((row) => row.id === id)) return yield* failure()
       const checked = yield* withContext(id, integration.inspect())
       const selected = yield* Schema.decodeUnknownEffect(IntegrationAction)(checked.actions.find((item) => item.id === actionId))
-      switch (selected.type) {
-        case 'callback':
+      yield* Match.value(selected).pipe(
+        Match.when({ type: 'callback' }, () => Effect.gen(function*() {
           // Validate declared inputs before acknowledging the job; never persist submitted values.
           const definition = integration.actions.find((item) => item.id === actionId)!
           if (definition.fields?.length) {
@@ -214,17 +214,18 @@ export class IntegrationService extends Context.Service<IntegrationService, {
             }
           }
           yield* start(id, 'action', actionId, payload)
-          break
-        case 'open-url':
+        })),
+        Match.when({ type: 'open-url' }, ({ url: target }) => Effect.gen(function*() {
           // Providers own domain policy. The host supports HTTPS navigation, never arbitrary OS schemes.
-          const url = yield* Effect.try(() => new URL(selected.url))
+          const url = yield* Effect.try(() => new URL(target))
           if (url.protocol !== 'https:' || url.username || url.password) return yield* failure()
           yield* Effect.logInfo('Opening integration authorization page').pipe(
             Effect.annotateLogs({ integration: id, action: actionId })
           )
           yield* browser.open(url.toString())
-          break
-      }
+        })),
+        Match.exhaustive
+      )
     }, Effect.mapError(failure))
 
     // Reconcile only installed rows on application restart; merely browsing never inserts rows.

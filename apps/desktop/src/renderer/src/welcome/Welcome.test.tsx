@@ -4,10 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Welcome } from './Welcome'
 
 const state = vi.hoisted(() => ({
-  config: { _tag: 'Success', value: { vaults: [
-    { id: 'first', name: 'Research', path: '/Users/example/Documents/research' },
-    { id: 'second', name: 'Notes', path: '/Users/example/Documents/notes' }
-  ] } } as { _tag: string; value?: { vaults: Array<{ id: string; name: string; path: string }> } },
+  config: {
+    _tag: 'Success',
+    value: {
+      vaults: [
+        { id: 'first', name: 'Research', path: '/Users/example/Documents/research' },
+        { id: 'second', name: 'Notes', path: '/Users/example/Documents/notes' }
+      ]
+    }
+  } as { _tag: string; value?: { vaults: Array<{ id: string; name: string; path: string }> } },
   opening: null as string | null,
   failed: false,
   openVault: vi.fn().mockResolvedValue(undefined),
@@ -25,14 +30,22 @@ vi.mock('../vault/use-vault-open', () => ({
 }))
 
 beforeEach(() => {
-  state.config = { _tag: 'Success', value: { vaults: [
-    { id: 'first', name: 'Research', path: '/Users/example/Documents/research' },
-    { id: 'second', name: 'Notes', path: '/Users/example/Documents/notes' }
-  ] } }
+  state.config = {
+    _tag: 'Success',
+    value: {
+      vaults: [
+        { id: 'first', name: 'Research', path: '/Users/example/Documents/research' },
+        { id: 'second', name: 'Notes', path: '/Users/example/Documents/notes' }
+      ]
+    }
+  }
   state.opening = null
   state.failed = false
 })
-afterEach(() => { cleanup(); vi.clearAllMocks() })
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+})
 
 describe('Welcome', () => {
   it('keeps the primary folder action ahead of newest-first recent vaults', () => {

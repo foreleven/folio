@@ -64,7 +64,7 @@ export function GeneralSettings(): React.JSX.Element {
                 variant="default"
                 size="default"
                 spacing={1}
-                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] [&_[data-slot=toggle]]:h-6.5 [&_[data-slot=toggle]]:rounded-sm [&_[data-slot=toggle]]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
+                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] **:data-[slot=toggle]:h-6.5 **:data-[slot=toggle]:rounded-sm **:data-[slot=toggle]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
                 value={[config.value.theme]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {
@@ -90,7 +90,7 @@ export function GeneralSettings(): React.JSX.Element {
                 variant="default"
                 size="default"
                 spacing={1}
-                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] [&_[data-slot=toggle]]:h-6.5 [&_[data-slot=toggle]]:rounded-sm [&_[data-slot=toggle]]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
+                className="max-w-full flex-wrap rounded-md bg-muted/65 p-0.5 [box-shadow:inset_0_0_0_1px_color-mix(in_oklch,var(--foreground)_6%,transparent)] **:data-[slot=toggle]:h-6.5 **:data-[slot=toggle]:rounded-sm **:data-[slot=toggle]:px-2.5 [&_[data-slot=toggle][aria-pressed=true]]:bg-background [&_[data-slot=toggle][aria-pressed=true]]:text-foreground [&_[data-slot=toggle][aria-pressed=true]]:shadow-xs"
                 value={[config.value.language]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {
