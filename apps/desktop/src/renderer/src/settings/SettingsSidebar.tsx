@@ -25,7 +25,7 @@ export function SettingsSidebar({
 }): React.JSX.Element {
   const text = settingsMessages[useLocale()]
 
-  const itemClassName = 'px-2 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground'
+  const itemClassName = 'px-2 mb-0.5 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground'
 
   return (
     <Sidebar collapsible="none" className="w-36 shrink-0 border-r border-sidebar-border/70 min-[640px]:w-44">
