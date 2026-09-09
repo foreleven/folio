@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node'
 import { registerApp } from '@larksuiteoapi/node-sdk'
-import { ConfigProvider, Effect, Exit, Layer, Logger, ManagedRuntime, References, Scope } from 'effect'
+import { ConfigProvider, Effect, Exit, Layer, Logger, ManagedRuntime, References, Scope, Sink, Stream } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,8 +9,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { lark, LarkApplication } from './index.ts'
 import { TestClock } from 'effect/testing'
-import { releaseSession } from './connection.ts'
-import { larkScopes } from './auth.ts'
+import { releaseSession, larkScopes } from './auth.ts'
 import { IntegrationContext, IntegrationError } from '../base/index.ts'
 import type { IntegrationResource } from '../base/index.ts'
 import { skillNames } from './skills.ts'
@@ -62,20 +61,58 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); await rm(root, { recursive: true, force: true }) })
 
 /** Simulates process outcomes but keeps real Effect filesystem operations and private state files. */
-function harness(options: { missingCli?: boolean; systemExit?: number; authStatusExit?: number; tarExit?: number; gitExit?: number } = {}) {
+function harness(options: {
+  missingCli?: boolean
+  systemExit?: number
+  authStatusExit?: number
+  authStatusBody?: unknown | string
+  tarExit?: number
+  gitExit?: number
+} = {}) {
   const commands: ChildProcess.StandardCommand[] = []
   const states: Array<{ state: string; data: unknown }> = []
   const resources = new Map<string, IntegrationResource>()
   const processLayer = Layer.effect(ChildProcessSpawner.ChildProcessSpawner, Effect.gen(function*() {
     const actual = yield* ChildProcessSpawner.ChildProcessSpawner
+    const defaultAuthStatus = () => ({
+      appId: app.clientId,
+      brand: app.brand,
+      identity: 'user',
+      verified: true,
+      identities: {
+        user: {
+          status: 'ready', available: true, verified: true,
+          openId: 'test-user', tokenStatus: 'valid', scope: larkScopes.join(' '),
+          expiresAt: new Date(Date.now() + 7_200_000).toISOString(),
+          refreshExpiresAt: new Date(Date.now() + 604_800_000).toISOString(),
+          grantedAt: new Date().toISOString()
+        }
+      }
+    })
     return ChildProcessSpawner.ChildProcessSpawner.of({ ...actual,
+      spawn: (command) => {
+        if (!ChildProcess.isStandardCommand(command)) throw new Error('Expected a direct command')
+        if ((command.command === 'lark-cli' || command.command.endsWith('/lark-cli')) &&
+            command.args[0] === 'auth' && command.args[1] === 'status') {
+          commands.push(command)
+          const body = options.authStatusBody ?? defaultAuthStatus()
+          const stdout = typeof body === 'string' ? body : JSON.stringify(body)
+          return Effect.succeed(ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1), stdin: Sink.drain,
+            stdout: Stream.fromIterable([new TextEncoder().encode(stdout)]), stderr: Stream.empty,
+            all: Stream.fromIterable([new TextEncoder().encode(stdout)]),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(options.authStatusExit ?? 0)),
+            isRunning: Effect.succeed(false), kill: () => Effect.void,
+            getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void)
+          }))
+        }
+        return actual.spawn(command)
+      },
       exitCode: (command) => {
         if (!ChildProcess.isStandardCommand(command)) throw new Error('Expected a direct command')
         commands.push(command)
         if (command.command === 'lark-cli' || command.command.endsWith('/lark-cli')) {
-          if (command.args[0] === 'auth' && command.args[1] === 'status') {
-            return Effect.succeed(ChildProcessSpawner.ExitCode(options.authStatusExit ?? 0))
-          }
           return options.missingCli && command.command === 'lark-cli'
             ? actual.exitCode(ChildProcess.make(join(root, 'missing-executable')))
             : Effect.succeed(ChildProcessSpawner.ExitCode(options.systemExit ?? 0))
@@ -186,21 +223,68 @@ describe('Lark integration lifecycle', () => {
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it('checks authentication with the managed CLI and fails on a nonzero auth status', async () => {
+  it('checks structured CLI authentication, binds it to Folio state, and fails on a nonzero status', async () => {
     const healthy = harness()
+    await seed(healthy.directory, { refreshToken: 'saved-refresh', refreshExpiresAt: Date.now() + 3600000 })
     try {
       await healthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, healthy.context)))
       expect(healthy.commands.map((command) => command.args)).toEqual([
-        ['--version'], ['auth', 'status', '--verify']
+        ['--version'], ['auth', 'status', '--json', '--verify']
       ])
+      const saved = await privateState(healthy.directory)
+      expect(saved.userAuth.verified).toBe(true)
+      expect(saved.userAuth.expiresAt).toBeGreaterThan(Date.now())
+      expect(saved.userAuth.refreshExpiresAt).toBeGreaterThan(saved.userAuth.expiresAt)
     } finally { await healthy.stop(); await healthy.runtime.dispose() }
 
     const unhealthy = harness({ authStatusExit: 3 })
+    await seed(unhealthy.directory)
     try {
       await expect(unhealthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, unhealthy.context))))
         .rejects.toThrow()
-      expect(unhealthy.commands.at(-1)?.args).toEqual(['auth', 'status', '--verify'])
+      expect(unhealthy.commands.at(-1)?.args).toEqual(['auth', 'status', '--json', '--verify'])
     } finally { await unhealthy.stop(); await unhealthy.runtime.dispose() }
+  })
+
+  it('refreshes and verifies an expiring CLI token atomically during check', async () => {
+    const h = harness({ authStatusBody: {
+      appId: app.clientId, brand: app.brand, identity: 'user', verified: true,
+      identities: { user: {
+        status: 'ready', available: true, verified: true, openId: 'test-user', tokenStatus: 'valid',
+        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        refreshExpiresAt: new Date(Date.now() + 3_600_000).toISOString()
+      } }
+    } })
+    await seed(h.directory, { refreshToken: 'old-refresh', refreshExpiresAt: Date.now() + 3_600_000 })
+    try {
+      await h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context)))
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(sdk.userInfo).toHaveBeenCalledTimes(1)
+      expect(await privateState(h.directory)).toMatchObject({ userAuth: {
+        accessToken: 'test-user-token', refreshToken: 'test-refresh', openId: 'test-user', verified: true
+      } })
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it.each([
+    { authStatusBody: '{broken-json', reason: 'invalid JSON' },
+    { authStatusBody: {
+      appId: 'another-app', identity: 'user', verified: true,
+      identities: { user: { available: true, verified: true, openId: 'test-user', tokenStatus: 'valid',
+        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 7200000).toISOString() } }
+    }, reason: 'another app' },
+    { authStatusBody: {
+      appId: app.clientId, identity: 'user', verified: true,
+      identities: { user: { available: true, verified: true, openId: 'another-user', tokenStatus: 'valid',
+        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 7200000).toISOString() } }
+    }, reason: 'another user' }
+  ])('rejects CLI status from $reason', async ({ authStatusBody }) => {
+    const h = harness({ authStatusBody })
+    await seed(h.directory)
+    try {
+      await expect(h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context))))
+        .rejects.toThrow()
+    } finally { await h.stop(); await h.runtime.dispose() }
   })
 
   it('inspect is read-only and asks for installation when dependencies are missing', async () => {

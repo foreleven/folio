@@ -3,7 +3,6 @@ import { Alert, AlertAction, AlertDescription } from '@folio/ui/components/ui/al
 import { Button } from '@folio/ui/components/ui/button'
 import { Separator } from '@folio/ui/components/ui/separator'
 import { Skeleton } from '@folio/ui/components/ui/skeleton'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@folio/ui/components/ui/tooltip'
 import { cn } from '@folio/ui/lib/utils'
 import { CircleAlertIcon, FolderIcon, LoaderCircleIcon } from 'lucide-react'
 import type { Vault } from '../../../shared/vault'
@@ -26,20 +25,17 @@ function RecentVaultRow({ vault, opening, onOpen }: RecentVaultRowProps): React.
   const busy = opening === vault.id
   return (
     <li>
-      <Tooltip>
-        <TooltipTrigger render={<Button variant="ghost" className="h-11 w-full justify-start gap-3 rounded-md px-3 text-left sm:px-4"
-          aria-label={`${vault.name}: ${vault.path}`} disabled={opening !== null} onClick={() => void onOpen(vault.id)} />}>
-          <FolderIcon data-icon="inline-start" className="size-4 text-muted-foreground" />
-          <span className="grid min-w-0 flex-1 gap-0.5 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)] sm:items-center sm:gap-6">
-            <span className="truncate text-sm font-normal sm:text-base">{vault.name}</span>
-            <span className="truncate font-mono text-xs font-normal text-muted-foreground sm:text-right">{vault.path}</span>
-          </span>
-          {busy
-            ? <LoaderCircleIcon data-icon="inline-end" className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" />
-            : null}
-        </TooltipTrigger>
-        <TooltipContent side="bottom" align="start"><span className="font-mono">{vault.path}</span></TooltipContent>
-      </Tooltip>
+      <Button variant="ghost" className="h-11 w-full justify-start gap-3 rounded-md px-3 text-left sm:px-4"
+        aria-label={`${vault.name}: ${vault.path}`} disabled={opening !== null} onClick={() => void onOpen(vault.id)}>
+      <FolderIcon data-icon="inline-start" className="size-4 text-muted-foreground" />
+      <span className="grid min-w-0 flex-1 gap-0.5 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)] sm:items-center sm:gap-6">
+        <span className="truncate text-sm font-normal sm:text-base">{vault.name}</span>
+        <span className="truncate font-mono text-xs font-normal text-muted-foreground sm:text-right">{vault.path}</span>
+      </span>
+      {busy
+        ? <LoaderCircleIcon data-icon="inline-end" className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" />
+        : null}
+        </Button>
     </li>
   )
 }
@@ -79,9 +75,9 @@ export function RecentVaults({ opening, onOpen }: RecentVaultsProps): React.JSX.
         : vaults.length === 0 ? <div className="flex h-11 items-center px-3 sm:px-4">
           <p className="m-0 text-sm text-muted-foreground">{chinese ? '还没有知识库。打开一个文件夹，从这里开始。' : 'No vaults yet. Open a folder to get started.'}</p>
         </div>
-          : <TooltipProvider><ul className="list-none p-0">
+          : <ul className="list-none p-0">
             {vaults.map((vault) => <RecentVaultRow key={vault.id} vault={vault} opening={opening} onOpen={onOpen} />)}
-          </ul></TooltipProvider>}
+          </ul>}
     </section>
   )
 }

@@ -1,222 +1,280 @@
-import { Client, Domain, withUserAccessToken } from '@larksuiteoapi/node-sdk'
-import { Clock, Effect, Schema } from 'effect'
-import { IntegrationError } from '../base/index.ts'
-import { AppAuth, LarkApp } from './state.ts'
+import { Clock, Context, Effect, Layer, Schema, Semaphore } from 'effect'
+import { resolve } from 'node:path'
+import { IntegrationContext, IntegrationError } from '../base/index.ts'
+import { readCliAuthStatus } from './cli.ts'
+import {
+  AuthorizationRejected, LarkService, larkScopes
+} from './service.ts'
+import type { AuthorizationRequest, LarkServiceApi, RegistrationProgress } from './service.ts'
+import { LarkApp, readPrivateState, updatePrivateState } from './state.ts'
 import type { UserAuth } from './state.ts'
 
-// SDK 1.73.3 treats LoggerLevel.fatal (0) as the default info level. Suppress raw
-// transport logs explicitly; all failures leave this module through sanitized errors.
-const discardLog = () => {}
-const sdkLogger = { error: discardLog, warn: discardLog, info: discardLog, debug: discardLog, trace: discardLog }
+export { AuthorizationRejected, larkScopes } from './service.ts'
 
-/** Distinguishes credentials that need user intervention from retryable transport failures. */
-export class AuthorizationRejected extends Schema.TaggedError<AuthorizationRejected>()('AuthorizationRejected', {
-  target: Schema.Literals(['app', 'user'])
-}) {}
-
-interface AuthorizationRequest { step: 'app' | 'user'; url: string; expiresIn: number }
-
-export const larkScopes = [
-  'auth:user.id:read', 'im:chat:read', 'im:message:readonly',
-  'im:message.group_msg:get_as_user', 'im:message.p2p_msg:get_as_user', 'im:message.reactions:read',
-  'mail:user_mailbox.message.address:read', 'mail:user_mailbox.message.body:read',
-  'mail:user_mailbox.message.subject:read', 'mail:user_mailbox.message:readonly', 'mail:user_mailbox:readonly'
-]
-
-const DeviceCode = Schema.Struct({
-  device_code: Schema.NonEmptyString,
-  verification_uri: Schema.NonEmptyString,
-  verification_uri_complete: Schema.optional(Schema.String),
-  expires_in: Schema.Number.check(Schema.isGreaterThan(0)),
-  interval: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0)))
+/** Optional host credentials; omitted values reuse the existing private application state. */
+export const LarkApplication = Context.Reference<LarkApp | undefined>('@folio/integrations/lark/LarkApplication', {
+  defaultValue: () => undefined
 })
-const TokenResponse = Schema.Struct({
-  error: Schema.optional(Schema.String),
-  access_token: Schema.optional(Schema.String),
-  expires_in: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
-  refresh_token: Schema.optional(Schema.String),
-  refresh_token_expires_in: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
-  scope: Schema.optional(Schema.String)
-})
-/** Selects documented endpoints from a validated tenant brand. */
-function endpoints(app: LarkApp) {
-  return app.brand === 'lark'
-    ? { accounts: 'https://accounts.larksuite.com', open: 'https://open.larksuite.com' }
-    : { accounts: 'https://accounts.feishu.cn', open: 'https://open.feishu.cn' }
+
+type Session = { readonly lock: Semaphore.Semaphore; rejected?: 'app' | 'user'; failures: number }
+const sessions = new Map<string, Session>()
+
+export type LarkAuthPhase =
+  | 'app_missing'
+  | 'app_rejected'
+  | 'app_recovering'
+  | 'user_missing'
+  | 'user_rejected'
+  | 'user_recovering'
+  | 'ready'
+
+export interface LarkAuthSnapshot {
+  readonly installed: boolean
+  readonly phase: LarkAuthPhase
 }
 
-/** Fetches and validates auth responses without leaking request credentials or token payloads into errors. */
-const request = Effect.fn('Lark.authRequest')(function*<A>(url: string, init: RequestInit, schema: Schema.Codec<A, unknown>) {
-  const response = yield* Effect.tryPromise({
-    try: async (signal) => {
-      const response = await fetch(url, { ...init, signal })
-      return { status: response.status, ok: response.ok, body: await response.json() }
-    },
-    catch: () => new IntegrationError({ message: 'Could not reach the Lark authorization endpoint.' })
-  }).pipe(Effect.timeout('30 seconds'))
-  if (response.status >= 500 || response.status === 429) return yield* new IntegrationError({ message: 'Lark authorization is temporarily unavailable.' })
-  const body = yield* Schema.decodeUnknownEffect(schema)(response.body).pipe(
-    Effect.mapError(() => new IntegrationError({ message: `Invalid Lark authorization response (HTTP ${response.status}).` }))
-  )
-  yield* Effect.logDebug('Lark authorization endpoint responded').pipe(
-    Effect.annotateLogs({ httpStatus: response.status, accepted: response.ok })
-  )
-  return { ...response, body }
+function snapshot(installed: boolean, phase: LarkAuthPhase): LarkAuthSnapshot {
+  return { installed, phase }
+}
+
+/** Saved credentials are usable only for this app/brand and the full requested resource scope. */
+export function belongsToApp(saved: { clientId: string; brand: string } | undefined, app: LarkApp): boolean {
+  return saved?.clientId === app.clientId && saved.brand === app.brand
+}
+
+/** Scope changes require a new user grant; refreshing cannot manufacture missing permissions. */
+export function hasPermissions(saved: UserAuth | undefined): boolean {
+  return !!saved?.scope && larkScopes.every((scope) => saved.scope!.split(/\s+/).includes(scope))
+}
+
+function parseCliTime(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function sameUserAuth(left: UserAuth, right: UserAuth): boolean {
+  return left.clientId === right.clientId && left.brand === right.brand &&
+    left.accessToken === right.accessToken && left.expiresAt === right.expiresAt &&
+    left.refreshToken === right.refreshToken && left.refreshExpiresAt === right.refreshExpiresAt &&
+    left.scope === right.scope && left.verified === right.verified && left.openId === right.openId
+}
+
+export const releaseSession = Effect.gen(function*() {
+  const { directory } = yield* IntegrationContext
+  sessions.delete(resolve(directory))
 })
 
-/** Exchanges app credentials as in kb-wiki; SDK's generated type incorrectly nests these fields under data. */
-export const authorizeApp = Effect.fn('Lark.authorizeApp')(function*(app: LarkApp) {
-  yield* Effect.logInfo('Lark application authorization started').pipe(Effect.annotateLogs({ brand: app.brand }))
-  const now = yield* Clock.currentTimeMillis
-  const body = yield* Effect.tryPromise({
-    try: (signal) => new Client({
-      appId: app.clientId, appSecret: app.clientSecret,
-      domain: app.brand === 'lark' ? Domain.Lark : Domain.Feishu,
-      disableTokenCache: true, logger: sdkLogger
-    }).request<unknown>({
-      url: '/open-apis/auth/v3/app_access_token/internal', method: 'POST', signal,
-      data: { app_id: app.clientId, app_secret: app.clientSecret }
-    }),
-    catch: () => new IntegrationError({ message: 'Could not verify Lark application credentials.' })
-  }).pipe(Effect.timeout('30 seconds'))
-  const result = yield* Schema.decodeUnknownEffect(Schema.Struct({ code: Schema.Number }))(body).pipe(Effect.mapError(() => new IntegrationError({ message: 'Invalid Lark application response.' })))
-  if (result.code !== 0) {
-    yield* Effect.logWarning('Lark application authorization rejected').pipe(Effect.annotateLogs({ brand: app.brand }))
-    return yield* new AuthorizationRejected({ target: 'app' })
-  }
-  const token = yield* Schema.decodeUnknownEffect(Schema.Struct({
-    code: Schema.Literal(0), app_access_token: Schema.NonEmptyString,
-    tenant_access_token: Schema.optional(Schema.NonEmptyString),
-    expire: Schema.Number.check(Schema.isGreaterThan(0))
-  }))(body).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark rejected application authorization.' })))
-  const authorized = {
-    clientId: app.clientId, brand: app.brand, appAccessToken: token.app_access_token,
-    tenantAccessToken: token.tenant_access_token, expiresAt: now + token.expire * 1000
-  } satisfies AppAuth
-  yield* Effect.logInfo('Lark application authorization completed').pipe(Effect.annotateLogs({ brand: app.brand }))
-  return authorized
-}, Effect.annotateLogs({ integration: 'lark', subsystem: 'app-authorization' }), Effect.withLogSpan('lark.authorizeApp'))
-
-/** Verifies a saved token as a user token; network failures do not trigger unnecessary reauthorization. */
-export const userIdentity = Effect.fn('Lark.userIdentity')(function*(app: LarkApp, accessToken: string) {
-  yield* Effect.logDebug('Lark user identity verification started').pipe(Effect.annotateLogs({ brand: app.brand }))
-  const result = yield* Effect.tryPromise({
-    try: () => new Client({
-      appId: app.clientId, appSecret: app.clientSecret,
-      domain: app.brand === 'lark' ? Domain.Lark : Domain.Feishu,
-      logger: sdkLogger
-    }).authen.userInfo.get({}, withUserAccessToken(accessToken)),
-    catch: () => new IntegrationError({ message: 'Lark user verification is temporarily unavailable.' })
-  }).pipe(Effect.timeout('30 seconds'))
-  if (result.code !== 0) {
-    yield* Effect.logWarning('Lark user identity verification rejected').pipe(Effect.annotateLogs({ brand: app.brand }))
-    return undefined
-  }
-  yield* Effect.logDebug('Lark user identity verification completed').pipe(
-    Effect.annotateLogs({ brand: app.brand, identityPresent: !!result.data?.open_id })
-  )
-  return result.data?.open_id
-
-}, Effect.annotateLogs({ integration: 'lark', subsystem: 'user-verification' }), Effect.withLogSpan('lark.userIdentity'))
-
-/** Runs device OAuth, forwarding its URL to the host and respecting expiry, slow_down, and cancellation. */
-export const authorizeUser = Effect.fn('Lark.authorizeUser')(function*(
-  app: LarkApp, onAuthorize: (request: AuthorizationRequest) => Effect.Effect<void, IntegrationError>
-) {
-  yield* Effect.logDebug('Lark device authorization requested').pipe(Effect.annotateLogs({ brand: app.brand }))
-  const scope = [...larkScopes, 'offline_access'].join(' ')
-  const started = yield* request(`${endpoints(app).accounts}/oauth/v1/device_authorization`, {
-    method: 'POST',
-    headers: {
-      authorization: `Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}`,
-      'content-type': 'application/x-www-form-urlencoded'
-    },
-    body: new URLSearchParams({ client_id: app.clientId, scope }).toString()
-  }, DeviceCode)
-  if (!started.ok) return yield* new IntegrationError({ message: 'Lark rejected the application credentials or requested scopes.' })
-  const device = started.body
-  const deadline = (yield* Clock.currentTimeMillis) + device.expires_in * 1000
-  yield* Effect.logDebug('Lark device authorization accepted').pipe(
-    Effect.annotateLogs({ expiresInSeconds: device.expires_in, pollingIntervalSeconds: device.interval ?? 5 })
-  )
-  yield* onAuthorize({
-    step: 'user', url: device.verification_uri_complete || device.verification_uri, expiresIn: device.expires_in
+function make(service: LarkServiceApi) {
+  /** Only runtime coordination lives in memory; credentials and verification survive restarts. */
+  const session = Effect.fn('LarkAuth.session')(function*() {
+    const { directory } = yield* IntegrationContext
+    const key = resolve(directory)
+    return yield* Effect.sync(() => {
+      let current = sessions.get(key)
+      if (!current) {
+        current = { lock: Semaphore.makeUnsafe(1), failures: 0 }
+        sessions.set(key, current)
+      }
+      return current
+    })
   })
-  let interval = Math.max(device.interval ?? 5, 1)
-  let attempt = 0
-  while ((yield* Clock.currentTimeMillis) < deadline) {
-    yield* Effect.sleep(Math.min(interval * 1000, deadline - (yield* Clock.currentTimeMillis)))
-    if ((yield* Clock.currentTimeMillis) >= deadline) break
-    const response = yield* request(`${endpoints(app).open}/open-apis/authen/v2/oauth/token`, {
-      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: app.clientId, client_secret: app.clientSecret,
-        device_code: device.device_code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }).toString()
-    }, TokenResponse)
-    attempt++
-    const token = response.body
-    if (token.error === 'authorization_pending') {
-      yield* Effect.logDebug('Lark user authorization is pending').pipe(Effect.annotateLogs({ attempt }))
-      continue
-    }
-    if (token.error === 'slow_down') {
-      interval = Math.min(interval + 5, 60)
-      yield* Effect.logWarning('Lark authorization polling slowed down').pipe(
-        Effect.annotateLogs({ attempt, pollingIntervalSeconds: interval })
-      )
-      continue
-    }
-    if (!response.ok || token.error || !token.access_token || !token.expires_in) {
-      return yield* new IntegrationError({ message: 'Lark user authorization was denied, expired, or returned an invalid token.' })
-    }
-    if (token.scope && larkScopes.some((required) => !token.scope!.split(/\s+/).includes(required))) {
-      return yield* new IntegrationError({ message: 'Lark did not grant all requested Lark permissions.' })
-    }
-    const now = yield* Clock.currentTimeMillis
-    const openId = yield* userIdentity(app, token.access_token)
-    if (!openId) return yield* new IntegrationError({ message: 'Lark rejected the authorized user token.' })
-    const authorized = {
-      clientId: app.clientId, brand: app.brand, accessToken: token.access_token,
-      expiresAt: now + token.expires_in * 1000, refreshToken: token.refresh_token,
-      refreshExpiresAt: token.refresh_token_expires_in ? now + token.refresh_token_expires_in * 1000 : undefined,
-      scope: token.scope ?? scope, openId
-    } satisfies UserAuth
-    yield* Effect.logDebug('Lark user token granted').pipe(Effect.annotateLogs({ attempt, brand: app.brand }))
-    return authorized
-  }
-  yield* Effect.logWarning('Lark user authorization expired before completion')
-  return yield* new IntegrationError({ message: 'Lark user authorization expired. Start installation again.' })
-}, Effect.annotateLogs({ integration: 'lark', subsystem: 'user-authorization' }), Effect.withLogSpan('lark.authorizeUser'))
 
-/** Exchanges the refresh token; persist the rotated pair before remote verification to survive network failures. */
-export const refreshUser = Effect.fn('Lark.refreshUser')(function*(app: LarkApp, saved: UserAuth) {
-  yield* Effect.logInfo('Lark user authorization refresh started').pipe(Effect.annotateLogs({ brand: app.brand }))
-  if (!saved.refreshToken) return yield* new AuthorizationRejected({ target: 'user' })
-  const result = yield* request(`${endpoints(app).open}/open-apis/authen/v2/oauth/token`, {
-    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: app.clientId, client_secret: app.clientSecret,
-      grant_type: 'refresh_token', refresh_token: saved.refreshToken }).toString()
-  }, TokenResponse)
-  const token = result.body
-  if (token.error && ['invalid_grant', 'invalid_token', 'access_denied'].includes(token.error)) {
-    return yield* new AuthorizationRejected({ target: 'user' })
-  }
-  if (token.error && ['invalid_client', 'unauthorized_client'].includes(token.error)) {
-    return yield* new AuthorizationRejected({ target: 'app' })
-  }
-  if (!result.ok || token.error || !token.access_token || !token.expires_in) {
-    return yield* new IntegrationError({ message: 'Lark could not refresh authorization. Retrying automatically.' })
-  }
-  const scope = token.scope ?? saved.scope
-  if (!scope || larkScopes.some((required) => !scope.split(/\s+/).includes(required))) {
-    return yield* new AuthorizationRejected({ target: 'user' })
-  }
-  const now = yield* Clock.currentTimeMillis
-  const refreshed = {
-    ...saved, accessToken: token.access_token, expiresAt: now + token.expires_in * 1000,
-    refreshToken: token.refresh_token || saved.refreshToken,
-    refreshExpiresAt: token.refresh_token_expires_in
-      ? now + token.refresh_token_expires_in * 1000 : saved.refreshExpiresAt, scope
-  } satisfies UserAuth
-  yield* Effect.logInfo('Lark user authorization refresh completed').pipe(Effect.annotateLogs({ brand: app.brand }))
-  return refreshed
-}, Effect.annotateLogs({ integration: 'lark', subsystem: 'user-authorization' }), Effect.withLogSpan('lark.refreshUser'))
+  const exclusive = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.flatMap(session(), (current) => current.lock.withPermit(effect))
+
+  /** Resolves a supplied or persisted application without creating or changing it. */
+  const getApp = Effect.fn('LarkAuth.getApp')(function*() {
+    const { directory } = yield* IntegrationContext
+    const supplied = yield* LarkApplication
+    return supplied === undefined ? (yield* readPrivateState(directory)).app
+      : yield* Schema.decodeUnknownEffect(LarkApp)(supplied)
+  })
+
+  /** Maps durable authentication facts into a provider-domain phase, without UI concerns. */
+  const inspect = Effect.fn('LarkAuth.inspect')(function*() {
+    const { directory } = yield* IntegrationContext
+    const privateState = yield* readPrivateState(directory)
+    const app = yield* getApp()
+    if (!app) return snapshot(privateState.installed, 'app_missing')
+    const current = yield* session()
+    const now = yield* Clock.currentTimeMillis
+    const appAuth = privateState.appAuth
+    if (current.rejected === 'app') return snapshot(privateState.installed, 'app_rejected')
+    if (!appAuth || !belongsToApp(appAuth, app) || appAuth.expiresAt <= now) {
+      return snapshot(privateState.installed, 'app_recovering')
+    }
+    const saved = privateState.userAuth
+    if (!saved || !belongsToApp(saved, app) || !hasPermissions(saved)) {
+      return snapshot(privateState.installed, 'user_missing')
+    }
+    if (saved.expiresAt > now && saved.verified !== false) {
+      return snapshot(privateState.installed, 'ready')
+    }
+    if (current.rejected === 'user') return snapshot(privateState.installed, 'user_rejected')
+    if (saved.expiresAt <= now && (!saved.refreshToken || (saved.refreshExpiresAt && saved.refreshExpiresAt <= now))) {
+      return snapshot(privateState.installed, 'user_missing')
+    }
+    return snapshot(privateState.installed, 'user_recovering')
+  })
+
+  /** Refreshes local app/user credentials without initiating browser authorization. Caller owns the installation lock. */
+  const maintainUnlocked = Effect.fn('LarkAuth.maintainUnlocked')(function*() {
+    const { directory } = yield* IntegrationContext
+    const current = yield* session()
+    const app = yield* getApp()
+    if (!app || current.rejected) return
+    const now = yield* Clock.currentTimeMillis
+    let privateState = yield* readPrivateState(directory)
+    const appAuth = privateState.appAuth
+    if (!appAuth || !belongsToApp(appAuth, app) || appAuth.expiresAt <= now + 60_000) {
+      privateState = yield* updatePrivateState(directory, { appAuth: yield* service.authorizeApp(app) })
+    }
+    let saved = privateState.userAuth
+    if (!saved || !belongsToApp(saved, app) || !hasPermissions(saved)) return
+    if (saved.expiresAt <= now + 60_000 && saved.refreshToken &&
+        (!saved.refreshExpiresAt || saved.refreshExpiresAt > now)) {
+      saved = { ...yield* service.refreshUser(app, saved), verified: false }
+      // A rotated refresh token can invalidate the old pair, so persist before remote verification.
+      yield* updatePrivateState(directory, { userAuth: saved })
+    }
+    if (saved.expiresAt <= now) return
+    const identity = yield* service.userIdentity(app, saved.accessToken)
+    if (identity !== saved.openId) {
+      yield* updatePrivateState(directory, { userAuth: { ...saved, verified: false } })
+      return yield* new AuthorizationRejected({ target: 'user' })
+    }
+    if (saved.verified === false) yield* updatePrivateState(directory, { userAuth: { ...saved, verified: true } })
+  })
+
+  /** Records only retry/rejection categories; no credential-bearing transport detail is retained. */
+  const recoverUnlocked = maintainUnlocked().pipe(
+    Effect.tap(() => Effect.flatMap(session(), (current) => Effect.sync(() => { current.failures = 0 }))),
+    Effect.catch((error) => Effect.gen(function*() {
+      const current = yield* session()
+      current.failures++
+      if (error instanceof AuthorizationRejected) current.rejected = error.target
+      yield* Effect.logWarning('Lark credential maintenance will retry').pipe(Effect.annotateLogs({
+        failureCount: current.failures,
+        category: error instanceof AuthorizationRejected ? 'authorization_rejected' : 'transient',
+        target: error instanceof AuthorizationRejected ? error.target : 'none'
+      }))
+    }))
+  )
+  const recover = exclusive(recoverUnlocked)
+  /** Refreshes retryable credentials and observes the resulting durable phase under one installation lock. */
+  const reconcile = exclusive(recoverUnlocked.pipe(Effect.andThen(inspect())))
+
+  /**
+   * Atomically checks the CLI identity against Folio state, imports its expiry metadata,
+   * and refreshes expiring local credentials before reporting success.
+   */
+  const check = Effect.fn('LarkAuth.check')(function*() {
+    const { directory } = yield* IntegrationContext
+    yield* Effect.gen(function*() {
+      const privateState = yield* readPrivateState(directory)
+      const app = yield* getApp()
+      const saved = privateState.userAuth
+      if (!app || !privateState.appAuth || !saved || !belongsToApp(privateState.appAuth, app) ||
+          !belongsToApp(saved, app) || !hasPermissions(saved)) {
+        return yield* new IntegrationError({ message: 'Lark authentication is incomplete.' })
+      }
+      const status = yield* readCliAuthStatus(directory)
+      const cliUser = status.identities.user
+      const cliScope = cliUser?.scope?.split(/\s+/) ?? []
+      if (!status.verified || status.brand !== app.brand || status.identity !== 'user' ||
+          status.appId !== app.clientId || cliUser?.openId !== saved.openId ||
+          cliUser.available !== true || cliUser.verified !== true || cliUser.tokenStatus !== 'valid' ||
+          larkScopes.some((scope) => !cliScope.includes(scope))) {
+        return yield* new IntegrationError({ message: 'The managed lark-cli authentication does not match this Lark connection.' })
+      }
+      const expiresAt = parseCliTime(cliUser.expiresAt)
+      if (!expiresAt) return yield* new IntegrationError({ message: 'The managed lark-cli did not return a valid token expiry.' })
+      const refreshExpiresAt = parseCliTime(cliUser.refreshExpiresAt)
+      let synchronized: UserAuth = {
+        ...saved,
+        expiresAt,
+        refreshExpiresAt: refreshExpiresAt ?? saved.refreshExpiresAt,
+        verified: true
+      }
+      if (!sameUserAuth(saved, synchronized)) {
+        yield* updatePrivateState(directory, { userAuth: synchronized })
+      }
+      const now = yield* Clock.currentTimeMillis
+      if (privateState.appAuth.expiresAt <= now + 60_000) {
+        yield* updatePrivateState(directory, { appAuth: yield* service.authorizeApp(app) })
+      }
+      if (synchronized.expiresAt <= now + 60_000) {
+        if (!synchronized.refreshToken || (synchronized.refreshExpiresAt && synchronized.refreshExpiresAt <= now)) {
+          return yield* new AuthorizationRejected({ target: 'user' })
+        }
+        synchronized = { ...yield* service.refreshUser(app, synchronized), verified: false }
+        yield* updatePrivateState(directory, { userAuth: synchronized })
+        const identity = yield* service.userIdentity(app, synchronized.accessToken)
+        if (identity !== synchronized.openId) return yield* new AuthorizationRejected({ target: 'user' })
+        yield* updatePrivateState(directory, { userAuth: { ...synchronized, verified: true } })
+      }
+      const current = yield* session()
+      current.rejected = undefined
+      current.failures = 0
+    }).pipe(exclusive)
+  }, Effect.annotateLogs({ integration: 'lark', subsystem: 'auth' }), Effect.withLogSpan('lark.auth.check'))
+
+  /** Creates/reuses an app and completes authorization while keeping every state mutation under one lock. */
+  const connect = Effect.fn('LarkAuth.connect')(function*(callbacks: {
+    readonly onAppProgress: (progress: RegistrationProgress) => Effect.Effect<void, IntegrationError>
+    readonly onAppReady: () => Effect.Effect<void, IntegrationError>
+    readonly onUserRequired: () => Effect.Effect<void, IntegrationError>
+    readonly onUserAuthorize: (request: AuthorizationRequest) => Effect.Effect<void, IntegrationError>
+  }) {
+    const { directory } = yield* IntegrationContext
+    yield* Effect.gen(function*() {
+      const current = yield* session()
+      current.rejected = undefined
+      let app = yield* getApp()
+      if (!app) app = yield* service.createApp(callbacks.onAppProgress)
+      yield* updatePrivateState(directory, { app })
+      yield* callbacks.onAppReady()
+      yield* recoverUnlocked
+      const snapshot = yield* inspect()
+      if (snapshot.phase === 'ready') return
+      if (snapshot.phase !== 'user_missing' && snapshot.phase !== 'user_rejected') {
+        return yield* new IntegrationError({ message: 'Lark is unable to connect. Please try again.' })
+      }
+      yield* callbacks.onUserRequired()
+      const auth = yield* service.authorizeUser(app, callbacks.onUserAuthorize)
+      yield* updatePrivateState(directory, { userAuth: auth })
+      current.rejected = undefined
+      current.failures = 0
+    }).pipe(exclusive)
+  })
+
+  /** Chooses the renewal deadline/backoff from locally persisted expiry metadata. */
+  const nextMaintenance = Effect.fn('LarkAuth.nextMaintenance')(function*() {
+    const { directory } = yield* IntegrationContext
+    const current = yield* session()
+    const now = yield* Clock.currentTimeMillis
+    const privateState = yield* readPrivateState(directory)
+    const app = privateState.appAuth
+    const user = privateState.userAuth
+    if (current.failures) {
+      const expiresIn = Math.min(app?.expiresAt ?? Infinity, user?.expiresAt ?? Infinity) - now
+      return Math.max(1000, Math.min(30_000 * 2 ** Math.min(current.failures - 1, 3), expiresIn > 0 ? expiresIn : Infinity))
+    }
+    const due = Math.min(app?.expiresAt ?? Infinity, user?.expiresAt ?? Infinity) - now - 60_000
+    return due > 0 ? Math.min(due, 60_000) : 30_000
+  })
+
+  const release = Effect.fn('LarkAuth.release')(function*() {
+    const { directory } = yield* IntegrationContext
+    sessions.delete(resolve(directory))
+  })
+
+  return { exclusive, inspect, check, recover, reconcile, connect, nextMaintenance, release }
+}
+
+export type LarkAuthApi = ReturnType<typeof make>
+
+/** Local authentication boundary: state, serialization, check/refresh policy, and durable token lifecycle. */
+export class LarkAuth extends Context.Service<LarkAuth, LarkAuthApi>()('@folio/integrations/lark/LarkAuth') {
+  static readonly layer = Layer.effect(LarkAuth, Effect.map(LarkService, make)).pipe(Layer.provide(LarkService.layer))
+}
