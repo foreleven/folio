@@ -14,14 +14,24 @@ export const LarkSkillsDirectory = Context.Reference<string>('@folio/integration
 export const hasSkills = Effect.fn('Lark.hasSkills')(function*(directory: string) {
   const fs = yield* FileSystem.FileSystem
   for (const name of skillNames) {
-    if (!(yield* fs.exists(join(directory, 'skills', name, 'SKILL.md')))) return false
+    if (!(yield* fs.exists(join(directory, 'skills', name, 'SKILL.md')))) {
+      yield* Effect.logDebug('Lark skills installation is incomplete').pipe(
+        Effect.annotateLogs({ missingSkill: name })
+      )
+      return false
+    }
   }
+  yield* Effect.logDebug('Lark skills installation found').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
   return true
-})
+}, Effect.annotateLogs({ integration: 'lark', subsystem: 'skills' }))
 
 /** Copies bundled skills after confirmation; stages complete trees before publication. */
 export const installSkills = Effect.fn('Lark.installSkills')(function*(directory: string) {
-  if (yield* hasSkills(directory)) return
+  if (yield* hasSkills(directory)) {
+    yield* Effect.logDebug('Reusing installed Lark skills')
+    return
+  }
+  yield* Effect.logInfo('Lark skills installation started').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
   const fs = yield* FileSystem.FileSystem
   const source = yield* LarkSkillsDirectory
   const destination = join(directory, 'skills')
@@ -38,6 +48,7 @@ export const installSkills = Effect.fn('Lark.installSkills')(function*(directory
       return yield* new IntegrationError({ message: `The bundled Lark skill is incomplete: ${name}.` })
     }
     yield* fs.copy(skill, join(staging, name))
+    yield* Effect.logDebug('Bundled Lark skill staged').pipe(Effect.annotateLogs({ skill: name }))
   }
   const license = join(source, 'LICENSE')
   if (yield* fs.exists(license)) yield* fs.copy(license, join(staging, 'LICENSE'))
@@ -47,4 +58,6 @@ export const installSkills = Effect.fn('Lark.installSkills')(function*(directory
     }
   }
   yield* fs.rename(staging, destination).pipe(Effect.uninterruptible)
-})
+  yield* Effect.logInfo('Lark skills installation completed').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
+}, Effect.tapError(() => Effect.logError('Lark skills installation failed')),
+Effect.annotateLogs({ integration: 'lark', subsystem: 'skills' }), Effect.withLogSpan('lark.installSkills'))

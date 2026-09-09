@@ -35,6 +35,9 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     const revisions = new Map<string, number>()
     const changes = yield* PubSub.unbounded<readonly IntegrationView[]>()
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes))
+    yield* Effect.logDebug('Integration service initialization started').pipe(
+      Effect.annotateLogs({ integrationCount: catalog.length })
+    )
 
     const list = Effect.gen(function*() {
       const rows = yield* store.list
@@ -68,13 +71,18 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     const contextFor = (id: string): IntegrationContext["Service"] => ({
       directory: join(config.directory, 'integrations', id),
       writeState: (state, data, actions = []) => commit(store.update(id, state, data, actions).pipe(
-        Effect.tap(() => Effect.sync(() => { revisions.set(id, (revisions.get(id) ?? 0) + 1) }))
+        Effect.tap(() => Effect.sync(() => { revisions.set(id, (revisions.get(id) ?? 0) + 1) })),
+        Effect.tap(() => Effect.logDebug('Integration state committed').pipe(
+          Effect.annotateLogs({ integration: id, state, actionCount: actions.length })
+        ))
       )).pipe(
         Effect.mapError(() => new IntegrationError({ message: 'Could not persist integration state.' }))
       ),
-      registerResource: ({ id: resourceId, name }) => commit(store.register(id, { id: resourceId, name })).pipe(
-        Effect.mapError(() => new IntegrationError({ message: 'Could not register integration resource.' }))
-      )
+      registerResource: ({ id: resourceId, name }) => commit(store.register(id, { id: resourceId, name }).pipe(
+        Effect.tap(() => Effect.logDebug('Integration resource registered').pipe(
+          Effect.annotateLogs({ integration: id, resource: resourceId })
+        ))
+      )).pipe(Effect.mapError(() => new IntegrationError({ message: 'Could not register integration resource.' })))
     })
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
@@ -85,9 +93,19 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       const data = result.state === row.state ? row.data : {}
       // A background publication may finish while inspection is reading files/network facts.
       // Check inside the write lock so that an older inspection never replaces that newer snapshot.
-      yield* commit(Effect.suspend(() => (revisions.get(integration.id) ?? 0) === revision
-        ? store.update(integration.id, result.state, data, result.actions) : Effect.void))
-    })
+      yield* commit(Effect.suspend(() => {
+        if ((revisions.get(integration.id) ?? 0) !== revision) {
+          return Effect.logDebug('Stale integration inspection ignored').pipe(
+            Effect.annotateLogs({ integration: integration.id, state: result.state })
+          )
+        }
+        return store.update(integration.id, result.state, data, result.actions).pipe(
+          Effect.tap(() => Effect.logDebug('Integration reconciliation completed').pipe(
+            Effect.annotateLogs({ integration: integration.id, state: result.state, actionCount: result.actions.length })
+          ))
+        )
+      }))
+    }, Effect.annotateLogs({ subsystem: 'integration-orchestration' }), Effect.withLogSpan('integration.reconcile'))
     /** Starts a main-scope job, independent of the lifetime of the requesting RPC/window. */
     const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'inspect' | 'action', actionId?: string, payload?: unknown) {
       const integration = catalog.find((item) => item.id === id)
@@ -101,14 +119,25 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       if (!row) yield* commit(store.create(id))
       if (integration.run && !runtimes.has(id)) {
         runtimes.add(id)
+        yield* Effect.logInfo('Integration provider runtime started').pipe(Effect.annotateLogs({ integration: id }))
         // The host owns cancellation only. Providers choose their own timers, retries and work.
         yield* withContext(id, integration.run()).pipe(
+          Effect.tapError(() => Effect.logError('Integration provider runtime failed').pipe(
+            Effect.annotateLogs({ integration: id })
+          )),
           Effect.catch(() => commit(store.update(id, 'check_failed', {}, [], 'The connection could not be maintained. Check its status.'))),
+          Effect.ensuring(Effect.logInfo('Integration provider runtime stopped').pipe(Effect.annotateLogs({ integration: id }))),
           Effect.catch(() => Effect.void), Effect.interruptible, Effect.forkIn(scope)
         )
       }
       running.add(id)
+      yield* Effect.logInfo('Integration operation scheduled').pipe(
+        Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
+      )
       const job = Effect.gen(function*() {
+        yield* Effect.logInfo('Integration operation started').pipe(
+          Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
+        )
         yield* commit(store.update(id, 'checking', {}, []))
         if (operation === 'install') {
           // Even shared, already-ready tools must register their resources with this host.
@@ -119,8 +148,14 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           yield* withContext(id, integration.onActionCallback(actionId!, payload))
         }
         yield* reconcile(integration)
+        yield* Effect.logInfo('Integration operation completed').pipe(
+          Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
+        )
       }).pipe(
         Effect.catch(() => Effect.gen(function*() {
+          yield* Effect.logError('Integration operation failed').pipe(
+            Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
+          )
           // Preserve durable progress; recover available actions from facts, then attach a safe error.
           const failedAt = revisions.get(id) ?? 0
           const recovered = yield* reconcile(integration).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false)))
@@ -137,7 +172,8 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       )
       // The first row and job ownership survive renderer reload/cancellation together.
       yield* Effect.forkIn(job.pipe(Effect.interruptible), scope)
-    }, commands.withPermit, Effect.uninterruptible, Effect.mapError(failure))
+    }, commands.withPermit, Effect.uninterruptible, Effect.mapError(failure),
+    Effect.annotateLogs({ subsystem: 'integration-orchestration' }))
     /** Rechecks the provider's current action; the renderer supplies an ID, never a URL or protocol. */
     const action = Effect.fn('IntegrationService.action')(function*(id: string, actionId: string, payload?: unknown) {
       const integration = catalog.find((item) => item.id === id)
@@ -161,6 +197,9 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           // Providers own domain policy. The host supports HTTPS navigation, never arbitrary OS schemes.
           const url = yield* Effect.try(() => new URL(selected.url))
           if (url.protocol !== 'https:' || url.username || url.password) return yield* failure()
+          yield* Effect.logInfo('Opening integration authorization page').pipe(
+            Effect.annotateLogs({ integration: id, action: actionId })
+          )
           yield* browser.open(url.toString())
           break
       }
@@ -170,6 +209,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     for (const row of yield* store.list) {
       if (catalog.some((item) => item.id === row.id)) yield* start(row.id, 'inspect')
     }
+    yield* Effect.logInfo('Integration service ready').pipe(Effect.annotateLogs({ integrationCount: catalog.length }))
     return IntegrationService.of({ list, watch, install: (id) => start(id, 'install'), inspect: (id) => start(id, 'inspect'),
       action })
   }))

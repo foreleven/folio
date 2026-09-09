@@ -11,29 +11,47 @@ export const LarkCliArchive = Context.Reference<string>('@folio/integrations/lar
 
 /** Verifies executability before publishing an installation as usable. */
 const verifyCli = Effect.fn('Lark.verifyCli')(function*(executable: string) {
+  yield* Effect.logDebug('Lark CLI verification started')
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const code = yield* spawner.exitCode(ChildProcess.make(executable, ['--version'], {
     stdin: 'ignore', stdout: 'ignore', stderr: 'ignore'
   }))
-  if (code !== 0) return yield* new IntegrationError({ message: 'The installed lark-cli could not start.' })
+  if (code !== 0) {
+    yield* Effect.logWarning('Lark CLI verification failed').pipe(Effect.annotateLogs({ exitCode: code }))
+    return yield* new IntegrationError({ message: 'The installed lark-cli could not start.' })
+  }
+  yield* Effect.logDebug('Lark CLI verification completed')
   return executable
-})
+}, Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }))
 
 /** Returns only the Folio-managed executable; global PATH is intentionally ignored. */
 export const findCli = Effect.fn('Lark.findCli')(function*(directory: string) {
   const fs = yield* FileSystem.FileSystem
   const executable = join(directory, 'cli', process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli')
-  if (!(yield* fs.exists(executable))) return undefined
+  if (!(yield* fs.exists(executable))) {
+    yield* Effect.logDebug('Lark CLI is not installed')
+    return undefined
+  }
+  yield* Effect.logDebug('Lark CLI installation found')
   return yield* verifyCli(executable)
-})
+}, Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }))
 
 /** Extracts the bundled native CLI after confirmation; staging avoids partial installations. */
 export const ensureCli = Effect.fn('Lark.ensureCli')(function*(directory: string) {
   const found = yield* findCli(directory)
-  if (found) return found
+  if (found) {
+    yield* Effect.logDebug('Reusing installed Lark CLI')
+    return found
+  }
   if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+    yield* Effect.logWarning('No bundled Lark CLI matches this platform').pipe(
+      Effect.annotateLogs({ platform: process.platform, architecture: process.arch })
+    )
     return yield* new IntegrationError({ message: `No bundled lark-cli for ${process.platform}-${process.arch}.` })
   }
+  yield* Effect.logInfo('Lark CLI installation started').pipe(
+    Effect.annotateLogs({ platform: process.platform, architecture: process.arch })
+  )
   const archive = yield* LarkCliArchive
   const fs = yield* FileSystem.FileSystem
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -53,20 +71,26 @@ export const ensureCli = Effect.fn('Lark.ensureCli')(function*(directory: string
   const tools = join(directory, 'cli')
   yield* fs.remove(tools, { recursive: true, force: true })
   yield* fs.rename(staging, tools)
+  yield* Effect.logInfo('Lark CLI installation completed')
   return join(tools, 'lark-cli')
-})
+}, Effect.tapError(() => Effect.logError('Lark CLI installation failed')),
+Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.ensureCli'))
 
 /** Executes only the Folio-managed CLI and injects the short-lived user token via its environment. */
 export const LARK_USER_ACCESS_TOKEN_ENV = 'LARK_USER_ACCESS_TOKEN' as const
 
 export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string) {
+  yield* Effect.logDebug('Lark CLI command started').pipe(Effect.annotateLogs({ argumentCount: args.length }))
   const executable = yield* findCli(directory)
   if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const command = ChildProcess.make(executable, [...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' }).pipe(
     ChildProcess.setEnv({ [LARK_USER_ACCESS_TOKEN_ENV]: userToken })
   )
-  return yield* spawner.string(command).pipe(
+  const output = yield* spawner.string(command).pipe(
     Effect.mapError(() => new IntegrationError({ message: 'The managed lark-cli command failed.' }))
   )
-})
+  yield* Effect.logDebug('Lark CLI command completed')
+  return output
+}, Effect.tapError(() => Effect.logWarning('Lark CLI command failed')),
+Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.runCli'))

@@ -15,7 +15,7 @@ import { IntegrationStore } from './services/integration-store'
 import { IntegrationBrowser } from './electron/IntegrationBrowser'
 import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
 import * as NodePath from '@effect/platform-node/NodePath'
-import { Effect, Layer, Stream } from 'effect'
+import { Effect, Layer, References, Stream } from 'effect'
 import { ElectronApp, type ElectronAppEvent } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
 import { MainRpcLive } from './rpc/runtime'
@@ -74,8 +74,11 @@ export const application = Effect.gen(function*() {
   const electronApp = yield* ElectronApp
   const mainWindow = yield* MainWindow
 
+  yield* Effect.logInfo('Folio main process starting').pipe(Effect.annotateLogs({ subsystem: 'application' }))
   yield* electronApp.whenReady
+  yield* Effect.logInfo('Electron application ready').pipe(Effect.annotateLogs({ subsystem: 'application' }))
   yield* mainWindow.open
+  yield* Effect.logInfo('Folio main window opened').pipe(Effect.annotateLogs({ subsystem: 'application' }))
   yield* Stream.runForEach(electronApp.events, handleEvent)
 })
 
@@ -93,4 +96,8 @@ export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive).pipe(
 )
 
 /** Fully wired process program; completion releases every scoped main resource. */
-export const program = application.pipe(Effect.provide(MainLive))
+export const program = application.pipe(
+  Effect.provide(MainLive),
+  // Development keeps lifecycle diagnostics visible in the terminal; packaged builds retain operational events.
+  Effect.provideService(References.MinimumLogLevel, app.isPackaged ? 'Info' : 'Debug')
+)

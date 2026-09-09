@@ -15,6 +15,7 @@ type RegistrationProgress = {
 export const createApp = Effect.fn('Lark.createApp')(function*(
   onProgress: (data: RegistrationProgress) => Effect.Effect<void, IntegrationError>
 ) {
+  yield* Effect.logDebug('Lark registration SDK started')
   const result = yield* Effect.tryPromise({
     try: async (signal) => {
       const controller = new AbortController()
@@ -48,8 +49,11 @@ export const createApp = Effect.fn('Lark.createApp')(function*(
     },
     catch: () => new IntegrationError({ message: 'Lark application registration failed or expired. Try again.' })
   })
-  return yield* Schema.decodeUnknownEffect(LarkApp)({
+  const app = yield* Schema.decodeUnknownEffect(LarkApp)({
     clientId: result.client_id, clientSecret: result.client_secret,
     brand: result.user_info?.tenant_brand === 'lark' ? 'lark' : 'feishu'
   }).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid application credentials.' })))
-})
+  yield* Effect.logDebug('Lark registration SDK completed').pipe(Effect.annotateLogs({ brand: app.brand }))
+  return app
+}, Effect.tapError(() => Effect.logWarning('Lark registration SDK failed')),
+Effect.annotateLogs({ integration: 'lark', subsystem: 'app-registration' }), Effect.withLogSpan('lark.createApp'))

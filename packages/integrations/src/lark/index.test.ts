@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node'
 import { registerApp } from '@larksuiteoapi/node-sdk'
-import { ConfigProvider, Effect, Exit, Layer, ManagedRuntime, Scope } from 'effect'
+import { ConfigProvider, Effect, Exit, Layer, Logger, ManagedRuntime, References, Scope } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -193,6 +193,35 @@ describe('Lark integration lifecycle', () => {
       for (const file of ['auth.json', 'app.json']) expect((await stat(join(h.directory, file))).mode & 0o777).toBe(0o600)
       expect((await stat(h.directory)).mode & 0o777).toBe(0o700)
       expect(vi.mocked(registerApp).mock.calls[0][0].addons?.scopes?.user).toEqual(larkScopes)
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it('logs lifecycle stages without exposing Lark credentials or identity', async () => {
+    const h = harness()
+    const lines: string[] = []
+    const logger = Logger.formatJson.pipe(Logger.map((line) => { lines.push(line) }))
+    /** Runs a provider operation with an isolated collector so assertions see only this lifecycle. */
+    const runLogged = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) => h.runtime.runPromise(
+      effect.pipe(
+        Effect.provide(Logger.layer([logger])),
+        Effect.provideService(References.MinimumLogLevel, 'Debug')
+      )
+    )
+    try {
+      await runLogged(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
+      await runLogged(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
+      const output = lines.join('\n')
+      for (const message of [
+        'Lark installation started', 'Lark CLI ready', 'Lark skills ready',
+        'Reusing installed Lark CLI', 'Lark skills installation completed',
+        'Lark application registration started', 'Lark application authorization completed',
+        'Lark registration SDK started', 'Lark registration SDK completed',
+        'Lark user authorization started', 'Lark user authorization completed', 'Lark connection completed'
+      ]) expect(output).toContain(message)
+      for (const secret of [root, 'https://', 'test-app', 'test-secret', 'test-app-token', 'test-user-token',
+        'test-refresh', 'test-user', 'test-device']) {
+        expect(output).not.toContain(secret)
+      }
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
