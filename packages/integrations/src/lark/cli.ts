@@ -79,6 +79,18 @@ Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSp
 /** Executes only the Folio-managed CLI and injects the short-lived user token via its environment. */
 export const LARK_USER_ACCESS_TOKEN_ENV = 'LARK_USER_ACCESS_TOKEN' as const
 
+/** Verifies current authentication with the Folio-managed CLI without retaining or logging identity output. */
+export const checkCliAuth = Effect.fn('Lark.checkCliAuth')(function*(directory: string) {
+  const executable = yield* findCli(directory)
+  if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+  const code = yield* spawner.exitCode(ChildProcess.make(executable, ['auth', 'status', '--verify'], {
+    stdin: 'ignore', stdout: 'ignore', stderr: 'ignore'
+  })).pipe(Effect.mapError(() => new IntegrationError({ message: 'The managed lark-cli authentication check failed.' })))
+  if (code !== 0) return yield* new IntegrationError({ message: 'The managed lark-cli authentication is no longer valid.' })
+}, Effect.tapError(() => Effect.logWarning('Lark CLI authentication check failed')),
+Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.checkCliAuth'))
+
 export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string) {
   yield* Effect.logDebug('Lark CLI command started').pipe(Effect.annotateLogs({ argumentCount: args.length }))
   const executable = yield* findCli(directory)

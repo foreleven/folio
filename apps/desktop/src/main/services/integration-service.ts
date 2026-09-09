@@ -106,6 +106,22 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         )
       }))
     }, Effect.annotateLogs({ subsystem: 'integration-orchestration' }), Effect.withLogSpan('integration.reconcile'))
+    /** Keeps a healthy ready snapshot; all other states and failed health checks require full reconciliation. */
+    const check = Effect.fn('IntegrationService.check')(function*(integration: Integration<IntegrationPlatform>) {
+      const row = (yield* store.list).find((row) => row.id === integration.id)!
+      if (row.state !== 'ready') return yield* reconcile(integration)
+      const healthy = yield* withContext(integration.id, integration.check()).pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.logWarning('Integration health check failed').pipe(
+          Effect.annotateLogs({ integration: integration.id }),
+          Effect.as(false)
+        ))
+      )
+      if (!healthy) return yield* reconcile(integration)
+      yield* Effect.logDebug('Integration health check completed').pipe(
+        Effect.annotateLogs({ integration: integration.id })
+      )
+    }, Effect.annotateLogs({ subsystem: 'integration-orchestration' }), Effect.withLogSpan('integration.check'))
     /** Starts a main-scope job, independent of the lifetime of the requesting RPC/window. */
     const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'inspect' | 'action', actionId?: string, payload?: unknown) {
       const integration = catalog.find((item) => item.id === id)
@@ -138,7 +154,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         yield* Effect.logInfo('Integration operation started').pipe(
           Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
         )
-        yield* commit(store.update(id, 'checking', {}, []))
+        if (operation !== 'inspect' || row?.state !== 'ready') yield* commit(store.update(id, 'checking', {}, []))
         if (operation === 'install') {
           // Even shared, already-ready tools must register their resources with this host.
           yield* withContext(id, integration.install())
@@ -146,6 +162,12 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           const checked = yield* withContext(id, integration.inspect())
           if (!checked.actions.some((action) => action.id === actionId && action.type === 'callback')) return yield* new IntegrationSettingsError({ message: 'This action is no longer available. Check again.' })
           yield* withContext(id, integration.onActionCallback(actionId!, payload))
+        } else {
+          yield* check(integration)
+          yield* Effect.logInfo('Integration operation completed').pipe(
+            Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
+          )
+          return
         }
         yield* reconcile(integration)
         yield* Effect.logInfo('Integration operation completed').pipe(

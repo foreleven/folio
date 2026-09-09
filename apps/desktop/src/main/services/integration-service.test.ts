@@ -24,7 +24,7 @@ function fixture(background = false, form = false) {
   const authorization = Effect.runSync(Deferred.make<void>())
   const checkStarted = Effect.runSync(Deferred.make<void>())
   const checkResume = Effect.runSync(Deferred.make<void>())
-  const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
+  const state = { installs: 0, healthChecks: 0, inspections: 0, actions: 0, failInstall: false, failHealthCheck: false, failInspect: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
   const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
     id: 'notes', name: 'Notes', description: 'Test provider', states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
@@ -32,15 +32,20 @@ function fixture(background = false, form = false) {
     resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }, { id: 'open', label: 'Open account page' }],
     install: () => Effect.gen(function*() {
       const context = yield* IntegrationContext
+      state.context = context
       state.installs++
       yield* context.writeState('installing', { progress: 1 })
       if (state.failInstall) return yield* new IntegrationError({ message: 'private diagnostic' })
       yield* context.registerResource(resource)
       phase = 'login_required'
     }),
+    check: () => Effect.gen(function*() {
+      state.healthChecks++
+      if (state.failHealthCheck) return yield* new IntegrationError({ message: 'health check error' })
+    }),
     inspect: () => Effect.gen(function*() {
-      state.checks++
-      if (state.failCheck) return yield* new IntegrationError({ message: 'network error' })
+      state.inspections++
+      if (state.failInspect) return yield* new IntegrationError({ message: 'inspection error' })
       const snapshot = awaiting ? { state: 'awaiting_browser', actions: [{ id: 'open', type: 'open-url' as const, url: state.url }] }
         : { state: phase, actions: phase === 'ready' ? [] : [{ id: phase === 'install_required' ? 'install' : 'authorize', type: 'callback' as const }] }
       if (state.holdCheck) { yield* Deferred.succeed(checkStarted, undefined); yield* Deferred.await(checkResume) }
@@ -76,6 +81,7 @@ function fixture(background = false, form = false) {
     return view[0]
   }, { timeout: 5000, interval: 10 })
   return { runtime, service, settled, state, opened, authorization, layer, integration, checkStarted, checkResume,
+    commit: (next: string) => state.context!.writeState(next, {}, []),
     publish: (next: string) => Effect.gen(function*() { phase = next; yield* state.context!.writeState(next, {}, []) }) }
 }
 
@@ -130,7 +136,7 @@ describe('desktop integration lifecycle', () => {
       const result = await f.settled('login_required')
       expect(result.record?.actions.map((action) => action.id)).toEqual(['authorize'])
       expect(result.record?.resources).toEqual([{ id: 'im', name: 'Messages' }])
-      expect(f.state.checks).toBeGreaterThan(0)
+      expect(f.state.inspections).toBeGreaterThan(0)
     } finally { await f.runtime.dispose() }
   })
 
@@ -240,18 +246,40 @@ describe('desktop integration lifecycle', () => {
     } finally { await f.runtime.dispose() }
   })
 
-  it('surfaces unavailable checks without discarding registered resources', async () => {
+  it('preserves a ready snapshot after a successful lightweight check and falls back to inspect on failure', async () => {
     const f = fixture()
     try {
       const s = await f.service()
       await f.runtime.runPromise(s.install('notes'))
       await f.settled('login_required')
-      f.state.failCheck = true
+      await f.runtime.runPromise(f.commit('ready'))
+      const inspections = f.state.inspections
+
+      await f.runtime.runPromise(s.inspect('notes'))
+      await f.settled('ready')
+      expect(f.state.healthChecks).toBe(1)
+      expect(f.state.inspections).toBe(inspections)
+
+      f.state.failHealthCheck = true
+      await f.runtime.runPromise(s.inspect('notes'))
+      await f.settled('login_required')
+      expect(f.state.healthChecks).toBe(2)
+      expect(f.state.inspections).toBe(inspections + 1)
+    } finally { await f.runtime.dispose() }
+  })
+
+  it('surfaces unavailable inspections without discarding registered resources', async () => {
+    const f = fixture()
+    try {
+      const s = await f.service()
+      await f.runtime.runPromise(s.install('notes'))
+      await f.settled('login_required')
+      f.state.failInspect = true
       await f.runtime.runPromise(s.inspect('notes'))
       const result = await f.settled('check_failed')
       expect(result.record?.resources).toHaveLength(1)
       expect(result.record?.error).toBeTruthy()
-      f.state.failCheck = false
+      f.state.failInspect = false
       await f.runtime.runPromise(s.inspect('notes'))
       await f.settled('login_required')
     } finally { await f.runtime.dispose() }

@@ -62,7 +62,7 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); await rm(root, { recursive: true, force: true }) })
 
 /** Simulates process outcomes but keeps real Effect filesystem operations and private state files. */
-function harness(options: { missingCli?: boolean; systemExit?: number; tarExit?: number; gitExit?: number } = {}) {
+function harness(options: { missingCli?: boolean; systemExit?: number; authStatusExit?: number; tarExit?: number; gitExit?: number } = {}) {
   const commands: ChildProcess.StandardCommand[] = []
   const states: Array<{ state: string; data: unknown }> = []
   const resources = new Map<string, IntegrationResource>()
@@ -73,6 +73,9 @@ function harness(options: { missingCli?: boolean; systemExit?: number; tarExit?:
         if (!ChildProcess.isStandardCommand(command)) throw new Error('Expected a direct command')
         commands.push(command)
         if (command.command === 'lark-cli' || command.command.endsWith('/lark-cli')) {
+          if (command.args[0] === 'auth' && command.args[1] === 'status') {
+            return Effect.succeed(ChildProcessSpawner.ExitCode(options.authStatusExit ?? 0))
+          }
           return options.missingCli && command.command === 'lark-cli'
             ? actual.exitCode(ChildProcess.make(join(root, 'missing-executable')))
             : Effect.succeed(ChildProcessSpawner.ExitCode(options.systemExit ?? 0))
@@ -176,9 +179,28 @@ describe('Lark integration lifecycle', () => {
       await h.runtime.runPromise(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
       await expect(h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))).rejects.toThrow()
       expect(h.states.some((entry) => entry.state === 'waiting_for_app')).toBe(false)
-      await expect(stat(join(h.directory, 'private.json'))).rejects.toThrow()
+      const savedState = await privateState(h.directory)
+      expect(savedState).toMatchObject({ version: 1, installed: true })
+      expect(savedState.app).toBeUndefined()
       expect((await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context)))).state).toBe('app_required')
     } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it('checks authentication with the managed CLI and fails on a nonzero auth status', async () => {
+    const healthy = harness()
+    try {
+      await healthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, healthy.context)))
+      expect(healthy.commands.map((command) => command.args)).toEqual([
+        ['--version'], ['auth', 'status', '--verify']
+      ])
+    } finally { await healthy.stop(); await healthy.runtime.dispose() }
+
+    const unhealthy = harness({ authStatusExit: 3 })
+    try {
+      await expect(unhealthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, unhealthy.context))))
+        .rejects.toThrow()
+      expect(unhealthy.commands.at(-1)?.args).toEqual(['auth', 'status', '--verify'])
+    } finally { await unhealthy.stop(); await unhealthy.runtime.dispose() }
   })
 
   it('inspect is read-only and asks for installation when dependencies are missing', async () => {

@@ -30,6 +30,7 @@ function provider(id = 'notes', form = false) {
     id, name: 'Notes', description: 'Personal notes', homepage: 'https://notes.example',
     states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', resources: [resource],
     actions: [{ id: 'connect', label: 'Connect account', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }],
+    check: () => Effect.void,
     inspect: () => Effect.succeed({ state: phase, actions: (phase === 'account_required' ? ['connect'] : []).map(callback) }),
     install: () => Effect.gen(function*() {
       const ctx = yield* IntegrationContext
@@ -63,6 +64,7 @@ describe('integration base', () => {
         yield* host.writeState('preparing', account.name)
         seen.push(host.directory)
       }),
+      check: () => Effect.void,
       inspect: Effect.fn('Test.inspect')(function*() {
         const account = yield* Account
         return { state: account.name, actions: [] }
@@ -88,6 +90,22 @@ describe('integration base', () => {
         { state: 'outside', data: name }
       ])
     }
+  })
+
+  it('sanitizes lightweight check failures without invoking full inspection', async () => {
+    const p = provider()
+    const inspect = vi.fn(() => Effect.succeed({ state: 'ready', actions: [] }))
+    const integration = defineIntegration({
+      id: 'checked', name: 'Checked', description: 'Check fixture', states: {}, logo: '', homepage: '', actions: [], resources: [],
+      install: () => Effect.void,
+      check: () => Effect.fail(new Error('private check token')),
+      inspect,
+      onActionCallback: () => Effect.void
+    })
+    const error = await run(Effect.flip(integration.check().pipe(Effect.provideService(IntegrationContext, p.context))))
+    expect(error._tag).toBe('IntegrationError')
+    expect(JSON.stringify(error)).not.toContain('private check token')
+    expect(inspect).not.toHaveBeenCalled()
   })
 
   it('keeps inspection read-only and publishes checked progress after explicit installation', async () => {
@@ -124,6 +142,7 @@ describe('integration base', () => {
       id: 'external', name: 'External', description: 'Protocol fixture', states: {}, logo: '', homepage: '', resources: [],
       actions: [{ id: 'open', label: 'Open setup' }],
       install: () => Effect.void,
+      check: () => Effect.void,
       inspect: () => Effect.succeed({ state: 'attention', actions: [{ id: 'open', type: 'open-url' as const, url: 'https://provider.example' }] }),
       onActionCallback
     })

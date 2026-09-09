@@ -47,6 +47,11 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
     yield* runOperation(Effect.suspend(definition.install))
   }, lock.withPermit, Effect.mapError(sanitize))
 
+  /** Lightweight health check; provider failures are sanitized before the host chooses inspect fallback. */
+  const check = Effect.fn('Integration.check')(function*() {
+    yield* definition.check()
+  }, Effect.mapError(sanitize))
+
   /** Read-only and nonblocking even while an action is waiting for a user callback. */
   const inspect = Effect.fn('Integration.inspect')(function*() {
     const context = yield* IntegrationContext
@@ -72,6 +77,6 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
     yield* runOperation(Effect.suspend(() => definition.onActionCallback(actionId, payload)))
   }, lock.withPermit, Effect.mapError(sanitize))
 
-  return { ...definition, install, inspect, onActionCallback,
+  return { ...definition, install, check, inspect, onActionCallback,
     run: definition.run ? () => Effect.suspend(definition.run!).pipe(Effect.mapError(sanitize)) : undefined }
 }

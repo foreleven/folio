@@ -53,7 +53,9 @@ export interface Integration<R = never> extends IntegrationMetadata {
   readonly resources: readonly IntegrationResource[]
   /** Called after user confirmation; prepares dependencies and registers resources only. */
   readonly install: () => IntegrationEffect<void, IntegrationError, R>
-  /** Read-only inspection. State IDs are opaque; states[state].kind describes availability. */
+  /** Lightweight health check. Failure tells the host to rebuild state with inspect. */
+  readonly check: () => IntegrationEffect<void, IntegrationError, R>
+  /** Read-only full inspection. State IDs are opaque; states[state].kind describes availability. */
   readonly inspect: () => IntegrationEffect<CheckResult, IntegrationError, R>
   /** Handles a user action; validates that it still applies before any side effect. */
   readonly onActionCallback: (actionId: string, payload?: unknown) => IntegrationEffect<void, IntegrationError, R>
@@ -67,6 +69,8 @@ export interface IntegrationDefinition<R = never> extends IntegrationMetadata {
   readonly resources: readonly IntegrationResource[]
   /** Installs dependencies and upserts resources; the base publishes the final inspect. */
   readonly install: () => IntegrationEffect<void, unknown, R>
+  /** Performs a cheap health check; any failure asks the host to run inspect. */
+  readonly check: () => IntegrationEffect<void, unknown, R>
   /** Inspects durable provider facts only; the base handles live in-process progress. */
   readonly inspect: () => IntegrationEffect<CheckResult, unknown, R>
   /** Performs a statically declared, currently available action with an opaque host payload. */

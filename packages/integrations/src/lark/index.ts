@@ -5,7 +5,7 @@ import type { CheckResult, IngestContext, IntegrationAction } from '../base/inde
 import { authorizeUser } from './auth.ts'
 import { larkMetadata } from './metadata.ts'
 import { createApp } from './app-registration.ts'
-import { ensureCli, findCli } from './cli.ts'
+import { checkCliAuth, ensureCli, findCli } from './cli.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
 import { belongsToApp, getApp, hasPermissions, nextMaintenance, recover, releaseSession, session } from './connection.ts'
@@ -37,6 +37,12 @@ const authorizationActions = Effect.fn('Lark.authorizationActions')(function*(ur
 function result(state: string, action?: 'install' | 'connect'): CheckResult {
   return { state, actions: action ? [{ id: action, type: 'callback', primary: true }] : [] }
 }
+
+/** Asks the managed CLI to verify that its current authentication is still usable. */
+const check = Effect.fn('Lark.check')(function*() {
+  const { directory } = yield* IntegrationContext
+  yield* checkCliAuth(directory)
+}, Effect.annotateLogs({ integration: 'lark', subsystem: 'inspection' }), Effect.withLogSpan('lark.check'))
 
 /** Reads durable facts only. Expiry recovery belongs to the provider runtime, not host inspection. */
 const inspect = Effect.fn('Lark.inspect')(function*(): Effect.fn.Return<CheckResult, unknown, IntegrationContext | FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner> {
@@ -170,7 +176,7 @@ const run = Effect.fn('Lark.run')(function*() {
 Effect.annotateLogs({ integration: 'lark', subsystem: 'maintenance' }), Effect.withLogSpan('lark.run'))
 
 export const lark = defineIntegration({
-  ...larkMetadata, actions, resources, install, inspect, run,
+  ...larkMetadata, actions, resources, install, check, inspect, run,
   onActionCallback: (actionId) => actionId === 'install' ? install() : connect()
 })
 export { LarkApplication } from './connection.ts'
