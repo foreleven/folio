@@ -15,7 +15,7 @@ Also inspected its `auth-state.ts`, `device-oauth.ts`, and installed SDK 1.73.3 
 | Start SDK application registration | Real SDK returned a verification URL and polling events, persisted by host | Verified live |
 | Complete application registration and token exchange | Real registration completed; app and tenant tokens exchanged and saved with 0600 permissions, ~2-hour expiry. Failure recovery remains covered by tests | Verified live |
 | User device OAuth and identity validation | Real OAuth completed; browser showed success, user token and refresh token saved privately, SDK verified the user, and installer reached ready. Error branches covered by tests | Verified live |
-| Renew app/user authorization | Real app token re-exchange succeeded; real user refresh changed both tokens, preserved identity, and subsequent check returned ready. Expiry/action dispatch/error recovery covered by tests | Verified live and by tests |
+| Renew app/user authorization | Real app token re-exchange succeeded; real user refresh changed both tokens, preserved identity, and subsequent inspect returned ready. Expiry/action dispatch/error recovery covered by tests | Verified live and by tests |
 | Restart and final ready check | Installer exited successfully. Separate verifier processes loaded saved credentials and returned ready before and after token rotation. Live-check concurrency covered by tests | Verified live and by tests |
 | IM/Email access with installed CLI | Previous standalone verifier (now `tests/verify-lark.test.ts`): check ready; IM read succeeded (1 item), Email INBOX read succeeded (1 item), before and after refresh | Verified live |
 | onIngest stays empty | Both resource hooks leave their agent context unchanged | Verified by tests |

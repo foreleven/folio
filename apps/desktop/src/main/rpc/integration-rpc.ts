@@ -8,8 +8,7 @@ export const IntegrationRpcHandlersLive = IntegrationRpcs.toLayer(Effect.gen(fun
   return IntegrationRpcs.of({
     'integrations.watch': () => service.watch,
     'integrations.install': ({ id }) => service.install(id),
-    'integrations.check': ({ id }) => service.check(id),
+    'integrations.inspect': ({ id }) => service.inspect(id),
     'integrations.action': ({ id, actionId }) => service.action(id, actionId),
-    'integrations.openAuthorization': ({ id }) => service.openAuthorization(id)
   })
 }))

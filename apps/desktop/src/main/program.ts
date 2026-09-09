@@ -1,5 +1,16 @@
 import { NodeServices } from '@effect/platform-node'
-import { IntegrationService, IntegrationCatalog } from './services/integration-service'
+import { lark, LarkCliArchive, LarkSkillsDirectory } from '@folio/integrations/lark'
+import { app } from 'electron'
+import { join } from 'node:path'
+import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack'
+
+const larkSkillsDirectory = app.isPackaged
+  ? join(process.resourcesPath, 'lark-skills')
+  : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/skills')
+import { IntegrationService } from './services/integration-service'
+import type { Integration } from '@folio/integrations/base'
+import type { IntegrationPlatform } from './services/integration-catalog'
+import { IntegrationCatalog } from './services/integration-catalog'
 import { IntegrationStore } from './services/integration-store'
 import { IntegrationBrowser } from './electron/IntegrationBrowser'
 import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
@@ -22,7 +33,18 @@ const ConfigLive = ConfigService.layer.pipe(
 
 const IntegrationsLive = IntegrationService.layer.pipe(
   Layer.provide(IntegrationStore.layer),
-  Layer.provide(IntegrationCatalog.layer),
+  Layer.provide(Layer.succeed(IntegrationCatalog)([{
+    ...lark,
+    // electron-vite resolves this asset outside app.asar; the provider stays Electron-independent.
+    install: () => lark.install().pipe(
+      Effect.provideService(LarkCliArchive, larkCliArchive),
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
+    ),
+    onActionCallback: (id, payload) => lark.onActionCallback(id, payload).pipe(
+      Effect.provideService(LarkCliArchive, larkCliArchive),
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
+    )
+  }])),
   Layer.provide(IntegrationBrowser.layer),
   Layer.provide(NodeServices.layer)
 )

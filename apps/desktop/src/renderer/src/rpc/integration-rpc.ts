@@ -8,9 +8,8 @@ export class IntegrationRpcClient extends AtomRpc.Service<IntegrationRpcClient>(
   'folio/renderer/IntegrationRpcClient', { group: IntegrationRpcs, protocol: ElectronRpcProtocolLive }
 ) {
   static readonly install = IntegrationRpcClient.mutation('integrations.install')
-  static readonly check = IntegrationRpcClient.mutation('integrations.check')
+  static readonly inspect = IntegrationRpcClient.mutation('integrations.inspect')
   static readonly action = IntegrationRpcClient.mutation('integrations.action')
-  static readonly openAuthorization = IntegrationRpcClient.mutation('integrations.openAuthorization')
 }
 export const integrationsAtom = IntegrationRpcClient.runtime.atom(Stream.unwrap(
   Effect.map(IntegrationRpcClient, (client) => client('integrations.watch', undefined))

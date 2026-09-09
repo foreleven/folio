@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./base": "./src/base/index.ts",
+    "./protocol": "./src/base/protocol.ts",
     "./lark": "./src/lark/index.ts"
   },
   "scripts": {

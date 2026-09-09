@@ -1,5 +1,5 @@
 import { NodeServices } from '@effect/platform-node'
-import { IntegrationError, type Integration } from '@folio/integrations/base'
+import { IntegrationContext, IntegrationError, type Integration } from '@folio/integrations/base'
 import { ConfigProvider, Deferred, Effect, Layer, ManagedRuntime, Option, Stream } from 'effect'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IntegrationBrowser } from '../electron/IntegrationBrowser'
 import { ConfigService } from './config-service'
-import { IntegrationCatalog, IntegrationService } from './integration-service'
+import { IntegrationService } from './integration-service'
+import { IntegrationCatalog } from './integration-catalog'
 import { IntegrationStore } from './integration-store'
 import type { IntegrationView } from '../../shared/integration'
 
@@ -19,29 +20,36 @@ afterEach(async () => { await rm(directory, { recursive: true, force: true }) })
 /** Fake provider holds OAuth in flight while exercising the real SQL store, stream, and service scope. */
 function fixture() {
   let phase = 'install_required'
+  let awaiting = false
   const authorization = Effect.runSync(Deferred.make<void>())
-  const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, url: 'https://accounts.feishu.cn/authorize' }
+  const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, url: 'https://accounts.notes.example/connect' }
   const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
-    id: 'lark', name: 'Lark', description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
-    resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize' }],
-    install: (context) => Effect.gen(function*() {
+    id: 'notes', name: 'Notes', description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
+    resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize' }, { id: 'open', label: 'Open account page' }],
+    install: () => Effect.gen(function*() {
+      const context = yield* IntegrationContext
       state.installs++
       yield* context.writeState('installing', { progress: 1 })
       if (state.failInstall) return yield* new IntegrationError({ message: 'private diagnostic' })
       yield* context.registerResource(resource)
       phase = 'login_required'
     }),
-    check: () => Effect.gen(function*() {
+    inspect: () => Effect.gen(function*() {
       state.checks++
       if (state.failCheck) return yield* new IntegrationError({ message: 'network error' })
-      return { state: phase, actionIds: phase === 'ready' ? [] : [phase === 'install_required' ? 'install' : 'authorize'] }
+      return awaiting ? { state: 'awaiting_browser', actions: [{ id: 'open', type: 'open-url' as const, url: state.url }] }
+        : { state: phase, actions: phase === 'ready' ? [] : [{ id: phase === 'install_required' ? 'install' : 'authorize', type: 'callback' as const }] }
     }),
-    onActionCallback: (context, action) => action === 'install' ? integration.install(context) : Effect.gen(function*() {
+    onActionCallback: (action) => action === 'install' ? integration.install() : Effect.gen(function*() {
+      const context = yield* IntegrationContext
       state.actions++
-      yield* context.writeState('waiting_for_user', { url: state.url, providerData: { arbitrary: ['kept', 1] } })
-      yield* Deferred.await(authorization)
-      phase = 'ready'
+      awaiting = true
+      yield* Effect.gen(function*() {
+        yield* context.writeState('awaiting_browser', { providerData: { arbitrary: ['kept', 1] } }, [{ id: 'open', type: 'open-url', url: state.url }])
+        yield* Deferred.await(authorization)
+        phase = 'ready'
+      }).pipe(Effect.ensuring(Effect.sync(() => { awaiting = false })))
     })
   }
   const opened: string[] = []
@@ -71,6 +79,34 @@ function rows() {
 }
 
 describe('desktop integration lifecycle', () => {
+  it('migrates legacy action IDs without losing resources or reopening a persisted URL', async () => {
+    const db = new DatabaseSync(join(directory, 'data.db'))
+    try {
+      db.exec(`CREATE TABLE integration_states (
+        id TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+        action_ids TEXT NOT NULL DEFAULT '[]', resources TEXT NOT NULL DEFAULT '[]', error TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      )`)
+      db.prepare('INSERT INTO integration_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        'notes', 'old_provider_wait', JSON.stringify({ url: 'https://expired.example' }),
+        JSON.stringify(['authorize']), JSON.stringify([{ id: 'im', name: 'Messages' }]), null, 1, 2
+      )
+    } finally { db.close() }
+    const f = fixture()
+    try {
+      const s = await f.service()
+      const view = await f.settled('install_required')
+      expect(view.record?.resources).toEqual([{ id: 'im', name: 'Messages' }])
+      expect(view.record?.actions).toEqual([{ id: 'install', type: 'callback' }])
+      expect(view.record?.data).toEqual({})
+      expect(view.record?.createdAt).toBe(1)
+      expect(f.state.installs).toBe(0)
+      await expect(f.runtime.runPromise(s.action('notes', 'open'))).rejects.toThrow()
+      expect(f.opened).toEqual([])
+      expect(JSON.parse(String(rows()[0].actions))).toEqual([{ id: 'install', type: 'callback' }])
+    } finally { await f.runtime.dispose() }
+  })
+
   it('browsing creates no rows; install inserts one row and commits provider data/resources', async () => {
     const f = fixture()
     try {
@@ -82,10 +118,10 @@ describe('desktop integration lifecycle', () => {
       })
       expect(rows()).toEqual([])
       expect(f.state.installs).toBe(0)
-      await f.runtime.runPromise(s.install('lark'))
+      await f.runtime.runPromise(s.install('notes'))
       expect(rows()).toHaveLength(1)
       const result = await f.settled('login_required')
-      expect(result.record?.actionIds).toEqual(['authorize'])
+      expect(result.record?.actions.map((action) => action.id)).toEqual(['authorize'])
       expect(result.record?.resources).toEqual([{ id: 'im', name: 'Messages' }])
       expect(f.state.checks).toBeGreaterThan(0)
     } finally { await f.runtime.dispose() }
@@ -102,25 +138,26 @@ describe('desktop integration lifecycle', () => {
         Stream.runForEach((views) => Effect.sync(() => { snapshots.push(views[0]) }))
       ), { signal: subscriber.signal }).catch(() => undefined)
       await vi.waitFor(() => expect(snapshots[0]?.record).toBeNull())
-      await f.runtime.runPromise(s.install('lark'))
+      await f.runtime.runPromise(s.install('notes'))
       await f.settled('login_required')
-      await f.runtime.runPromise(s.action('lark', 'authorize').pipe(Effect.scoped))
+      await f.runtime.runPromise(s.action('notes', 'authorize').pipe(Effect.scoped))
       await vi.waitFor(async () => {
         const view = (await f.runtime.runPromise(s.list))[0]
-        expect(view.record?.state).toBe('waiting_for_user')
+        expect(view.record?.state).toBe('awaiting_browser')
         expect(view.busy).toBe(true)
       })
-      await vi.waitFor(() => expect(snapshots.at(-1)?.record?.state).toBe('waiting_for_user'))
+      await vi.waitFor(() => expect(snapshots.at(-1)?.record?.state).toBe('awaiting_browser'))
       expect(snapshots.some((view) => view.record?.state === 'installing')).toBe(true)
       const reconnected = Option.getOrThrow(await f.runtime.runPromise(Stream.runHead(s.watch)))
       expect(reconnected[0]).toEqual(snapshots.at(-1))
       // Closing every current subscription must not cancel the host-owned authorization job.
       subscriber.abort()
       await watching
-      await f.runtime.runPromise(s.openAuthorization('lark'))
+      await f.runtime.runPromise(s.action('notes', 'open'))
       expect(f.opened).toEqual([f.state.url])
-      expect(JSON.parse(String(rows()[0].data))).toEqual({ url: f.state.url, providerData: { arbitrary: ['kept', 1] } })
-      await f.runtime.runPromise(s.action('lark', 'authorize'))
+      expect(JSON.parse(String(rows()[0].actions))).toEqual([{ id: 'open', type: 'open-url', url: f.state.url }])
+      expect(JSON.parse(String(rows()[0].data))).toEqual({ providerData: { arbitrary: ['kept', 1] } })
+      await expect(f.runtime.runPromise(s.action('notes', 'authorize'))).rejects.toThrow()
       expect(f.state.actions).toBe(1)
       await f.runtime.runPromise(Deferred.succeed(f.authorization, undefined))
       await f.settled('ready')
@@ -128,7 +165,7 @@ describe('desktop integration lifecycle', () => {
       expect(completed[0]).toMatchObject({ busy: false, record: { state: 'ready' } })
       expect(rows()).toHaveLength(1)
       expect(JSON.parse(String(rows()[0].data))).toEqual({})
-      await expect(f.runtime.runPromise(s.openAuthorization('lark'))).rejects.toThrow()
+      await expect(f.runtime.runPromise(s.action('notes', 'open'))).rejects.toThrow()
     } finally { subscriber.abort(); await watching; await f.runtime.dispose() }
   })
 
@@ -137,12 +174,12 @@ describe('desktop integration lifecycle', () => {
     f.state.failInstall = true
     try {
       const s = await f.service()
-      await f.runtime.runPromise(s.install('lark'))
+      await f.runtime.runPromise(s.install('notes'))
       const result = await f.settled('install_required')
       expect(result.record?.error).toBeTruthy()
       expect(JSON.stringify(result)).not.toContain('private diagnostic')
       f.state.failInstall = false
-      await f.runtime.runPromise(s.action('lark', 'install'))
+      await f.runtime.runPromise(s.action('notes', 'install'))
       const recovered = await f.settled('login_required')
       expect(recovered.record?.error).toBeNull()
       expect(rows()).toHaveLength(1)
@@ -152,10 +189,10 @@ describe('desktop integration lifecycle', () => {
   it('rechecks persisted waiting state after process restart instead of reopening an expired URL', async () => {
     const f = fixture()
     const s = await f.service()
-    await f.runtime.runPromise(s.install('lark'))
+    await f.runtime.runPromise(s.install('notes'))
     await f.settled('login_required')
-    await f.runtime.runPromise(s.action('lark', 'authorize'))
-    await vi.waitFor(() => expect(rows()[0].state).toBe('waiting_for_user'))
+    await f.runtime.runPromise(s.action('notes', 'authorize'))
+    await vi.waitFor(() => expect(rows()[0].state).toBe('awaiting_browser'))
     await f.runtime.dispose()
     const next = ManagedRuntime.make(f.layer)
     try {
@@ -176,22 +213,22 @@ describe('desktop integration lifecycle', () => {
     try {
       const s = await f.service()
       await expect(f.runtime.runPromise(s.install('../other'))).rejects.toThrow()
-      await expect(f.runtime.runPromise(s.action('lark', 'authorize'))).rejects.toThrow()
-      await expect(f.runtime.runPromise(s.check('lark'))).rejects.toThrow()
+      await expect(f.runtime.runPromise(s.action('notes', 'authorize'))).rejects.toThrow()
+      await expect(f.runtime.runPromise(s.inspect('notes'))).rejects.toThrow()
       expect(rows()).toEqual([])
     } finally { await f.runtime.dispose() }
   })
 
-  it('rejects unsafe stored authorization destinations', async () => {
+  it.each(['javascript:alert(1)', 'file:///tmp/credentials', 'http://accounts.notes.example', 'https://user:secret@accounts.notes.example'])('rejects unsupported external action URLs: %s', async (url) => {
     const f = fixture()
-    f.state.url = 'https://accounts.feishu.cn.evil.example/steal'
+    f.state.url = url
     try {
       const s = await f.service()
-      await f.runtime.runPromise(s.install('lark'))
+      await f.runtime.runPromise(s.install('notes'))
       await f.settled('login_required')
-      await f.runtime.runPromise(s.action('lark', 'authorize'))
-      await vi.waitFor(() => expect(rows()[0].state).toBe('waiting_for_user'))
-      await expect(f.runtime.runPromise(s.openAuthorization('lark'))).rejects.toThrow()
+      await f.runtime.runPromise(s.action('notes', 'authorize'))
+      await vi.waitFor(() => expect(rows()[0].state).toBe('awaiting_browser'))
+      await expect(f.runtime.runPromise(s.action('notes', 'open'))).rejects.toThrow()
       expect(f.opened).toEqual([])
     } finally { await f.runtime.dispose() }
   })
@@ -200,15 +237,15 @@ describe('desktop integration lifecycle', () => {
     const f = fixture()
     try {
       const s = await f.service()
-      await f.runtime.runPromise(s.install('lark'))
+      await f.runtime.runPromise(s.install('notes'))
       await f.settled('login_required')
       f.state.failCheck = true
-      await f.runtime.runPromise(s.check('lark'))
+      await f.runtime.runPromise(s.inspect('notes'))
       const result = await f.settled('check_failed')
       expect(result.record?.resources).toHaveLength(1)
       expect(result.record?.error).toBeTruthy()
       f.state.failCheck = false
-      await f.runtime.runPromise(s.check('lark'))
+      await f.runtime.runPromise(s.inspect('notes'))
       await f.settled('login_required')
     } finally { await f.runtime.dispose() }
   })

@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { IntegrationError } from '../src/base/index.ts'
+import { IntegrationContext, IntegrationError } from '../src/base/index.ts'
 import { lark } from '../src/lark/index.ts'
 import { findCli } from '../src/lark/cli.ts'
 import { AppAuth, LarkApp, readState, UserAuth } from '../src/lark/state.ts'
@@ -25,7 +25,7 @@ const CliResult = Schema.Struct({
 it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('reads IM and Email using the saved Lark installation', async ({ signal }) => {
   await Effect.runPromise(Effect.gen(function*() {
     const directory = join(process.env.FOLIO_CONFIG_DIR || join(homedir(), '.folio'), 'integrations', 'lark')
-    const result = yield* lark.check({ directory, writeState: () => Effect.void, registerResource: () => Effect.void })
+    const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, { directory, writeState: () => Effect.void, registerResource: () => Effect.void }))
     expect(result.state, 'Complete Lark setup before running live verification').toBe('ready')
     const app = yield* readState(join(directory, 'app.json'), LarkApp)
     const appAuth = yield* readState(join(directory, 'app-auth.json'), AppAuth)

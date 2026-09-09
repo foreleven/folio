@@ -14,9 +14,8 @@ export function IntegrationsSettings(): React.JSX.Element {
   const result = useAtomValue(integrationsAtom)
   const refresh = useAtomRefresh(integrationsAtom)
   const install = useAtomSet(IntegrationRpcClient.install, { mode: 'promise' })
-  const check = useAtomSet(IntegrationRpcClient.check, { mode: 'promise' })
+  const inspect = useAtomSet(IntegrationRpcClient.inspect, { mode: 'promise' })
   const action = useAtomSet(IntegrationRpcClient.action, { mode: 'promise' })
-  const open = useAtomSet(IntegrationRpcClient.openAuthorization, { mode: 'promise' })
   const inFlight = useRef(new Set<string>())
   const [pending, setPending] = useState<string[]>([])
   const [errors, setErrors] = useState<string[]>([])
@@ -39,9 +38,8 @@ export function IntegrationsSettings(): React.JSX.Element {
       {result.value.map((integration) => (
         <IntegrationCard key={integration.id} integration={integration} locale={locale} pending={pending.includes(integration.id)} error={errors.includes(integration.id)}
           onInstall={() => { void submit(integration.id, () => install({ payload: { id: integration.id } })) }}
-          onCheck={() => { void submit(integration.id, () => check({ payload: { id: integration.id } })) }}
+          onInspect={() => { void submit(integration.id, () => inspect({ payload: { id: integration.id } })) }}
           onAction={(actionId) => { void submit(integration.id, () => action({ payload: { id: integration.id, actionId } })) }}
-          onOpenAuthorization={() => { void submit(integration.id, () => open({ payload: { id: integration.id } })) }}
         />
       ))}
       </div>

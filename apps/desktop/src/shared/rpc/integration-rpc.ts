@@ -6,7 +6,6 @@ const Identity = Schema.Struct({ id: Schema.NonEmptyString })
 export class IntegrationRpcs extends RpcGroup.make(
   Rpc.make('integrations.watch', { success: Schema.Array(IntegrationView), error: IntegrationSettingsError, stream: true }),
   Rpc.make('integrations.install', { payload: Identity, success: Schema.Void, error: IntegrationSettingsError }),
-  Rpc.make('integrations.check', { payload: Identity, success: Schema.Void, error: IntegrationSettingsError }),
+  Rpc.make('integrations.inspect', { payload: Identity, success: Schema.Void, error: IntegrationSettingsError }),
   Rpc.make('integrations.action', { payload: Schema.Struct({ id: Schema.NonEmptyString, actionId: Schema.NonEmptyString }), success: Schema.Void, error: IntegrationSettingsError }),
-  Rpc.make('integrations.openAuthorization', { payload: Identity, success: Schema.Void, error: IntegrationSettingsError })
 ) {}

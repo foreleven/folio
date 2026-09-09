@@ -7,9 +7,8 @@ import { ReadStream } from 'node:tty'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { lark } from '../src/lark/index.ts'
-import { IntegrationError } from '../src/base/index.ts'
+import { IntegrationContext, IntegrationError } from '../src/base/index.ts'
 import { readState, writeState } from '../src/lark/state.ts'
-import type { LarkContext } from '../src/lark/index.ts'
 
 /** Live installation test: confirms each action and passes only after readiness and resource registration. */
 it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed actions and reaches ready', async ({ signal }) => {
@@ -33,12 +32,12 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
     const ResourceMetadata = Schema.Struct({ id: Schema.String, name: Schema.String })
     const registered = new Map(((yield* readState(join(directory, 'resources.json'), Schema.Array(ResourceMetadata))) ?? [])
       .map((resource) => [resource.id, resource]))
-    const context: LarkContext = {
+    const context: IntegrationContext["Service"] = {
       directory,
-      writeState: (state, data) => writeState(join(directory, 'state.json'), { state, data }).pipe(
+      writeState: (state, data, actions = []) => writeState(join(directory, 'state.json'), { state, data, actions }).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.mapError(() => new IntegrationError({ message: 'Could not persist integration state.' })),
-        Effect.andThen(Console.log(state, data))
+        Effect.andThen(Console.log(state, data, actions))
       ),
       registerResource: (resource) => Effect.gen(function*() {
         registered.set(resource.id, { id: resource.id, name: resource.name })
@@ -52,17 +51,17 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
       for (const resource of lark.resources) yield* context.registerResource(resource)
     }
     while (true) {
-      const result = yield* lark.check(context)
+      const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, context))
       if (result.state === 'ready') {
         expect([...registered.keys()].sort()).toEqual(lark.resources.map((resource) => resource.id).sort())
-        expect(result.actionIds).toEqual([])
+        expect(result.actions).toEqual([])
         return
       }
-      const action = lark.actions.find((item) => result.actionIds.includes(item.id))
+      const action = lark.actions.find((item) => result.actions.some((action) => action.id === item.id && action.type === 'callback'))
       if (!action) return yield* new IntegrationError({ message: `No action available for state: ${result.state}` })
       const answer = yield* Effect.promise((signal) => terminal.question(`${action.label}? [y/N] `, { signal }))
       if (answer.toLowerCase() !== 'y') return yield* new IntegrationError({ message: 'Installation cancelled before reaching ready.' })
-      yield* lark.onActionCallback(context, action.id)
+      yield* lark.onActionCallback(action.id).pipe(Effect.provideService(IntegrationContext, context))
     }
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)), { signal })
 }, 15 * 60_000)

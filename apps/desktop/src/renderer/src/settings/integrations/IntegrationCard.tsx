@@ -9,13 +9,12 @@ type Props = {
   pending: boolean
   error: boolean
   onInstall: () => void
-  onCheck: () => void
+  onInspect: () => void
   onAction: (id: string) => void
-  onOpenAuthorization: () => void
 }
 
 /** Presents checked actions in a compact row; authorization and failures keep details visible. */
-export function IntegrationCard({ integration, locale, pending, error, onInstall, onCheck, onAction, onOpenAuthorization }: Props): React.JSX.Element {
+export function IntegrationCard({ integration, locale, pending, error, onInstall, onInspect, onAction }: Props): React.JSX.Element {
   const rowRef = useRef<HTMLElement>(null)
   const detailsRef = useRef<HTMLButtonElement>(null)
   const focusedRef = useRef<HTMLElement | null>(null)
@@ -26,9 +25,13 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
   const { record, busy } = integration
   const state = record?.state ?? 'not_installed'
   const ready = state === 'ready' && !record?.error
-  const waiting = isLark && busy && (state === 'waiting_for_app' || state === 'waiting_for_user')
-  const status = record?.error ? text.unknown : state === 'checking' ? text.checking : text.states[state as keyof typeof text.states] ?? text.unknown
-  const available = integration.actions.filter((action) => record?.actionIds.includes(action.id))
+  const status = record?.error ? text.unknown : state === 'checking' ? text.inspect : text.states[state as keyof typeof text.states] ?? text.unknown
+  const available = (record?.actions ?? []).flatMap((action) => {
+    const definition = integration.actions.find((item) => item.id === action.id)
+    return definition ? [{ ...definition, ...action }] : []
+  })
+  const external = available.filter((action) => action.type === 'open-url')
+  const waiting = external.length > 0
   const stage = ready ? 3 : ['login_required', 'authorizing', 'waiting_for_user', 'refreshing_auth'].includes(state) ? 2
     : ['app_required', 'creating_app', 'waiting_for_app', 'app_authorization_required', 'verifying_app'].includes(state) ? 1 : 0
 
@@ -60,8 +63,8 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
         <div className="flex w-full flex-wrap items-center gap-2 @min-[560px]/integration:w-auto">
           {!record ? <Button focusableWhenDisabled onClick={onInstall} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">{text.install} {integration.name}</Button> : (
             <>
-              <Button focusableWhenDisabled variant="outline" onClick={onCheck} disabled={busy || pending}>{text.check}</Button>
-              {!busy ? available.map((action, index) => (
+              <Button focusableWhenDisabled variant="outline" onClick={onInspect} disabled={busy || pending}>{text.inspect}</Button>
+              {!busy ? available.filter((action) => action.type === 'callback').map((action, index) => (
                 <Button focusableWhenDisabled key={action.id} variant={index === 0 ? 'default' : 'outline'} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere text-left" onClick={() => onAction(action.id)}>
                   {isLark ? text.actions[action.id as keyof typeof text.actions] ?? action.label : action.label}
                 </Button>
@@ -91,8 +94,10 @@ export function IntegrationCard({ integration, locale, pending, error, onInstall
         {error || record?.error ? <p role="alert" className="text-support text-destructive wrap-anywhere">{text.failed}</p> : null}
         {waiting ? (
           <div className="space-y-2 text-progress">
-            <p className="text-support">{text.waiting}</p>
-            <Button focusableWhenDisabled onClick={onOpenAuthorization} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">{text.open}<span aria-hidden="true">↗</span></Button>
+            {external.map((action) => <div key={action.id} className="space-y-2">
+              {action.description ? <p className="text-support">{action.description}</p> : null}
+              <Button focusableWhenDisabled onClick={() => onAction(action.id)} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">{isLark ? text.actions[action.id as keyof typeof text.actions] ?? action.label : action.label}<span aria-hidden="true">↗</span></Button>
+            </div>)}
           </div>
         ) : record && !ready ? <p className="text-support text-muted-foreground">{busy ? text.working : text.intro}</p> : null}
       </div>

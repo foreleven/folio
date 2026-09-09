@@ -8,16 +8,16 @@ afterEach(cleanup)
 const base: IntegrationView = {
   id: 'lark', name: 'Lark', busy: false, record: null,
   description: 'Connect conversations and email.', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://www.larksuite.com/',
-  actions: [{ id: 'authorize', label: 'Authorize' }], resources: [{ id: 'im', name: 'Messages' }, { id: 'email', name: 'Email' }]
+  actions: [{ id: 'authorize', label: 'Authorize' }, { id: 'open_authorization', label: 'Open authorization page' }], resources: [{ id: 'im', name: 'Messages' }, { id: 'email', name: 'Email' }]
 }
 /** Creates a card around a committed server snapshot with observable action handlers. */
 function show(view: IntegrationView = base, locale: 'en' | 'zh-CN' = 'en') {
-  const handlers = { onInstall: vi.fn(), onCheck: vi.fn(), onAction: vi.fn(), onOpenAuthorization: vi.fn() }
+  const handlers = { onInstall: vi.fn(), onInspect: vi.fn(), onAction: vi.fn() }
   const result = render(<IntegrationCard integration={view} locale={locale} pending={false} error={false} {...handlers} />)
   return { ...result, ...handlers }
 }
 const installed = (state: string): IntegrationView => ({ ...base, record: {
-  id: 'lark', state, data: {}, resources: base.resources, actionIds: ['authorize'], error: null, createdAt: 1, updatedAt: 2
+  id: 'lark', state, data: {}, resources: base.resources, actions: [{ id: 'authorize', type: 'callback' }], error: null, createdAt: 1, updatedAt: 2
 } })
 
 describe('IntegrationCard', () => {
@@ -44,25 +44,38 @@ describe('IntegrationCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Install Lark' }))
     expect(ui.onInstall).toHaveBeenCalledOnce()
   })
-  it('offers only actions from the last check', () => {
+  it('offers only actions from the last inspect', () => {
     const ui = show(installed('login_required'))
     fireEvent.click(screen.getByRole('button', { name: 'Authorize Lark' }))
     expect(ui.onAction).toHaveBeenCalledWith('authorize')
     expect(screen.queryByRole('button', { name: 'Install Lark' })).toBeNull()
   })
   it('shows waiting progress and opens authorization through the host rather than navigating the renderer', () => {
-    const ui = show({ ...installed('waiting_for_user'), busy: true })
+    const view = installed('waiting_for_user')
+    const ui = show({ ...view, busy: true, record: { ...view.record!, actions: [{ id: 'open_authorization', type: 'open-url', url: 'https://accounts.feishu.cn/authorize' }] } })
     fireEvent.click(screen.getByRole('button', { name: /Open authorization page/ }))
-    expect(ui.onOpenAuthorization).toHaveBeenCalledOnce()
+    expect(ui.onAction).toHaveBeenCalledWith('open_authorization')
     expect(screen.queryByRole('button', { name: 'Authorize Lark' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Check status' }).getAttribute('aria-disabled')).toBe('true')
   })
+  it('renders another provider’s external action during any waiting state', () => {
+    const view = installed('custom_wait')
+    const ui = show({ ...view, id: 'notes', name: 'Notes', busy: true,
+      actions: [{ id: 'continue', label: 'Continue in Notes', description: 'Complete setup in Notes.' }],
+      record: { ...view.record!, actions: [{ id: 'continue', type: 'open-url', url: 'https://notes.example/connect' }] }
+    })
+    expect(screen.getByText('Complete setup in Notes.').closest('[hidden]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Continue in Notes/ }))
+    expect(ui.onAction).toHaveBeenCalledWith('continue')
+    expect(screen.queryByText(/Finish authorization/)).toBeNull()
+  })
+
   it('renders connected state in Chinese and retains a manual recheck', () => {
     const connected = installed('ready')
-    const ui = show({ ...connected, record: { ...connected.record!, actionIds: [] } }, 'zh-CN')
+    const ui = show({ ...connected, record: { ...connected.record!, actions: [] } }, 'zh-CN')
     expect(screen.getByText('已连接')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '检查状态' }))
-    expect(ui.onCheck).toHaveBeenCalledOnce()
+    expect(ui.onInspect).toHaveBeenCalledOnce()
   })
   it('exposes a persisted failure and a usable retry action', () => {
     const view = installed('login_required')
@@ -82,7 +95,7 @@ describe('IntegrationCard', () => {
     fireEvent.click(toggle)
     expect(panel.hidden).toBe(true)
     expect(ui.onInstall).not.toHaveBeenCalled()
-    expect(ui.onCheck).not.toHaveBeenCalled()
+    expect(ui.onInspect).not.toHaveBeenCalled()
   })
   it('automatically reveals failures and never labels an errored ready record as connected', () => {
     const view = installed('ready')
@@ -95,7 +108,7 @@ describe('IntegrationCard', () => {
     const ui = show(installed('login_required'))
     screen.getByRole('button', { name: 'Authorize Lark' }).focus()
     const view = installed('ready')
-    ui.rerender(<IntegrationCard integration={{ ...view, record: { ...view.record!, actionIds: [] } }} locale="en" pending={false} error={false} {...ui} />)
+    ui.rerender(<IntegrationCard integration={{ ...view, record: { ...view.record!, actions: [] } }} locale="en" pending={false} error={false} {...ui} />)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Details' }))
   })
 

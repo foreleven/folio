@@ -2,7 +2,7 @@ export const integrationMessages = {
   en: {
     title: 'Integrations', subtitle: 'Connect the places where your knowledge begins.',
     available: 'Available integrations', intro: 'Complete the available steps to connect this integration.',
-    im: 'Messages', email: 'Email', install: 'Install', check: 'Check status',
+    im: 'Messages', email: 'Email', install: 'Install', inspect: 'Check status',
     open: 'Open authorization page', waiting: 'Finish authorization in your browser. This page will update automatically.',
     larkInstallHint: 'Installs missing Lark CLI and skills. You’ll authorize access in the next steps.',
     installHint: 'Set up this integration and register its resources on this device.',
@@ -12,7 +12,7 @@ export const integrationMessages = {
     loadFailed: 'Couldn’t load integrations.', retry: 'Try again', unknown: 'Needs attention',
     tools: 'Tools', app: 'Application', account: 'Your account',
     checking: 'Checking…', working: 'Working…',
-    actions: { create_app: 'Create Lark app', verify_app: 'Verify application', refresh_auth: 'Refresh authorization', authorize: 'Authorize Lark', install: 'Install tools' },
+    actions: { open_authorization: 'Open authorization page', create_app: 'Create Lark app', verify_app: 'Verify application', refresh_auth: 'Refresh authorization', authorize: 'Authorize Lark', install: 'Install tools' },
     states: {
       not_installed: 'Not installed', install_required: 'Setup required', installing: 'Installing tools',
       app_required: 'Create an application', creating_app: 'Preparing application', waiting_for_app: 'Awaiting application approval',
@@ -24,7 +24,7 @@ export const integrationMessages = {
   'zh-CN': {
     title: '集成', subtitle: '连接知识产生的地方。', available: '可用集成', intro: '完成可用的操作步骤，连接此集成。',
     im: '即时通讯', email: '邮箱',
-    install: '安装', check: '检查状态', open: '打开授权页面',
+    install: '安装', inspect: '检查状态', open: '打开授权页面',
     waiting: '请在浏览器中完成授权，此页面会自动更新。',
     larkInstallHint: '安装缺失的 Lark CLI 和 skills，随后由你授权数据访问。',
     installHint: '在此设备上安装集成并注册其资源。',
@@ -32,7 +32,7 @@ export const integrationMessages = {
     scope: '安装在此设备上', loading: '正在读取集成…',
     failed: '操作未能完成，请检查网络连接后重试。', loadFailed: '无法读取集成。', retry: '重试', unknown: '需要处理',
     tools: '工具', app: '应用', account: '用户授权', checking: '正在检查…', working: '正在处理…',
-    actions: { create_app: '创建 Lark 应用', verify_app: '验证应用授权', refresh_auth: '刷新用户授权', authorize: '授权访问 Lark', install: '安装工具' },
+    actions: { open_authorization: '打开授权页面', create_app: '创建 Lark 应用', verify_app: '验证应用授权', refresh_auth: '刷新用户授权', authorize: '授权访问 Lark', install: '安装工具' },
     states: {
       not_installed: '尚未安装', install_required: '需要安装工具', installing: '正在安装工具',
       app_required: '需要创建应用', creating_app: '正在准备应用', waiting_for_app: '等待应用授权',

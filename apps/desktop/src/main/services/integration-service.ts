@@ -1,6 +1,5 @@
-import { IntegrationError } from '@folio/integrations/base'
-import type { Integration, IntegrationContext, IntegrationEffect } from '@folio/integrations/base'
-import { lark } from '@folio/integrations/lark'
+import { IntegrationContext, IntegrationError } from '@folio/integrations/base'
+import type { Integration, IntegrationEffect } from '@folio/integrations/base'
 import { Context, Effect, FileSystem, Layer, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
@@ -8,11 +7,9 @@ import { IntegrationSettingsError, type IntegrationView } from '../../shared/int
 import { IntegrationBrowser } from '../electron/IntegrationBrowser'
 import { ConfigService } from './config-service'
 import { IntegrationStore } from './integration-store'
+import { IntegrationCatalog, type IntegrationPlatform } from './integration-catalog'
+import { IntegrationAction } from '@folio/integrations/protocol'
 
-/** The host's static registry; tests substitute integrations without contacting Lark. */
-export class IntegrationCatalog extends Context.Service<IntegrationCatalog, readonly Integration[]>()('folio/services/IntegrationCatalog') {
-  static readonly layer = Layer.succeed(IntegrationCatalog)([lark])
-}
 const failure = () => new IntegrationSettingsError({ message: 'The integration operation failed. Check its status and try again.' })
 
 /** Owns process-lifetime jobs, SQLite state, and a push stream shared by all settings windows. */
@@ -20,9 +17,8 @@ export class IntegrationService extends Context.Service<IntegrationService, {
   readonly watch: Stream.Stream<readonly IntegrationView[], IntegrationSettingsError>
   readonly list: Effect.Effect<readonly IntegrationView[], IntegrationSettingsError>
   readonly install: (id: string) => Effect.Effect<void, IntegrationSettingsError>
-  readonly check: (id: string) => Effect.Effect<void, IntegrationSettingsError>
+  readonly inspect: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly action: (id: string, actionId: string) => Effect.Effect<void, IntegrationSettingsError>
-  readonly openAuthorization: (id: string) => Effect.Effect<void, IntegrationSettingsError>
 }>()('folio/services/IntegrationService') {
   static readonly layer = Layer.effect(IntegrationService, Effect.gen(function*() {
     const catalog = yield* IntegrationCatalog
@@ -60,14 +56,16 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       }).pipe(writes.withPermit)
       return Stream.concat(Stream.succeed(initial), Stream.fromSubscription(subscription))
     }))
-    const withPlatform = <A>(effect: IntegrationEffect<A>) => effect.pipe(
+    /** Supplies installation-local host capabilities and the app-owned platform implementations. */
+    const withContext = <A>(id: string, effect: IntegrationEffect<A, IntegrationError, IntegrationPlatform>) => effect.pipe(
+      Effect.provideService(IntegrationContext, contextFor(id)),
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)
     )
     /** Adapts opaque state/resource callbacks to the app store without exposing SQL to integrations. */
-    const contextFor = (id: string): IntegrationContext => ({
+    const contextFor = (id: string): IntegrationContext["Service"] => ({
       directory: join(config.directory, 'integrations', id),
-      writeState: (state, data) => commit(store.update(id, state, data, [])).pipe(
+      writeState: (state, data, actions = []) => commit(store.update(id, state, data, actions)).pipe(
         Effect.mapError(() => new IntegrationError({ message: 'Could not persist integration state.' }))
       ),
       registerResource: ({ id: resourceId, name }) => commit(store.register(id, { id: resourceId, name })).pipe(
@@ -75,15 +73,15 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       )
     })
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
-    const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration) {
-      const result = yield* withPlatform(integration.check(contextFor(integration.id)))
+    const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
+      const result = yield* withContext(integration.id, integration.inspect())
       const row = (yield* store.list).find((row) => row.id === integration.id)!
       // Completed/expired attempts must not keep old authorization URLs available.
       const data = result.state === row.state ? row.data : {}
-      yield* commit(store.update(integration.id, result.state, data, result.actionIds))
+      yield* commit(store.update(integration.id, result.state, data, result.actions))
     })
     /** Starts a main-scope job, independent of the lifetime of the requesting RPC/window. */
-    const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'check' | 'action', actionId?: string) {
+    const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'inspect' | 'action', actionId?: string) {
       const integration = catalog.find((item) => item.id === id)
       if (!integration) return yield* new IntegrationSettingsError({ message: 'Unknown integration.' })
       if (running.has(id)) return
@@ -98,11 +96,11 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         yield* commit(store.update(id, 'checking', {}, []))
         if (operation === 'install') {
           // Even shared, already-ready tools must register their resources with this host.
-          yield* withPlatform(integration.install(contextFor(id)))
+          yield* withContext(id, integration.install())
         } else if (operation === 'action') {
-          const checked = yield* withPlatform(integration.check(contextFor(id)))
-          if (!checked.actionIds.includes(actionId!)) return yield* new IntegrationSettingsError({ message: 'This action is no longer available. Check again.' })
-          yield* withPlatform(integration.onActionCallback(contextFor(id), actionId!))
+          const checked = yield* withContext(id, integration.inspect())
+          if (!checked.actions.some((action) => action.id === actionId && action.type === 'callback')) return yield* new IntegrationSettingsError({ message: 'This action is no longer available. Check again.' })
+          yield* withContext(id, integration.onActionCallback(actionId!))
         }
         yield* reconcile(integration)
       }).pipe(
@@ -111,7 +109,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           const recovered = yield* reconcile(integration).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false)))
           const current = (yield* store.list).find((item) => item.id === id)!
           yield* commit(store.update(id, recovered ? current.state : 'check_failed',
-            {}, recovered ? current.actionIds : [], 'The operation could not finish. Check the connection and try again.'))
+            {}, recovered ? current.actions : [], 'The operation could not finish. Check the connection and try again.'))
         })),
         Effect.ensuring(Effect.gen(function*() {
           running.delete(id)
@@ -122,23 +120,31 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       // The first row and job ownership survive renderer reload/cancellation together.
       yield* Effect.forkIn(job.pipe(Effect.interruptible), scope)
     }, commands.withPermit, Effect.uninterruptible, Effect.mapError(failure))
-    /** Resolves the current trusted URL in main; renderer cannot request arbitrary external destinations. */
-    const openAuthorization = Effect.fn('IntegrationService.openAuthorization')(function*(id: string) {
-      const row = (yield* store.list).find((item) => item.id === id)
-      if (!row || !running.has(id) || !['waiting_for_app', 'waiting_for_user'].includes(row.state)) return yield* failure()
-      const data = yield* Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))(row.data)
-      const url = yield* Effect.try(() => new URL(data.url))
-      if (id !== 'lark' || url.protocol !== 'https:' || url.username || url.password || ![
-        'open.feishu.cn', 'accounts.feishu.cn', 'open.larkoffice.com', 'accounts.larksuite.com', 'open.larksuite.com'
-      ].includes(url.hostname)) return yield* failure()
-      yield* browser.open(url.toString())
+    /** Rechecks the provider's current action; the renderer supplies an ID, never a URL or protocol. */
+    const action = Effect.fn('IntegrationService.action')(function*(id: string, actionId: string) {
+      const integration = catalog.find((item) => item.id === id)
+      if (!integration || !integration.actions.some((item) => item.id === actionId)) return yield* failure()
+      if (!(yield* store.list).some((row) => row.id === id)) return yield* failure()
+      const checked = yield* withContext(id, integration.inspect())
+      const selected = yield* Schema.decodeUnknownEffect(IntegrationAction)(checked.actions.find((item) => item.id === actionId))
+      switch (selected.type) {
+        case 'callback':
+          yield* start(id, 'action', actionId)
+          break
+        case 'open-url':
+          // Providers own domain policy. The host supports HTTPS navigation, never arbitrary OS schemes.
+          const url = yield* Effect.try(() => new URL(selected.url))
+          if (url.protocol !== 'https:' || url.username || url.password) return yield* failure()
+          yield* browser.open(url.toString())
+          break
+      }
     }, Effect.mapError(failure))
 
     // Reconcile only installed rows on application restart; merely browsing never inserts rows.
     for (const row of yield* store.list) {
-      if (catalog.some((item) => item.id === row.id)) yield* start(row.id, 'check')
+      if (catalog.some((item) => item.id === row.id)) yield* start(row.id, 'inspect')
     }
-    return IntegrationService.of({ list, watch, install: (id) => start(id, 'install'), check: (id) => start(id, 'check'),
-      action: (id, actionId) => start(id, 'action', actionId), openAuthorization })
+    return IntegrationService.of({ list, watch, install: (id) => start(id, 'install'), inspect: (id) => start(id, 'inspect'),
+      action })
   }))
 }

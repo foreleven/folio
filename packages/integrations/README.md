@@ -46,9 +46,12 @@ export const provider = defineIntegration({
 })
 ```
 
-Hooks receive the same host context. They do not need a second lifecycle wrapper,
-lock, live-state map, or final check. Optional provider context fields can be typed
-with `defineIntegration<ProviderContext>(...)`, as Lark does for a supplied app.
+Hooks obtain host capabilities with `yield* IntegrationContext`, an Effect
+`Context.Service`. They do not need a second lifecycle wrapper, lock, live-state
+map, or final inspect. `Integration<R>` and `defineIntegration` preserve additional
+service requirements in the Effect environment. Providers inject their own services
+through Effect DI rather than extending the host context. The base overrides only
+`IntegrationContext.writeState` for progress tracking and preserves other services.
 Register the resulting integration in the desktop's `IntegrationCatalog`; the
 generic card reads its metadata and action labels. Provider-specific setup steps
 and authorization UI remain separate concerns (currently supplied only for Lark).
@@ -56,17 +59,18 @@ and authorization UI remain separate concerns (currently supplied only for Lark)
 ## Protocol
 
 - `actions` statically defines IDs, labels, and descriptions for UI rendering.
-- `check(context)` inspects current facts and returns `{ state, actionIds }`.
+- `inspect()` inspects current facts and returns `{ state, actions }`.
   Only the exported `readyState` (`"ready"`) indicates success. Checks do not install,
   register, authorize, or write state. Operational errors fail with `IntegrationError`.
-- `onActionCallback(context, actionId, payload?)` executes a user-selected action.
+- `onActionCallback(actionId, payload?)` executes a user-selected action.
   It rejects unknown or stale actions, writes progress, and publishes the next checked
   state. It never automatically executes the next action. Lark's device flows await
   SDK/HTTP polling internally; their completion does not use the optional payload.
-- `install(context)` installs dependencies and registers resources after confirmation.
+- `install()` installs dependencies and registers resources after confirmation.
   The `install` action delegates to the same implementation.
 
-The host supplies `directory`, `writeState(state: string, data: unknown)`, and
+The host provides `IntegrationContext` through a Layer or `Effect.provideService`,
+with `directory`, `writeState(state: string, data: unknown, actions?: IntegrationAction[])`, and
 `registerResource(resource)`. State data is opaque to the framework. A Lark-specific
 view can display `url` and the SDK registration `expiresAt` or OAuth `expiresIn` in waiting states. Credential files never enter
 these UI updates. The host must persist each state before completing `writeState`.
@@ -76,6 +80,34 @@ list provides runtime implementations to rebind persisted records after restart;
 functions are not persisted. Resource registration means a capability is installed,
 not that it is authorized. Installation records completion only after both upserts
 succeed, so partial registration can be retried.
+
+### Action protocol
+
+Static `integration.actions` supplies labels and descriptions by ID. Each check returns
+currently available actions using one of two protocols:
+
+```ts
+{ id: 'authorize', type: 'callback' }
+{ id: 'open_authorization', type: 'open-url', url: 'https://provider.example/authorize' }
+```
+
+`callback` invokes `onActionCallback`; `open-url` opens the provider-supplied URL in the
+system browser. Pending operations publish actions with `writeState(state, data, actions)`.
+Omitting `actions` clears previous actions. `data` remains opaque; the host never extracts
+URLs or interprets provider states from it. Providers validate their own authorization
+domains before offering a URL. The desktop permits HTTPS URLs without embedded credentials.
+
+The renderer sends only the integration and action IDs through `integrations.action`.
+Main checks the static ID, rechecks current availability, validates the protocol, and
+executes it. External actions remain available while a callback is waiting. Completed,
+failed, cancelled, or restarted attempts are rechecked rather than restoring old links.
+The base rejects attempts to invoke `open-url` actions as provider callbacks.
+
+Desktop state stores action descriptors in the `actions` column. Existing databases gain
+this column without losing state or resources; legacy action IDs are rebuilt by the normal
+startup inspect. Bundled providers are registered in the application composition root (`program.ts`);
+`integration-catalog.ts` defines only the injected catalog contract. The execution
+service depends on that contract rather than importing providers.
 
 ## Lark flow
 
@@ -96,13 +128,9 @@ action callbacks wait for authorization. Failed and interrupted actions write
 callbacks cannot resurrect a completed attempt. Avoid multiple processes operating
 on the same directory.
 
-Lark reuses PATH `lark-cli` first, then its managed CLI. Only a missing executable
-triggers local npm installation of `@larksuite/cli@1.0.94`; a broken CLI is an error.
-Skills `lark-shared`, `lark-im`, and `lark-mail` are copied with their complete trees
-and license from official `larksuite/cli` commit
-`f065bf5b645af381f9b7475ce721451e6ca36a23` (v1.0.94). Downloads are staged before
-publication. An incomplete existing skills directory is not overwritten; move it
-aside and retry. Installation requires npm and Git as applicable.
+Lark uses only the Folio-managed `lark-cli`; it never probes or executes a global PATH installation. Only a missing executable
+extracts the bundled native `lark-cli@1.0.94` into the integration’s `cli/` directory; a broken CLI is an error. The bundled archive currently supports macOS arm64 only; other platforms require a Folio-managed CLI.
+Skills `lark-shared`, `lark-im`, and `lark-mail` are bundled under `src/lark/assets/skills` with their complete trees and license from official `larksuite/cli` commit `f065bf5b645af381f9b7475ce721451e6ca36a23` (v1.0.94). Installation copies these assets into Folio after staging; it does not use Git, Node, or npm. Electron packages the skills as an external `lark-skills` resource and injects its path; an incomplete existing skills directory is not overwritten.
 
 Application registration uses `@larksuiteoapi/node-sdk@1.73.3` `registerApp`, following
 kb-wiki's `app-registration.ts`; user verification uses SDK `authen.userInfo.get`.
@@ -114,7 +142,9 @@ before exchanging the app access token. A failed exchange can be retried with
 and validates the actual top-level response shape, following the reference file.
 Only then does setup move on to user OAuth. IM and Email read permissions
 are requested together; resource selection is not implemented yet. A host-provided
-`app: { clientId, clientSecret, brand }` skips application registration.
+`LarkApplication` reference containing `{ clientId, clientSecret, brand }` skips
+application registration. Its default is `undefined`, which reads the saved app
+file and offers registration when no saved app exists.
 
 ```text
 ~/.folio/integrations/lark/
@@ -124,7 +154,7 @@ are requested together; resource selection is not implemented yet. A host-provid
   state.json       # Live test host: persisted UI state
   resources.json   # Live test host: resource metadata
   auth.json        # User tokens, expiry, scope, and identity
-  cli/             # Only when no system CLI is available
+  cli/             # Only when no Folio-managed CLI is available
   skills/
     lark-shared/
     lark-im/
@@ -144,20 +174,26 @@ links, or ingestion is implemented; both Resource `onIngest` hooks remain empty.
 ## Host example
 
 ```ts
-import { lark, readyState } from '@folio/integrations'
+import { Effect, Layer } from 'effect'
+import { IntegrationContext, lark, LarkApplication, readyState } from '@folio/integrations'
 
 // Inside Effect.gen, with platform services supplied by the host:
-const context = {
+const host = Layer.succeed(IntegrationContext)({
   directory: integrationDirectory,
-  writeState: (state: string, data: unknown) => store.writeState(state, data),
+  writeState: (state, data, actions = []) => store.writeState(state, data, actions),
   registerResource: (resource) => store.upsertResource(lark.id, resource),
-}
-const result = yield* lark.check(context)
-yield* context.writeState(result.state, { actionIds: result.actionIds })
-// Render lark.actions filtered by result.actionIds.
-// After a user selects an action:
-yield* lark.onActionCallback(context, selectedActionId)
-// Only a subsequent check returning readyState authorizes ingestion.
+})
+const result = yield* lark.inspect().pipe(Effect.provide(host))
+yield* store.writeState(result.state, {}, result.actions)
+// Join result.actions to lark.actions by ID for display.
+// For a callback action selected by the user (open-url is handled by the host):
+yield* lark.onActionCallback(selectedActionId).pipe(Effect.provide(host))
+// Optionally inject a pre-existing Lark application for a run:
+yield* lark.inspect().pipe(
+  Effect.provideService(LarkApplication, { clientId, clientSecret, brand: 'feishu' }),
+  Effect.provide(host),
+)
+// Only a subsequent inspect returning readyState authorizes ingestion.
 ```
 
 The explicit live installation test confirms each action, persists UI state and resource

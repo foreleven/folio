@@ -1,10 +1,14 @@
-import { Effect, FileSystem } from 'effect'
-import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
+import { Context, Effect, FileSystem } from 'effect'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { IntegrationError } from '../base/index.ts'
 
 export const skillNames = ['lark-shared', 'lark-im', 'lark-mail'] as const
-const revision = 'f065bf5b645af381f9b7475ce721451e6ca36a23'
+
+/** Source-tree default; Electron injects the unpacked bundled skills directory. */
+export const LarkSkillsDirectory = Context.Reference<string>('@folio/integrations/lark/SkillsDirectory', {
+  defaultValue: () => fileURLToPath(new URL('./assets/skills', import.meta.url))
+})
 
 /** Checks complete installed skill entrypoints without downloading or changing files. */
 export const hasSkills = Effect.fn('Lark.hasSkills')(function*(directory: string) {
@@ -15,35 +19,32 @@ export const hasSkills = Effect.fn('Lark.hasSkills')(function*(directory: string
   return true
 })
 
-/** Downloads pinned upstream skills after confirmation; stages complete trees before publication. */
+/** Copies bundled skills after confirmation; stages complete trees before publication. */
 export const installSkills = Effect.fn('Lark.installSkills')(function*(directory: string) {
   if (yield* hasSkills(directory)) return
   const fs = yield* FileSystem.FileSystem
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-  // Do not overwrite a user's incomplete or modified installation.
+  const source = yield* LarkSkillsDirectory
   const destination = join(directory, 'skills')
   if (yield* fs.exists(destination)) {
     return yield* new IntegrationError({ message: 'Incomplete skills directory. Move it aside before retrying installation.' })
   }
-  const temporary = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.skills-' })
-  const source = join(temporary, 'upstream')
-  for (const args of [
-    ['clone', '--depth', '1', '--branch', 'v1.0.94', 'https://github.com/larksuite/cli.git', source],
-    ['-C', source, 'checkout', '--detach', revision]
-  ]) {
-    const code = yield* spawner.exitCode(ChildProcess.make('git', args, {
-      stdin: 'ignore', stdout: 'ignore', stderr: 'ignore'
-    }))
-    if (code !== 0) return yield* new IntegrationError({ message: 'Could not download the pinned Lark skills.' })
-  }
-  const staged = join(temporary, 'skills')
-  yield* fs.makeDirectory(staged)
+  if (!(yield* fs.exists(source))) return yield* new IntegrationError({ message: 'The bundled Lark skills are missing.' })
+  const staging = join(directory, '.skills-staging')
+  yield* fs.remove(staging, { recursive: true, force: true })
+  yield* fs.makeDirectory(staging, { recursive: true, mode: 0o700 })
   for (const name of skillNames) {
-    yield* fs.copy(join(source, 'skills', name), join(staged, name))
+    const skill = join(source, name)
+    if (!(yield* fs.exists(join(skill, 'SKILL.md')))) {
+      return yield* new IntegrationError({ message: `The bundled Lark skill is incomplete: ${name}.` })
+    }
+    yield* fs.copy(skill, join(staging, name))
   }
-  yield* fs.copy(join(source, 'LICENSE'), join(staged, 'LICENSE'))
-  if (!(yield* hasSkills(temporary))) {
-    return yield* new IntegrationError({ message: 'Downloaded Lark skills are incomplete.' })
+  const license = join(source, 'LICENSE')
+  if (yield* fs.exists(license)) yield* fs.copy(license, join(staging, 'LICENSE'))
+  for (const name of skillNames) {
+    if (!(yield* fs.exists(join(staging, name, 'SKILL.md')))) {
+      return yield* new IntegrationError({ message: `Bundled Lark skills are incomplete: ${name}.` })
+    }
   }
-  yield* fs.rename(staged, destination).pipe(Effect.uninterruptible)
-}, Effect.scoped)
+  yield* fs.rename(staging, destination).pipe(Effect.uninterruptible)
+})

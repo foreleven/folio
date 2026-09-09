@@ -47,6 +47,8 @@
     "files": [
       "out/**/*"
     ],
+    "asarUnpack": ["out/main/assets/**"],
+    "extraResources": [{ "from": "../../packages/integrations/src/lark/assets/skills", "to": "lark-skills" }],
     "mac": {
       "target": [
         "dmg"
