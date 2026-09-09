@@ -1,8 +1,12 @@
 import { Effect, Layer, Stream } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ElectronApp } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
 import { application } from './program'
+// Electron's asset transform belongs to the bundler; lifecycle tests use an inert archive path.
+vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli.tar.gz' }))
+vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '/test/folio' } }))
+
 
 describe('main application program', () => {
   it('drives Electron lifecycle events through application services', async () => {

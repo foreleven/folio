@@ -1,5 +1,6 @@
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
+import { ArrowRightIcon, FolderIcon } from 'lucide-react'
 import { useLocale } from '../preferences'
 import { configAtom } from '../rpc/config-rpc'
 
@@ -22,14 +23,16 @@ export function RecentVaults({ opening, onOpen }: RecentVaultsProps): React.JSX.
         <Button variant="ghost" onClick={refresh}>{chinese ? '重试' : 'Retry'}</Button>
       </div> : config._tag !== 'Success' ? <p role="status" className="m-0 py-2 text-support text-muted-foreground">{chinese ? '正在加载…' : 'Loading vaults…'}</p>
         : vaults.length === 0 ? <p className="m-0 py-2 text-support text-muted-foreground">{chinese ? '还没有知识库。打开一个文件夹，从这里开始。' : 'No vaults yet. Open a folder to get started.'}</p>
-          : <ul className="-m-1 list-none p-1">
+          : <ul className="list-none divide-y border-y p-0">
             {vaults.map((vault) => <li key={vault.id}>
-              <Button variant="ghost" className="h-auto min-h-11 w-full justify-between gap-3 rounded-sm px-2 py-0 text-left" title={vault.path} disabled={opening !== null} onClick={() => void onOpen(vault.id)}>
-                <span className="grid min-w-0 gap-0.5">
+              <Button variant="ghost" className="h-auto min-h-11 w-full justify-start gap-2 rounded-sm px-2 py-1 text-left" title={vault.path}
+                aria-label={`${vault.name}: ${vault.path}`} disabled={opening !== null} onClick={() => void onOpen(vault.id)}>
+                <FolderIcon className="size-4 text-muted-foreground" />
+                <span className="grid min-w-0 flex-1 gap-0.5">
                   <span className="truncate text-ui">{vault.name}</span>
                   <span className="truncate text-support font-mono font-normal text-muted-foreground">{vault.path}</span>
                 </span>
-                <span className="text-muted-foreground" aria-hidden="true">{opening === vault.id ? '…' : '→'}</span>
+                {opening === vault.id ? <span className="text-muted-foreground" aria-hidden="true">…</span> : <ArrowRightIcon className="size-3.5 text-muted-foreground" />}
               </Button>
             </li>)}
           </ul>}

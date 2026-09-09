@@ -1,11 +1,11 @@
 import { Schema } from 'effect'
-import { IntegrationAction, IntegrationActionDefinition } from '@folio/integrations/protocol'
+import { IntegrationAction, IntegrationActionDefinition, IntegrationText, IntegrationStatus } from '@folio/integrations/protocol'
 
 export class IntegrationSettingsError extends Schema.TaggedError<IntegrationSettingsError>()('IntegrationSettingsError', {
   message: Schema.String
 }) {}
 
-export const IntegrationResource = Schema.Struct({ id: Schema.String, name: Schema.String })
+export const IntegrationResource = Schema.Struct({ id: Schema.String, name: IntegrationText })
 export const IntegrationRecord = Schema.Struct({
   id: Schema.String, state: Schema.String, data: Schema.Unknown,
   actions: Schema.Array(IntegrationAction), resources: Schema.Array(IntegrationResource),
@@ -16,7 +16,7 @@ export type IntegrationRecord = typeof IntegrationRecord.Type
 /** Public catalog plus committed setup state. No app credentials cross RPC. */
 export const IntegrationView = Schema.Struct({
   id: Schema.String, name: Schema.String,
-  description: Schema.String, logo: Schema.String, homepage: Schema.String,
+  description: IntegrationText, states: Schema.Record(Schema.String, IntegrationStatus), logo: Schema.String, homepage: Schema.String,
   actions: Schema.Array(IntegrationActionDefinition), resources: Schema.Array(IntegrationResource),
   record: Schema.NullOr(IntegrationRecord), busy: Schema.Boolean
 })

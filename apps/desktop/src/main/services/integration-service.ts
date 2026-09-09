@@ -18,7 +18,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
   readonly list: Effect.Effect<readonly IntegrationView[], IntegrationSettingsError>
   readonly install: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly inspect: (id: string) => Effect.Effect<void, IntegrationSettingsError>
-  readonly action: (id: string, actionId: string) => Effect.Effect<void, IntegrationSettingsError>
+  readonly action: (id: string, actionId: string, payload?: unknown) => Effect.Effect<void, IntegrationSettingsError>
 }>()('folio/services/IntegrationService') {
   static readonly layer = Layer.effect(IntegrationService, Effect.gen(function*() {
     const catalog = yield* IntegrationCatalog
@@ -31,13 +31,15 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     const commands = yield* Semaphore.make(1)
     const writes = yield* Semaphore.make(1)
     const running = new Set<string>()
+    const runtimes = new Set<string>()
+    const revisions = new Map<string, number>()
     const changes = yield* PubSub.unbounded<readonly IntegrationView[]>()
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes))
 
     const list = Effect.gen(function*() {
       const rows = yield* store.list
       return catalog.map((integration) => ({
-        id: integration.id, name: integration.name, actions: integration.actions,
+        id: integration.id, name: integration.name, actions: integration.actions, states: integration.states,
         description: integration.description, logo: integration.logo, homepage: integration.homepage,
         resources: integration.resources.map(({ id, name }) => ({ id, name })),
         record: rows.find((row) => row.id === integration.id) ?? null,
@@ -65,7 +67,9 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     /** Adapts opaque state/resource callbacks to the app store without exposing SQL to integrations. */
     const contextFor = (id: string): IntegrationContext["Service"] => ({
       directory: join(config.directory, 'integrations', id),
-      writeState: (state, data, actions = []) => commit(store.update(id, state, data, actions)).pipe(
+      writeState: (state, data, actions = []) => commit(store.update(id, state, data, actions).pipe(
+        Effect.tap(() => Effect.sync(() => { revisions.set(id, (revisions.get(id) ?? 0) + 1) }))
+      )).pipe(
         Effect.mapError(() => new IntegrationError({ message: 'Could not persist integration state.' }))
       ),
       registerResource: ({ id: resourceId, name }) => commit(store.register(id, { id: resourceId, name })).pipe(
@@ -74,14 +78,18 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     })
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
+      const revision = revisions.get(integration.id) ?? 0
       const result = yield* withContext(integration.id, integration.inspect())
       const row = (yield* store.list).find((row) => row.id === integration.id)!
       // Completed/expired attempts must not keep old authorization URLs available.
       const data = result.state === row.state ? row.data : {}
-      yield* commit(store.update(integration.id, result.state, data, result.actions))
+      // A background publication may finish while inspection is reading files/network facts.
+      // Check inside the write lock so that an older inspection never replaces that newer snapshot.
+      yield* commit(Effect.suspend(() => (revisions.get(integration.id) ?? 0) === revision
+        ? store.update(integration.id, result.state, data, result.actions) : Effect.void))
     })
     /** Starts a main-scope job, independent of the lifetime of the requesting RPC/window. */
-    const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'inspect' | 'action', actionId?: string) {
+    const start = Effect.fn('IntegrationService.start')(function*(id: string, operation: 'install' | 'inspect' | 'action', actionId?: string, payload?: unknown) {
       const integration = catalog.find((item) => item.id === id)
       if (!integration) return yield* new IntegrationSettingsError({ message: 'Unknown integration.' })
       if (running.has(id)) return
@@ -91,6 +99,14 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         return yield* new IntegrationSettingsError({ message: 'Unknown integration action.' })
       }
       if (!row) yield* commit(store.create(id))
+      if (integration.run && !runtimes.has(id)) {
+        runtimes.add(id)
+        // The host owns cancellation only. Providers choose their own timers, retries and work.
+        yield* withContext(id, integration.run()).pipe(
+          Effect.catch(() => commit(store.update(id, 'check_failed', {}, [], 'The connection could not be maintained. Check its status.'))),
+          Effect.catch(() => Effect.void), Effect.interruptible, Effect.forkIn(scope)
+        )
+      }
       running.add(id)
       const job = Effect.gen(function*() {
         yield* commit(store.update(id, 'checking', {}, []))
@@ -100,16 +116,18 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         } else if (operation === 'action') {
           const checked = yield* withContext(id, integration.inspect())
           if (!checked.actions.some((action) => action.id === actionId && action.type === 'callback')) return yield* new IntegrationSettingsError({ message: 'This action is no longer available. Check again.' })
-          yield* withContext(id, integration.onActionCallback(actionId!))
+          yield* withContext(id, integration.onActionCallback(actionId!, payload))
         }
         yield* reconcile(integration)
       }).pipe(
         Effect.catch(() => Effect.gen(function*() {
           // Preserve durable progress; recover available actions from facts, then attach a safe error.
+          const failedAt = revisions.get(id) ?? 0
           const recovered = yield* reconcile(integration).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false)))
           const current = (yield* store.list).find((item) => item.id === id)!
-          yield* commit(store.update(id, recovered ? current.state : 'check_failed',
-            {}, recovered ? current.actions : [], 'The operation could not finish. Check the connection and try again.'))
+          yield* commit(Effect.suspend(() => (revisions.get(id) ?? 0) === failedAt
+            ? store.update(id, recovered ? current.state : 'check_failed', {}, recovered ? current.actions : [],
+              'The operation could not finish. Check the connection and try again.') : Effect.void))
         })),
         Effect.ensuring(Effect.gen(function*() {
           running.delete(id)
@@ -121,7 +139,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       yield* Effect.forkIn(job.pipe(Effect.interruptible), scope)
     }, commands.withPermit, Effect.uninterruptible, Effect.mapError(failure))
     /** Rechecks the provider's current action; the renderer supplies an ID, never a URL or protocol. */
-    const action = Effect.fn('IntegrationService.action')(function*(id: string, actionId: string) {
+    const action = Effect.fn('IntegrationService.action')(function*(id: string, actionId: string, payload?: unknown) {
       const integration = catalog.find((item) => item.id === id)
       if (!integration || !integration.actions.some((item) => item.id === actionId)) return yield* failure()
       if (!(yield* store.list).some((row) => row.id === id)) return yield* failure()
@@ -129,7 +147,15 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       const selected = yield* Schema.decodeUnknownEffect(IntegrationAction)(checked.actions.find((item) => item.id === actionId))
       switch (selected.type) {
         case 'callback':
-          yield* start(id, 'action', actionId)
+          // Validate declared inputs before acknowledging the job; never persist submitted values.
+          const definition = integration.actions.find((item) => item.id === actionId)!
+          if (definition.fields?.length) {
+            const values = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.String))(payload)
+            if (definition.fields.some((field) => field.required && !values[field.id]?.trim())) {
+              return yield* new IntegrationSettingsError({ message: 'Complete the required fields.' })
+            }
+          }
+          yield* start(id, 'action', actionId, payload)
           break
         case 'open-url':
           // Providers own domain policy. The host supports HTTPS navigation, never arbitrary OS schemes.

@@ -1,0 +1,104 @@
+import { Clock, Context, Effect, Schema, Semaphore } from 'effect'
+import { join, resolve } from 'node:path'
+import { IntegrationContext } from '../base/index.ts'
+import { AuthorizationRejected, authorizeApp, larkScopes, refreshUser, userIdentity } from './auth.ts'
+import { AppAuth, LarkApp, readState, UserAuth, writeState } from './state.ts'
+
+/** Optional host credentials; omitted values reuse the existing private application file. */
+export const LarkApplication = Context.Reference<LarkApp | undefined>('@folio/integrations/lark/LarkApplication', {
+  defaultValue: () => undefined
+})
+
+/** Only runtime coordination lives in memory; tokens and verification survive process restarts. */
+const sessions = new Map<string, { lock: Semaphore.Semaphore; rejected?: 'app' | 'user'; failures: number }>()
+export const session = Effect.fn('Lark.session')(function*() {
+  const { directory } = yield* IntegrationContext
+  const key = resolve(directory)
+  // Lookup and allocation are synchronous so two first callers cannot acquire different locks.
+  return yield* Effect.sync(() => {
+    let current = sessions.get(key)
+    if (!current) {
+      current = { lock: Semaphore.makeUnsafe(1), failures: 0 }
+      sessions.set(key, current)
+    }
+    return current
+  })
+})
+
+/** Resolves a supplied or persisted application without creating or changing it. */
+export const getApp = Effect.fn('Lark.getApp')(function*() {
+  const { directory } = yield* IntegrationContext
+  const supplied = yield* LarkApplication
+  return supplied === undefined ? yield* readState(join(directory, 'app.json'), LarkApp)
+    : yield* Schema.decodeUnknownEffect(LarkApp)(supplied)
+})
+
+/** Saved credentials are usable only for this app/brand and the full requested resource scope. */
+export function belongsToApp(saved: { clientId: string; brand: string } | undefined, app: LarkApp): boolean {
+  return saved?.clientId === app.clientId && saved.brand === app.brand
+}
+
+/** Scope changes require a new user grant; refreshing cannot manufacture missing permissions. */
+export function hasPermissions(saved: UserAuth | undefined): boolean {
+  return !!saved?.scope && larkScopes.every((scope) => saved.scope!.split(/\s+/).includes(scope))
+}
+
+/** Renews expiring credentials under the caller's installation lock; never initiates OAuth. */
+export const maintain = Effect.fn('Lark.maintain')(function*() {
+  const { directory } = yield* IntegrationContext
+  const current = yield* session()
+  const app = yield* getApp()
+  if (!app || current.rejected) return
+  const now = yield* Clock.currentTimeMillis
+  const appAuth = yield* readState(join(directory, 'app-auth.json'), AppAuth)
+  if (!appAuth || !belongsToApp(appAuth, app) || appAuth.expiresAt <= now + 60_000) {
+    yield* writeState(join(directory, 'app-auth.json'), yield* authorizeApp(app))
+  }
+  let saved = yield* readState(join(directory, 'auth.json'), UserAuth)
+  if (!saved || !belongsToApp(saved, app) || !hasPermissions(saved)) return
+  if (saved.expiresAt <= now + 60_000 && saved.refreshToken &&
+      (!saved.refreshExpiresAt || saved.refreshExpiresAt > now)) {
+    saved = { ...yield* refreshUser(app, saved), verified: false }
+    // Rotating the refresh token may invalidate the old pair. Commit before remote verification.
+    yield* writeState(join(directory, 'auth.json'), saved)
+  }
+  if (saved.expiresAt <= now) return
+  const identity = yield* userIdentity(app, saved.accessToken)
+  if (identity !== saved.openId) {
+    yield* writeState(join(directory, 'auth.json'), { ...saved, verified: false })
+    return yield* new AuthorizationRejected({ target: 'user' })
+  }
+  if (saved.verified === false) yield* writeState(join(directory, 'auth.json'), { ...saved, verified: true })
+})
+
+/** Remembers only rejection categories, never credential-bearing diagnostics. Transient errors remain retryable. */
+export const recover = maintain().pipe(
+  Effect.tap(() => Effect.flatMap(session(), (current) => Effect.sync(() => { current.failures = 0 }))),
+  Effect.catch((error) => Effect.gen(function*() {
+    const current = yield* session()
+    current.failures++
+    if (error instanceof AuthorizationRejected) current.rejected = error.target
+  }))
+)
+
+/** Lark chooses its own renewal deadline/backoff. Short idle wakes notice newly completed authorizations. */
+export const nextMaintenance = Effect.fn('Lark.nextMaintenance')(function*() {
+  const { directory } = yield* IntegrationContext
+  const current = yield* session()
+  const now = yield* Clock.currentTimeMillis
+  const app = yield* readState(join(directory, 'app-auth.json'), AppAuth)
+  const user = yield* readState(join(directory, 'auth.json'), UserAuth)
+  if (current.failures) {
+    // Retry before a still-valid token expires so the UI can reflect actual loss of availability.
+    const expiresIn = Math.min(app?.expiresAt ?? Infinity, user?.expiresAt ?? Infinity) - now
+    return Math.max(1000, Math.min(30_000 * 2 ** Math.min(current.failures - 1, 3), expiresIn > 0 ? expiresIn : Infinity))
+  }
+  const due = Math.min(app?.expiresAt ?? Infinity, user?.expiresAt ?? Infinity) - now - 60_000
+  return due > 0 ? Math.min(due, 60_000) : 30_000
+})
+
+/** Releases installation-local coordination after the host interrupts the provider runtime. */
+export const releaseSession = Effect.gen(function*() {
+  const { directory } = yield* IntegrationContext
+  sessions.delete(resolve(directory))
+})

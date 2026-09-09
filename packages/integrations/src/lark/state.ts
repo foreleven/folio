@@ -26,6 +26,7 @@ export const UserAuth = Schema.Struct({
   refreshToken: Schema.optional(Schema.String),
   refreshExpiresAt: Schema.optional(Schema.Number),
   scope: Schema.optional(Schema.String),
+  verified: Schema.optional(Schema.Boolean),
   openId: Schema.NonEmptyString
 })
 export type UserAuth = typeof UserAuth.Type

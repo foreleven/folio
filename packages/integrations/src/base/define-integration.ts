@@ -1,4 +1,4 @@
-import { Effect, Exit, Semaphore } from 'effect'
+import { Effect, Exit, Semaphore, Schema } from 'effect'
 import { resolve } from 'node:path'
 import { IntegrationContext, IntegrationError } from './integration.ts'
 import type { CheckResult, Integration, IntegrationDefinition, IntegrationEffect } from './integration.ts'
@@ -12,7 +12,7 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
     : new IntegrationError({ message: 'Could not complete the integration operation. Check files and connectivity.' })
 
   /** Publishes only persisted progress, then checks facts; all exit paths release live state. */
-  const run = Effect.fn('Integration.run')(function*(operation: IntegrationEffect<void, unknown, R>) {
+  const runOperation = Effect.fn('Integration.runOperation')(function*(operation: IntegrationEffect<void, unknown, R>) {
     const context = yield* IntegrationContext
     const key = resolve(context.directory)
     const token = Symbol(definition.id)
@@ -44,7 +44,7 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
 
   /** Starts only explicitly confirmed installation, then publishes a checked state. */
   const install = Effect.fn('Integration.install')(function*() {
-    yield* run(Effect.suspend(definition.install))
+    yield* runOperation(Effect.suspend(definition.install))
   }, lock.withPermit, Effect.mapError(sanitize))
 
   /** Read-only and nonblocking even while an action is waiting for a user callback. */
@@ -62,8 +62,16 @@ export function defineIntegration<R = never>(definition: IntegrationDefinition<R
     if (!current.actions.some((action) => action.id === actionId && action.type === 'callback')) {
       return yield* new IntegrationError({ message: 'This integration action is no longer available. Check again.' })
     }
-    yield* run(Effect.suspend(() => definition.onActionCallback(actionId, payload)))
+    const fields = definition.actions.find((action) => action.id === actionId)!.fields
+    if (fields?.length) {
+      const values = yield* Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.String))(payload).pipe(Effect.mapError(sanitize))
+      if (fields.some((field) => field.required && !values[field.id]?.trim())) {
+        return yield* new IntegrationError({ message: 'Complete the required fields.' })
+      }
+    }
+    yield* runOperation(Effect.suspend(() => definition.onActionCallback(actionId, payload)))
   }, lock.withPermit, Effect.mapError(sanitize))
 
-  return { ...definition, install, inspect, onActionCallback }
+  return { ...definition, install, inspect, onActionCallback,
+    run: definition.run ? () => Effect.suspend(definition.run!).pipe(Effect.mapError(sanitize)) : undefined }
 }

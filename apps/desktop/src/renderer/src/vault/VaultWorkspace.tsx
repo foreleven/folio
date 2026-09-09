@@ -1,5 +1,6 @@
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
+import { FileTextIcon, FolderIcon } from 'lucide-react'
 import { useEffect } from 'react'
 import { useLocale } from '../preferences'
 import { VaultRpcClient } from '../rpc/vault-rpc'
@@ -30,15 +31,32 @@ export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
   const vault = result.value
   return (
     <main className="flex h-svh min-h-0 flex-col bg-background">
-      <header className="flex min-h-9 shrink-0 items-center justify-between gap-3 border-b px-3 py-0.5">
+      <header className="flex h-9 shrink-0 items-center justify-between gap-3 border-b px-3">
         <h1 className="min-w-0 truncate text-ui font-semibold" title={vault.name}>{vault.name}</h1>
         <OpenVaultButton />
       </header>
-      <section className="flex min-h-0 flex-1 flex-col items-start gap-2 overflow-y-auto p-4">
-        <h2 className="text-sm leading-5 font-semibold">{chinese ? '知识库已打开' : 'Your vault is open'}</h2>
-        <p className="text-support text-muted-foreground">{chinese ? '此文件夹是你的个人 Wiki 文件存储位置。' : 'This folder is home to your personal wiki files.'}</p>
-        <code className="max-w-full text-support text-muted-foreground wrap-anywhere">{vault.path}</code>
-      </section>
+      <div className="flex min-h-0 flex-1">
+        <aside className="flex w-55 shrink-0 flex-col border-r bg-sidebar max-[700px]:w-45" aria-label={chinese ? '知识库' : 'Vault'}>
+          <div className="flex h-7 shrink-0 items-center border-b px-2 text-support font-medium text-muted-foreground">{chinese ? '知识库' : 'VAULT'}</div>
+          <div className="flex h-7 min-w-0 items-center gap-2 px-2 text-ui" title={vault.path}>
+            <FolderIcon className="size-4 shrink-0 text-primary" />
+            <span className="truncate">{vault.name}</span>
+          </div>
+        </aside>
+        <section className="flex min-w-0 flex-1 flex-col bg-background" aria-labelledby="vault-overview-title">
+          <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3 text-ui font-medium">
+            <FileTextIcon className="size-3.5 text-muted-foreground" />
+            <span>{chinese ? '概览' : 'Overview'}</span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <article className="mx-auto w-full max-w-190 px-6 py-6">
+              <h2 id="vault-overview-title" className="text-lg leading-6 font-semibold">{chinese ? '知识库已打开' : 'Your vault is open'}</h2>
+              <p className="mt-2 text-base leading-[26px] text-foreground">{chinese ? '此文件夹是你的个人 Wiki 文件存储位置。' : 'This folder is home to your personal wiki files.'}</p>
+              <code className="mt-4 block max-w-full border-l-2 border-primary/50 pl-3 text-support text-muted-foreground wrap-anywhere">{vault.path}</code>
+            </article>
+          </div>
+        </section>
+      </div>
     </main>
   )
 }

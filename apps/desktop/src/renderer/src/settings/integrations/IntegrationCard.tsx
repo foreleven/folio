@@ -1,6 +1,11 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { integrationText, type IntegrationActionDefinition } from '@folio/integrations/protocol'
 import { Button } from '@folio/ui/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@folio/ui/components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from '@folio/ui/components/ui/dropdown-menu'
+import { ExternalLinkIcon, MoreHorizontalIcon } from 'lucide-react'
 import type { IntegrationView } from '../../../../shared/integration'
+import { IntegrationActionForm } from './IntegrationActionForm'
 import { integrationMessages } from './messages'
 
 type Props = {
@@ -10,97 +15,101 @@ type Props = {
   error: boolean
   onInstall: () => void
   onInspect: () => void
-  onAction: (id: string) => void
+  onAction: (id: string, payload?: unknown) => Promise<void>
 }
 
-/** Presents checked actions in a compact row; authorization and failures keep details visible. */
+/** Renders only generic presentation/action contracts; provider identifiers never select UI behavior. */
 export function IntegrationCard({ integration, locale, pending, error, onInstall, onInspect, onAction }: Props): React.JSX.Element {
-  const rowRef = useRef<HTMLElement>(null)
-  const detailsRef = useRef<HTMLButtonElement>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
   const focusedRef = useRef<HTMLElement | null>(null)
-  const [expanded, setExpanded] = useState(false)
-  const detailsId = useId()
+  const [dialog, setDialog] = useState<'details' | IntegrationActionDefinition | null>(null)
   const text = integrationMessages[locale]
-  const isLark = integration.id === 'lark'
   const { record, busy } = integration
-  const state = record?.state ?? 'not_installed'
-  const ready = state === 'ready' && !record?.error
-  const status = record?.error ? text.unknown : state === 'checking' ? text.inspect : text.states[state as keyof typeof text.states] ?? text.unknown
+  const failed = error || !!record?.error
+  const status = record ? integration.states[record.state] : undefined
+  const label = failed ? text.unknown : !record ? text.notInstalled : status ? integrationText(status.label, locale)
+    : record.state === 'checking' ? text.checking : busy ? text.working : text.unknown
   const available = (record?.actions ?? []).flatMap((action) => {
     const definition = integration.actions.find((item) => item.id === action.id)
     return definition ? [{ ...definition, ...action }] : []
   })
-  const external = available.filter((action) => action.type === 'open-url')
-  const waiting = external.length > 0
-  const stage = ready ? 3 : ['login_required', 'authorizing', 'waiting_for_user', 'refreshing_auth'].includes(state) ? 2
-    : ['app_required', 'creating_app', 'waiting_for_app', 'app_authorization_required', 'verifying_app'].includes(state) ? 1 : 0
+  const primary = available.find((action) => action.primary)
+  const secondary = available.filter((action) => action.id !== primary?.id)
+  const form = dialog && dialog !== 'details' ? dialog : null
+  const statusColor = failed ? 'text-destructive' : status?.kind === 'ready' ? 'text-success'
+    : status?.kind === 'working' || status?.kind === 'waiting' ? 'text-progress'
+      : status?.kind === 'attention' ? 'text-warning' : 'text-muted-foreground'
 
-  const attention = waiting || error || !!record?.error
-  const showDetails = expanded || attention
-
-  // A checked action can disappear after completion; retain keyboard position in its row.
+  // A completed operation can remove its button; keep keyboard position on the provider row.
   useLayoutEffect(() => {
-    if (focusedRef.current && !focusedRef.current.isConnected && document.activeElement === document.body) {
-      detailsRef.current?.focus()
-    }
+    if (focusedRef.current && !focusedRef.current.isConnected && document.activeElement === document.body) moreRef.current?.focus()
   })
 
+  /** Forms collect inputs locally; non-form actions are acknowledged by the host and reported on the card. */
+  function invoke(action: typeof available[number]): void {
+    if (action.type === 'callback' && action.fields?.length) setDialog(action)
+    else void onAction(action.id).catch(() => undefined)
+  }
+
   return (
-    <article ref={rowRef} onFocusCapture={(event) => { focusedRef.current = event.target }} onBlurCapture={(event) => {
-      if (event.relatedTarget && !rowRef.current?.contains(event.relatedTarget)) focusedRef.current = null
-    }} aria-label={integration.name} className="@container/integration min-w-0 bg-background">
+    <article aria-label={integration.name} className="@container/integration min-w-0 bg-background"
+      onFocusCapture={(event) => { focusedRef.current = event.target }}
+      onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focusedRef.current = null }}>
       <div className="flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 px-2 py-2">
         <img src={integration.logo} alt={`${integration.name} logo`} className="size-6 shrink-0 object-contain" />
-        <div className="min-w-0 flex-1 basis-40">
+        <div className="min-w-0 flex-1 basis-48">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-            <h3 className="min-w-0 text-ui font-semibold wrap-anywhere"><a href={integration.homepage} target="_blank" rel="noreferrer" className="rounded-sm hover:underline focus-visible:outline-2 focus-visible:outline-ring">{integration.name}</a></h3>
-            <span role="status" className={`inline-flex items-center gap-1 text-support leading-5 ${ready ? 'text-success' : busy ? 'text-progress' : 'text-muted-foreground'}`}>
-              <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-current" />{status}
+            <h3 className="text-ui font-semibold wrap-anywhere">{integration.name}</h3>
+            <span role="status" className={`inline-flex items-center gap-1 text-support ${statusColor}`}>
+              <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />{label}
             </span>
           </div>
-          <p className="text-support text-muted-foreground wrap-anywhere">{integration.description}</p>
+          <p className="text-support text-muted-foreground wrap-anywhere">{integrationText(integration.description, locale)}</p>
         </div>
-        <div className="flex w-full flex-wrap items-center gap-2 @min-[560px]/integration:w-auto">
-          {!record ? <Button focusableWhenDisabled onClick={onInstall} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">{text.install} {integration.name}</Button> : (
-            <>
-              <Button focusableWhenDisabled variant="outline" onClick={onInspect} disabled={busy || pending}>{text.inspect}</Button>
-              {!busy ? available.filter((action) => action.type === 'callback').map((action, index) => (
-                <Button focusableWhenDisabled key={action.id} variant={index === 0 ? 'default' : 'outline'} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere text-left" onClick={() => onAction(action.id)}>
-                  {isLark ? text.actions[action.id as keyof typeof text.actions] ?? action.label : action.label}
-                </Button>
-              )) : null}
-            </>
-          )}
-          <Button ref={detailsRef} variant="ghost" aria-expanded={showDetails} aria-controls={detailsId} onClick={() => { if (!attention) setExpanded(!showDetails) }} aria-disabled={attention}>
-            {locale === 'en' ? 'Details' : '详情'}<span aria-hidden="true">{showDetails ? '⌃' : '⌄'}</span>
-          </Button>
+        <div className="ml-auto flex w-full items-center justify-end gap-1 @min-[560px]/integration:w-auto">
+          {!record ? <Button focusableWhenDisabled onClick={onInstall} disabled={pending}>{text.install}</Button>
+            : primary ? <Button focusableWhenDisabled onClick={() => invoke(primary)} disabled={pending || (busy && primary.type === 'callback')}
+              className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">
+              {integrationText(primary.label, locale)}{primary.type === 'open-url' ? <ExternalLinkIcon /> : null}
+            </Button> : null}
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button ref={moreRef} variant="ghost" size="icon" aria-label={`${text.more} · ${integration.name}`} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuGroup>
+                {secondary.map((action) => <DropdownMenuItem key={action.id} disabled={pending || (busy && action.type === 'callback')} onClick={() => invoke(action)}>
+                  {integrationText(action.label, locale)}{action.type === 'open-url' ? <ExternalLinkIcon /> : null}
+                </DropdownMenuItem>)}
+                {record ? <DropdownMenuItem disabled={busy || pending} onClick={onInspect}>{text.inspect}</DropdownMenuItem> : null}
+                <DropdownMenuItem onClick={() => setDialog('details')}>{text.details}</DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
-      {!record || state === 'install_required' ? <p className="px-2 pb-2 text-support text-muted-foreground">{isLark ? text.larkInstallHint : text.installHint}</p> : null}
-      <div id={detailsId} hidden={!showDetails} className="space-y-3 border-t bg-muted/30 p-3">
-        {record ? <p className="text-support text-muted-foreground">{text.scope}</p> : null}
-        <div className="flex flex-wrap gap-2 text-support text-muted-foreground wrap-anywhere" aria-label={locale === 'en' ? 'Resources' : '资源'}>
-          {integration.resources.map((resource) => <span key={resource.id}>{isLark && resource.id === 'im' ? text.im : isLark && resource.id === 'email' ? text.email : resource.name}</span>)}
-        </div>
-        {isLark && record && !ready ? (
-          <ol aria-label={locale === 'en' ? 'Setup progress' : '安装进度'} className="flex flex-wrap gap-3">
-            {[text.tools, text.app, text.account].map((label, index) => (
-              <li key={label} aria-current={index === stage ? 'step' : undefined} className={`flex items-center gap-1 text-support ${index <= stage ? 'text-foreground' : 'text-muted-foreground'}`}>
-                <span aria-hidden="true">{index < stage ? '✓' : `${index + 1}.`}</span>{label}
-              </li>
-            ))}
-          </ol>
-        ) : null}
-        {error || record?.error ? <p role="alert" className="text-support text-destructive wrap-anywhere">{text.failed}</p> : null}
-        {waiting ? (
-          <div className="space-y-2 text-progress">
-            {external.map((action) => <div key={action.id} className="space-y-2">
-              {action.description ? <p className="text-support">{action.description}</p> : null}
-              <Button focusableWhenDisabled onClick={() => onAction(action.id)} disabled={pending} className="h-auto min-h-7 max-w-full whitespace-normal wrap-anywhere">{isLark ? text.actions[action.id as keyof typeof text.actions] ?? action.label : action.label}<span aria-hidden="true">↗</span></Button>
-            </div>)}
-          </div>
-        ) : record && !ready ? <p className="text-support text-muted-foreground">{busy ? text.working : text.intro}</p> : null}
-      </div>
+      {failed || status?.description ? <div className="border-t bg-muted/30 pr-2 pl-11 py-2">
+        <p role={failed ? 'alert' : undefined} className={failed ? 'text-support text-destructive wrap-anywhere' : 'text-support text-muted-foreground wrap-anywhere'}>
+          {failed ? text.failed : status?.description ? integrationText(status.description, locale) : null}
+        </p>
+      </div> : null}
+      <Dialog open={dialog !== null} onOpenChange={(open) => { if (!open) setDialog(null) }}>
+        {dialog ? <DialogContent showCloseButton={false} finalFocus={moreRef} className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{form ? integrationText(form.label, locale) : integration.name}</DialogTitle>
+            <DialogDescription>{form?.description ? integrationText(form.description, locale) : integrationText(integration.description, locale)}</DialogDescription>
+          </DialogHeader>
+          {form ? <IntegrationActionForm key={form.id} action={form} locale={locale}
+            available={available.some((action) => action.id === form.id && action.type === 'callback')}
+            onSubmit={(payload) => onAction(form.id, payload)} onClose={() => setDialog(null)} /> : <>
+            {record ? <p className="text-support text-muted-foreground">{text.scope}</p> : null}
+            <div className="flex flex-col gap-2">
+              <h4 className="text-ui font-medium">{text.resources}</h4>
+              <ul className="divide-y border-y text-support">{integration.resources.map((resource) => <li className="py-1.5" key={resource.id}>{integrationText(resource.name, locale)}</li>)}</ul>
+            </div>
+            <a href={integration.homepage} target="_blank" rel="noreferrer" className="inline-flex w-fit items-center gap-1 text-support text-muted-foreground underline underline-offset-4">{integration.name}<ExternalLinkIcon className="size-3" /></a>
+            <DialogFooter><Button variant="outline" onClick={() => setDialog(null)}>{text.close}</Button></DialogFooter>
+          </>}
+        </DialogContent> : null}
+      </Dialog>
     </article>
   )
 }

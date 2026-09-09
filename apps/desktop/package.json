@@ -19,6 +19,7 @@
     "@folio/integrations": "file:../../packages/integrations",
     "@folio/ui": "file:../../packages/ui",
     "effect": "^4.0.0-rc.112",
+    "lucide-react": "^1.42.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "uuid": "^14.0.2"

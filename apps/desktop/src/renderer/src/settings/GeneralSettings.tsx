@@ -52,8 +52,8 @@ export function GeneralSettings(): React.JSX.Element {
         </div>
       ) : (
         <section aria-label={text.general} className="flex flex-col gap-4">
-          <FieldGroup className="gap-0 divide-y">
-            <Field orientation="setting" data-disabled={status === 'saving'}>
+          <FieldGroup className="gap-0 divide-y border-y">
+            <Field orientation="setting" className="px-2" data-disabled={status === 'saving'}>
               <FieldContent>
                 <FieldTitle id="theme-label">{text.theme}</FieldTitle>
                 <FieldDescription id="theme-description">{text.themeDescription}</FieldDescription>
@@ -63,7 +63,8 @@ export function GeneralSettings(): React.JSX.Element {
                 aria-describedby="theme-description"
                 variant="outline"
                 size="default"
-                className="max-w-full flex-wrap"
+                spacing={0}
+                className="max-w-full flex-wrap overflow-hidden rounded-md border border-input [&_[data-slot=toggle]]:border-0"
                 value={[config.value.theme]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {
@@ -78,7 +79,7 @@ export function GeneralSettings(): React.JSX.Element {
                 <ToggleGroupItem value="dark">{text.dark}</ToggleGroupItem>
               </ToggleGroup>
             </Field>
-            <Field orientation="setting" data-disabled={status === 'saving'}>
+            <Field orientation="setting" className="px-2" data-disabled={status === 'saving'}>
               <FieldContent>
                 <FieldTitle id="language-label">{text.language}</FieldTitle>
                 <FieldDescription id="language-description">{text.languageDescription}</FieldDescription>
@@ -88,7 +89,8 @@ export function GeneralSettings(): React.JSX.Element {
                 aria-describedby="language-description"
                 variant="outline"
                 size="default"
-                className="max-w-full flex-wrap"
+                spacing={0}
+                className="max-w-full flex-wrap overflow-hidden rounded-md border border-input [&_[data-slot=toggle]]:border-0"
                 value={[config.value.language]}
                 aria-disabled={status === 'saving'}
                 onValueChange={(values, details) => {

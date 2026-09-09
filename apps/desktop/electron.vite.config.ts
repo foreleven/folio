@@ -24,6 +24,8 @@ export default defineConfig({
   },
   renderer: {
     resolve: {
+      // Workspace UI dependencies must share the renderer's React dispatcher.
+      dedupe: ['react', 'react-dom'],
       alias: {
         '@renderer': resolve('src/renderer/src')
       }

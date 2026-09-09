@@ -7,7 +7,7 @@ import { ReadStream } from 'node:tty'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { lark } from '../src/lark/index.ts'
-import { IntegrationContext, IntegrationError } from '../src/base/index.ts'
+import { IntegrationText, integrationText, IntegrationContext, IntegrationError } from '../src/base/index.ts'
 import { readState, writeState } from '../src/lark/state.ts'
 
 /** Live installation test: confirms each action and passes only after readiness and resource registration. */
@@ -29,7 +29,7 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
     const directory = join(process.env.FOLIO_CONFIG_DIR || join(homedir(), '.folio'), 'integrations', 'lark')
     const fs = yield* FileSystem.FileSystem
     yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
-    const ResourceMetadata = Schema.Struct({ id: Schema.String, name: Schema.String })
+    const ResourceMetadata = Schema.Struct({ id: Schema.String, name: IntegrationText })
     const registered = new Map(((yield* readState(join(directory, 'resources.json'), Schema.Array(ResourceMetadata))) ?? [])
       .map((resource) => [resource.id, resource]))
     const context: IntegrationContext["Service"] = {
@@ -50,6 +50,7 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
     if (yield* readState(join(directory, 'installed.json'), Schema.Boolean)) {
       for (const resource of lark.resources) yield* context.registerResource(resource)
     }
+    yield* lark.run!().pipe(Effect.provideService(IntegrationContext, context), Effect.forkScoped)
     while (true) {
       const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, context))
       if (result.state === 'ready') {
@@ -58,8 +59,9 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('installs Lark through confirmed 
         return
       }
       const action = lark.actions.find((item) => result.actions.some((action) => action.id === item.id && action.type === 'callback'))
+      if (!action && result.state === 'recovering') { yield* Effect.sleep('1 second'); continue }
       if (!action) return yield* new IntegrationError({ message: `No action available for state: ${result.state}` })
-      const answer = yield* Effect.promise((signal) => terminal.question(`${action.label}? [y/N] `, { signal }))
+      const answer = yield* Effect.promise((signal) => terminal.question(`${integrationText(action.label, 'zh-CN')}? [y/N] `, { signal }))
       if (answer.toLowerCase() !== 'y') return yield* new IntegrationError({ message: 'Installation cancelled before reaching ready.' })
       yield* lark.onActionCallback(action.id).pipe(Effect.provideService(IntegrationContext, context))
     }

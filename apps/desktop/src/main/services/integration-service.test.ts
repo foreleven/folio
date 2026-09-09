@@ -18,15 +18,18 @@ beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), 'folio-integra
 afterEach(async () => { await rm(directory, { recursive: true, force: true }) })
 
 /** Fake provider holds OAuth in flight while exercising the real SQL store, stream, and service scope. */
-function fixture() {
+function fixture(background = false, form = false) {
   let phase = 'install_required'
   let awaiting = false
   const authorization = Effect.runSync(Deferred.make<void>())
-  const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, url: 'https://accounts.notes.example/connect' }
+  const checkStarted = Effect.runSync(Deferred.make<void>())
+  const checkResume = Effect.runSync(Deferred.make<void>())
+  const state = { installs: 0, checks: 0, actions: 0, failInstall: false, failCheck: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
   const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
-    id: 'notes', name: 'Notes', description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
-    resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize' }, { id: 'open', label: 'Open account page' }],
+    id: 'notes', name: 'Notes', description: 'Test provider', states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
+    run: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
+    resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }, { id: 'open', label: 'Open account page' }],
     install: () => Effect.gen(function*() {
       const context = yield* IntegrationContext
       state.installs++
@@ -38,12 +41,15 @@ function fixture() {
     inspect: () => Effect.gen(function*() {
       state.checks++
       if (state.failCheck) return yield* new IntegrationError({ message: 'network error' })
-      return awaiting ? { state: 'awaiting_browser', actions: [{ id: 'open', type: 'open-url' as const, url: state.url }] }
+      const snapshot = awaiting ? { state: 'awaiting_browser', actions: [{ id: 'open', type: 'open-url' as const, url: state.url }] }
         : { state: phase, actions: phase === 'ready' ? [] : [{ id: phase === 'install_required' ? 'install' : 'authorize', type: 'callback' as const }] }
+      if (state.holdCheck) { yield* Deferred.succeed(checkStarted, undefined); yield* Deferred.await(checkResume) }
+      return snapshot
     }),
-    onActionCallback: (action) => action === 'install' ? integration.install() : Effect.gen(function*() {
+    onActionCallback: (action, payload) => action === 'install' ? integration.install() : Effect.gen(function*() {
       const context = yield* IntegrationContext
       state.actions++
+      state.payload = payload
       awaiting = true
       yield* Effect.gen(function*() {
         yield* context.writeState('awaiting_browser', { providerData: { arbitrary: ['kept', 1] } }, [{ id: 'open', type: 'open-url', url: state.url }])
@@ -69,7 +75,8 @@ function fixture() {
     expect(view[0].record?.state).toBe(expected)
     return view[0]
   }, { timeout: 5000, interval: 10 })
-  return { runtime, service, settled, state, opened, authorization, layer }
+  return { runtime, service, settled, state, opened, authorization, layer, integration, checkStarted, checkResume,
+    publish: (next: string) => Effect.gen(function*() { phase = next; yield* state.context!.writeState(next, {}, []) }) }
 }
 
 /** Queries the physical table from another connection to prove actual SQLite persistence. */
@@ -114,7 +121,7 @@ describe('desktop integration lifecycle', () => {
       const initial = await f.runtime.runPromise(Stream.runHead(s.watch))
       expect(initial).toBeDefined()
       expect(Option.getOrThrow(initial)[0]).toMatchObject({
-        description: 'Test provider', logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test'
+        description: 'Test provider', states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test'
       })
       expect(rows()).toEqual([])
       expect(f.state.installs).toBe(0)
@@ -249,4 +256,61 @@ describe('desktop integration lifecycle', () => {
       await f.settled('login_required')
     } finally { await f.runtime.dispose() }
   })
+  it('passes form inputs only to the callback and never stores or streams credentials', async () => {
+    const f = fixture(false, true)
+    try {
+      const s = await f.service()
+      await f.runtime.runPromise(s.install('notes'))
+      await f.settled('login_required')
+      for (const invalid of [undefined, {}, { accessKey: '   ' }]) {
+        await expect(f.runtime.runPromise(s.action('notes', 'authorize', invalid))).rejects.toThrow()
+      }
+      expect(f.state.actions).toBe(0)
+      const payload = { accessKey: 'test-private-access-key' }
+      await f.runtime.runPromise(s.action('notes', 'authorize', payload))
+      await vi.waitFor(() => expect(f.state.payload).toEqual(payload))
+      expect(JSON.stringify(rows())).not.toContain(payload.accessKey)
+      expect(JSON.stringify(await f.runtime.runPromise(s.list))).not.toContain(payload.accessKey)
+      await f.runtime.runPromise(Deferred.succeed(f.authorization, undefined))
+      await f.settled('ready')
+    } finally { await f.runtime.dispose() }
+  })
+
+  it('starts a provider lifetime once after installation and stops it with the host scope', async () => {
+    const f = fixture(true)
+    const s = await f.service()
+    expect(f.state.starts).toBe(0)
+    await f.runtime.runPromise(s.install('notes'))
+    await f.settled('login_required')
+    await f.runtime.runPromise(s.inspect('notes'))
+    await f.settled('login_required')
+    expect(f.state.starts).toBe(1)
+    expect(f.state.stops).toBe(0)
+    await f.runtime.dispose()
+    expect(f.state.stops).toBe(1)
+    const next = ManagedRuntime.make(f.layer)
+    try {
+      await next.runPromise(IntegrationService)
+      await vi.waitFor(() => expect(f.state.starts).toBe(2))
+      expect(f.state.installs).toBe(1)
+    } finally { await next.dispose() }
+    expect(f.state.stops).toBe(2)
+  })
+
+  it('does not replace a newer background publication with an inspection that began earlier', async () => {
+    const f = fixture(true)
+    try {
+      const s = await f.service()
+      await f.runtime.runPromise(s.install('notes'))
+      await f.settled('login_required')
+      f.state.holdCheck = true
+      await f.runtime.runPromise(s.inspect('notes'))
+      await f.runtime.runPromise(Deferred.await(f.checkStarted))
+      await f.runtime.runPromise(f.publish('ready'))
+      await f.runtime.runPromise(Deferred.succeed(f.checkResume, undefined))
+      await f.settled('ready')
+      expect(rows()[0].state).toBe('ready')
+    } finally { await f.runtime.dispose() }
+  })
+
 })

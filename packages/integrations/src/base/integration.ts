@@ -1,8 +1,7 @@
 import { Context, Schema } from 'effect'
 import type { Effect } from 'effect'
-import type { IntegrationAction, IntegrationActionDefinition } from './protocol.ts'
+import type { IntegrationAction, IntegrationActionDefinition, IntegrationStatus, IntegrationText } from './protocol.ts'
 
-export const readyState = 'ready'
 export class IntegrationError extends Schema.TaggedError<IntegrationError>()('IntegrationError', {
   message: Schema.String
 }) {}
@@ -13,10 +12,11 @@ export interface IntegrationMetadata {
   /** Stable storage/registry key; changing it creates a different installation. */
   readonly id: string
   readonly name: string
-  readonly description: string
+  readonly description: IntegrationText
   /** Bundled image data URI; renders offline without remote requests or filesystem access. */
   readonly logo: string
   readonly homepage: string
+  readonly states: Readonly<Record<string, IntegrationStatus>>
 }
 
 export interface CheckResult {
@@ -40,18 +40,20 @@ export interface IngestContext {
 }
 export interface IntegrationResource {
   readonly id: string
-  readonly name: string
-  readonly description?: string
+  readonly name: IntegrationText
+  readonly description?: IntegrationText
   /** Reserved for enriching an agent run; does not execute the agent. */
   readonly onIngest: (context: IngestContext) => Effect.Effect<void, IntegrationError>
 }
 export interface Integration<R = never> extends IntegrationMetadata {
+  /** Optional provider-owned background lifetime. Host starts it once for installed integrations and interrupts on exit. */
+  readonly run?: () => IntegrationEffect<void, IntegrationError, R>
   readonly actions: readonly IntegrationActionDefinition[]
   /** Static implementations allow the host to rebind persisted resources after restart. */
   readonly resources: readonly IntegrationResource[]
   /** Called after user confirmation; prepares dependencies and registers resources only. */
   readonly install: () => IntegrationEffect<void, IntegrationError, R>
-  /** Read-only inspection. Only ready is successful; never initiates setup or OAuth. */
+  /** Read-only inspection. State IDs are opaque; states[state].kind describes availability. */
   readonly inspect: () => IntegrationEffect<CheckResult, IntegrationError, R>
   /** Handles a user action; validates that it still applies before any side effect. */
   readonly onActionCallback: (actionId: string, payload?: unknown) => IntegrationEffect<void, IntegrationError, R>
@@ -59,6 +61,8 @@ export interface Integration<R = never> extends IntegrationMetadata {
 
 /** Provider hooks contain only provider-specific work; the base wraps their lifecycle and errors. */
 export interface IntegrationDefinition<R = never> extends IntegrationMetadata {
+  /** Owns background work and retry policy; never requires a host scheduler. */
+  readonly run?: () => IntegrationEffect<void, unknown, R>
   readonly actions: readonly IntegrationActionDefinition[]
   readonly resources: readonly IntegrationResource[]
   /** Installs dependencies and upserts resources; the base publishes the final inspect. */

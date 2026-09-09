@@ -1,6 +1,6 @@
 import { Context, Deferred, Effect, Layer } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
-import { defineIntegration, IntegrationContext, IntegrationError, readyState } from './index.ts'
+import { defineIntegration, IntegrationContext, IntegrationError } from './index.ts'
 
 /** Builds the callback protocol used by provider fixtures. */
 const callback = (id: string) => ({ id, type: 'callback' as const })
@@ -11,7 +11,7 @@ function run<A, E>(effect: Effect.Effect<A, E>, signal?: AbortSignal) {
 }
 
 /** A second, deliberately non-Lark provider demonstrates the reusable lifecycle contract. */
-function provider(id = 'notes') {
+function provider(id = 'notes', form = false) {
   let phase = 'setup_required'
   const completion = Effect.runSync(Deferred.make<void>())
   const writes: { state: string; data: unknown }[] = []
@@ -28,8 +28,8 @@ function provider(id = 'notes') {
   const resource = { id: 'pages', name: 'Pages', onIngest: () => Effect.void }
   const integration = defineIntegration({
     id, name: 'Notes', description: 'Personal notes', homepage: 'https://notes.example',
-    logo: 'data:image/svg+xml,%3Csvg%2F%3E', resources: [resource],
-    actions: [{ id: 'connect', label: 'Connect account' }],
+    states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', resources: [resource],
+    actions: [{ id: 'connect', label: 'Connect account', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }],
     inspect: () => Effect.succeed({ state: phase, actions: (phase === 'account_required' ? ['connect'] : []).map(callback) }),
     install: () => Effect.gen(function*() {
       const ctx = yield* IntegrationContext
@@ -45,7 +45,7 @@ function provider(id = 'notes') {
       yield* ctx.writeState('waiting_for_account', { arbitrary: ['provider data', 1] })
       if (controls.fail) return yield* Effect.fail(new Error('private SDK token'))
       if (controls.hold) yield* Deferred.await(completion)
-      phase = readyState
+      phase = 'ready'
     })
   })
   return { integration, context, writes, registered, controls, completion }
@@ -56,7 +56,7 @@ describe('integration base', () => {
     class Account extends Context.Service<Account, { readonly name: string }>()('test/Account') {}
     const seen: string[] = []
     const integration = defineIntegration({
-      id: 'account', name: 'Account', description: 'DI fixture', logo: '', homepage: '', actions: [], resources: [],
+      id: 'account', name: 'Account', description: 'DI fixture', states: {}, logo: '', homepage: '', actions: [], resources: [],
       install: Effect.fn('Test.install')(function*() {
         const host = yield* IntegrationContext
         const account = yield* Account
@@ -112,7 +112,7 @@ describe('integration base', () => {
     const payload = { callback: ['text', 123] }
     await run(p.integration.onActionCallback('connect', payload).pipe(Effect.provideService(IntegrationContext, p.context)))
     expect(p.controls.payload).toEqual(payload)
-    expect(p.writes.at(-1)).toEqual({ state: readyState, data: {} })
+    expect(p.writes.at(-1)).toEqual({ state: 'ready', data: {} })
     await expect(run(p.integration.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, p.context)))).rejects.toThrow('no longer available')
     expect(p.controls.calls).toBe(1)
   })
@@ -121,7 +121,7 @@ describe('integration base', () => {
     const p = provider()
     const onActionCallback = vi.fn(() => Effect.void)
     const integration = defineIntegration({
-      id: 'external', name: 'External', description: 'Protocol fixture', logo: '', homepage: '', resources: [],
+      id: 'external', name: 'External', description: 'Protocol fixture', states: {}, logo: '', homepage: '', resources: [],
       actions: [{ id: 'open', label: 'Open setup' }],
       install: () => Effect.void,
       inspect: () => Effect.succeed({ state: 'attention', actions: [{ id: 'open', type: 'open-url' as const, url: 'https://provider.example' }] }),
@@ -146,7 +146,7 @@ describe('integration base', () => {
       await vi.waitFor(() => expect(first.writes.at(-1)?.state).toBe('waiting_for_account'))
       expect(await run(first.integration.inspect().pipe(Effect.provideService(IntegrationContext, first.context)))).toEqual({ state: 'waiting_for_account', actions: [] })
       await run(second.integration.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, second.context)))
-      expect(await run(second.integration.inspect().pipe(Effect.provideService(IntegrationContext, second.context)))).toEqual({ state: readyState, actions: [] })
+      expect(await run(second.integration.inspect().pipe(Effect.provideService(IntegrationContext, second.context)))).toEqual({ state: 'ready', actions: [] })
     } finally { await Effect.runPromise(Deferred.succeed(first.completion, undefined)) }
     expect((await attempts).map((result) => result.status)).toEqual(['fulfilled', 'rejected'])
     expect(first.controls.calls).toBe(1)
@@ -163,7 +163,7 @@ describe('integration base', () => {
     expect((await run(p.integration.inspect().pipe(Effect.provideService(IntegrationContext, p.context)))).state).toBe('account_required')
     p.controls.fail = false
     await run(p.integration.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, p.context)))
-    expect((await run(p.integration.inspect().pipe(Effect.provideService(IntegrationContext, p.context)))).state).toBe(readyState)
+    expect((await run(p.integration.inspect().pipe(Effect.provideService(IntegrationContext, p.context)))).state).toBe('ready')
   })
 
   it('clears live state even when persisting the failure also fails', async () => {
@@ -191,7 +191,22 @@ describe('integration base', () => {
     p.controls.hold = false
     await run(p.integration.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, p.context)))
     await run(late.writeState('obsolete', { stale: true }, [{ id: 'open', type: 'open-url', url: 'https://expired.example' }]))
-    expect(p.writes.at(-1)?.state).toBe(readyState)
-    expect((await run(p.integration.inspect().pipe(Effect.provideService(IntegrationContext, p.context)))).state).toBe(readyState)
+    expect(p.writes.at(-1)?.state).toBe('ready')
+    expect((await run(p.integration.inspect().pipe(Effect.provideService(IntegrationContext, p.context)))).state).toBe('ready')
   })
+  it('validates declared inputs before provider side effects and never echoes submitted secrets', async () => {
+    const p = provider('keys', true)
+    await run(p.integration.install().pipe(Effect.provideService(IntegrationContext, p.context)))
+    for (const payload of [undefined, {}, { accessKey: '   ' }, { accessKey: { secret: 'do-not-echo' } }]) {
+      const error = await run(Effect.flip(p.integration.onActionCallback('connect', payload).pipe(Effect.provideService(IntegrationContext, p.context))))
+      expect(error._tag).toBe('IntegrationError')
+      expect(JSON.stringify(error)).not.toContain('do-not-echo')
+      expect(p.controls.calls).toBe(0)
+    }
+    const payload = { accessKey: 'private-test-key' }
+    await run(p.integration.onActionCallback('connect', payload).pipe(Effect.provideService(IntegrationContext, p.context)))
+    expect(p.controls.payload).toEqual(payload)
+    expect(JSON.stringify(p.writes)).not.toContain('private-test-key')
+  })
+
 })

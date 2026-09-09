@@ -18,7 +18,7 @@ export class IntegrationStore extends Context.Service<IntegrationStore, {
   readonly list: Effect.Effect<readonly IntegrationRecord[], IntegrationSettingsError>
   readonly create: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly update: (id: string, state: string, data: unknown, actions: IntegrationRecord['actions'], error?: string) => Effect.Effect<void, IntegrationSettingsError>
-  readonly register: (id: string, resource: { id: string; name: string }) => Effect.Effect<void, IntegrationSettingsError>
+  readonly register: (id: string, resource: IntegrationRecord['resources'][number]) => Effect.Effect<void, IntegrationSettingsError>
 }>()('folio/services/IntegrationStore') {
   static readonly layer = Layer.effect(IntegrationStore, Effect.gen(function*() {
     const { directory } = yield* ConfigService
@@ -56,7 +56,7 @@ export class IntegrationStore extends Context.Service<IntegrationStore, {
       if (changed.length === 0) return yield* storageError()
     }, Effect.mapError(storageError))
     /** Upserts metadata transactionally so installing twice does not duplicate resources. */
-    const register = Effect.fn('IntegrationStore.register')(function*(id: string, resource: { id: string; name: string }) {
+    const register = Effect.fn('IntegrationStore.register')(function*(id: string, resource: IntegrationRecord['resources'][number]) {
       yield* sql.withTransaction(Effect.gen(function*() {
         const record = (yield* list).find((row) => row.id === id)
         if (!record) return yield* storageError()

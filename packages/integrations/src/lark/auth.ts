@@ -9,6 +9,11 @@ import type { UserAuth } from './state.ts'
 const discardLog = () => {}
 const sdkLogger = { error: discardLog, warn: discardLog, info: discardLog, debug: discardLog, trace: discardLog }
 
+/** Distinguishes credentials that need user intervention from retryable transport failures. */
+export class AuthorizationRejected extends Schema.TaggedError<AuthorizationRejected>()('AuthorizationRejected', {
+  target: Schema.Literals(['app', 'user'])
+}) {}
+
 interface AuthorizationRequest { step: 'app' | 'user'; url: string; expiresIn: number }
 
 export const larkScopes = [
@@ -49,6 +54,7 @@ const request = Effect.fn('Lark.authRequest')(function*<A>(url: string, init: Re
     },
     catch: () => new IntegrationError({ message: 'Could not reach the Lark authorization endpoint.' })
   }).pipe(Effect.timeout('30 seconds'))
+  if (response.status >= 500 || response.status === 429) return yield* new IntegrationError({ message: 'Lark authorization is temporarily unavailable.' })
   const body = yield* Schema.decodeUnknownEffect(schema)(response.body).pipe(
     Effect.mapError(() => new IntegrationError({ message: `Invalid Lark authorization response (HTTP ${response.status}).` }))
   )
@@ -69,6 +75,8 @@ export const authorizeApp = Effect.fn('Lark.authorizeApp')(function*(app: LarkAp
     }),
     catch: () => new IntegrationError({ message: 'Could not verify Lark application credentials.' })
   }).pipe(Effect.timeout('30 seconds'))
+  const result = yield* Schema.decodeUnknownEffect(Schema.Struct({ code: Schema.Number }))(body).pipe(Effect.mapError(() => new IntegrationError({ message: 'Invalid Lark application response.' })))
+  if (result.code !== 0) return yield* new AuthorizationRejected({ target: 'app' })
   const token = yield* Schema.decodeUnknownEffect(Schema.Struct({
     code: Schema.Literal(0), app_access_token: Schema.NonEmptyString,
     tenant_access_token: Schema.optional(Schema.NonEmptyString),
@@ -147,19 +155,25 @@ export const authorizeUser = Effect.fn('Lark.authorizeUser')(function*(
 
 /** Exchanges the refresh token; persist the rotated pair before remote verification to survive network failures. */
 export const refreshUser = Effect.fn('Lark.refreshUser')(function*(app: LarkApp, saved: UserAuth) {
-  if (!saved.refreshToken) return yield* new IntegrationError({ message: 'User authorization must be renewed.' })
+  if (!saved.refreshToken) return yield* new AuthorizationRejected({ target: 'user' })
   const result = yield* request(`${endpoints(app).open}/open-apis/authen/v2/oauth/token`, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: app.clientId, client_secret: app.clientSecret,
       grant_type: 'refresh_token', refresh_token: saved.refreshToken }).toString()
   }, TokenResponse)
   const token = result.body
+  if (token.error && ['invalid_grant', 'invalid_token', 'access_denied'].includes(token.error)) {
+    return yield* new AuthorizationRejected({ target: 'user' })
+  }
+  if (token.error && ['invalid_client', 'unauthorized_client'].includes(token.error)) {
+    return yield* new AuthorizationRejected({ target: 'app' })
+  }
   if (!result.ok || token.error || !token.access_token || !token.expires_in) {
-    return yield* new IntegrationError({ message: 'Lark could not refresh user authorization. Authorize again.' })
+    return yield* new IntegrationError({ message: 'Lark could not refresh authorization. Retrying automatically.' })
   }
   const scope = token.scope ?? saved.scope
   if (!scope || larkScopes.some((required) => !scope.split(/\s+/).includes(required))) {
-    return yield* new IntegrationError({ message: 'Lark did not grant all requested Lark permissions.' })
+    return yield* new AuthorizationRejected({ target: 'user' })
   }
   const now = yield* Clock.currentTimeMillis
   return {

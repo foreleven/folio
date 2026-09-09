@@ -25,7 +25,7 @@ export function IntegrationsSettings(): React.JSX.Element {
     inFlight.current.add(id)
     setPending([...inFlight.current])
     setErrors((current) => current.filter((entry) => entry !== id))
-    try { await operation() } catch { setErrors((current) => [...current, id]) }
+    try { await operation() } catch (error) { setErrors((current) => [...current, id]); throw error }
     finally { inFlight.current.delete(id); setPending([...inFlight.current]) }
   }
   if (result._tag === 'Failure') return (
@@ -33,13 +33,13 @@ export function IntegrationsSettings(): React.JSX.Element {
   )
   if (result._tag !== 'Success') return <div role="status" aria-label={text.loading}><Skeleton className="h-16 w-full rounded-none" /></div>
   return (
-    <section aria-label={text.available} className="flex flex-col">
+    <section aria-label={text.available} className="@container/integrations">
       <div className="divide-y border-y">
       {result.value.map((integration) => (
         <IntegrationCard key={integration.id} integration={integration} locale={locale} pending={pending.includes(integration.id)} error={errors.includes(integration.id)}
-          onInstall={() => { void submit(integration.id, () => install({ payload: { id: integration.id } })) }}
-          onInspect={() => { void submit(integration.id, () => inspect({ payload: { id: integration.id } })) }}
-          onAction={(actionId) => { void submit(integration.id, () => action({ payload: { id: integration.id, actionId } })) }}
+          onInstall={() => { void submit(integration.id, () => install({ payload: { id: integration.id } })).catch(() => undefined) }}
+          onInspect={() => { void submit(integration.id, () => inspect({ payload: { id: integration.id } })).catch(() => undefined) }}
+          onAction={(actionId, payload) => submit(integration.id, () => action({ payload: { id: integration.id, actionId, payload } }))}
         />
       ))}
       </div>

@@ -22,7 +22,7 @@ export function Settings(): React.JSX.Element {
       <SidebarInset aria-labelledby="settings-page-title" className="min-h-0 min-w-0 overflow-hidden">
         <header className="flex h-10 shrink-0 items-center px-4">
           <h2 id="settings-page-title" className="text-sm leading-5 font-semibold">
-              {page === 'general' ? text.general : page === 'integrations' ? text.integrations : text.models}
+            {page === 'general' ? text.general : page === 'integrations' ? text.integrations : text.models}
           </h2>
         </header>
         <Separator />
