@@ -9,7 +9,7 @@ vi.mock('@effect/atom-react', () => ({
   useAtomSet: () => update,
   useAtomValue: () => ({ _tag: 'Success', value: { theme: 'light', language: 'en', vaults: [] } })
 }))
-vi.mock('../rpc/config-rpc', () => ({ configAtom: {}, ConfigRpcClient: { update: {} } }))
+vi.mock('../rpc/config-rpc', () => ({ ConfigRpcClient: { watch: {}, update: {} } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
 afterEach(() => { cleanup(); vi.resetAllMocks() })
 

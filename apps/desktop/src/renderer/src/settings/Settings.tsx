@@ -3,7 +3,7 @@ import { SidebarInset, SidebarProvider } from '@folio/ui/components/ui/sidebar'
 import { useEffect, useState } from 'react'
 import { useLocale } from '../preferences'
 import { GeneralSettings } from './GeneralSettings'
-import { ModelsSettings } from './ModelsSettings'
+import { AgentSettings } from './AgentSettings'
 import { SettingsSidebar, type SettingsPage } from './SettingsSidebar'
 import { settingsMessages } from './messages'
 
@@ -26,7 +26,7 @@ export function Settings(): React.JSX.Element {
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-1 pb-5">
           <div className="w-full max-w-220">
-            {page === 'general' ? <GeneralSettings /> : page === 'integrations' ? <IntegrationsSettings /> : <ModelsSettings />}
+            {page === 'general' ? <GeneralSettings /> : page === 'integrations' ? <IntegrationsSettings /> : <AgentSettings />}
           </div>
         </div>
       </SidebarInset>

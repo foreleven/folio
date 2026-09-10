@@ -19,6 +19,7 @@
       "vite/client"
     ],
     "paths": {
+      "@folio/agent/config/schema": ["../../packages/agent/src/config/schema.ts"],
       "@renderer/*": [
         "./src/renderer/src/*"
       ]
@@ -28,6 +29,7 @@
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.tsx",
     "src/shared/**/*.ts",
+    "../../packages/agent/src/config/schema.ts",
     "../../packages/ui/src/**/*.ts",
     "../../packages/ui/src/**/*.tsx"
   ]

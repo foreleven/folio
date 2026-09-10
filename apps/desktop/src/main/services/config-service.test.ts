@@ -64,7 +64,7 @@ describe('ConfigService', () => {
 
   it('returns defaults without creating the directory or file', async () => {
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system', vaults: [] })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] } })
       expect(await readdir(root)).toEqual([])
     }, makeRuntime(join(root, 'missing')))
   })
@@ -73,31 +73,41 @@ describe('ConfigService', () => {
     const directory = join(root, 'nested', 'config')
     await withStore(async (store) => {
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'system', vaults: []
+        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
       expect(JSON.parse(await readFile(store.filePath, 'utf8'))).toEqual({
-        theme: 'dark', language: 'system', vaults: []
+        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
       expect(await readdir(directory)).toEqual(['config.json'])
     }, makeRuntime(directory))
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'system', vaults: [] })
+      expect(await Effect.runPromise(store.get)).toEqual({
+        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
+      })
     }, makeRuntime(directory))
   })
 
   it('defaults missing fields and sees later manual edits', async () => {
     await writeFile(join(root, 'config.json'), '{"theme":"light"}')
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system', vaults: [] })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] } })
       await writeFile(store.filePath, '{"language":"zh-CN"}')
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN', vaults: [] })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN', vaults: [], agent: { enabled: false, modelProfiles: [] } })
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'zh-CN', vaults: []
+        theme: 'dark', language: 'zh-CN', vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
     })
   })
 
-  it.each(['{broken', '{"theme":"blue"}', '{"language":"xx"}', '{"theme":null}', '[]', 'null'])(
+  it.each([
+    '{broken',
+    '{"theme":"blue"}',
+    '{"language":"xx"}',
+    '{"theme":null}',
+    '[]',
+    'null',
+    '{"agent":{"enabled":true,"modelProfiles":[],"apiKey":"must-not-persist"}}'
+  ])(
     'reports invalid stored data without replacing it: %s',
     async (contents) => {
       await writeFile(join(root, 'config.json'), contents)
@@ -131,8 +141,49 @@ describe('ConfigService', () => {
         store.update({ theme: 'dark' }),
         store.update({ language: 'en' })
       ], { concurrency: 'unbounded' }))
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'dark', language: 'en', vaults: [] })
+      expect(await Effect.runPromise(store.get)).toEqual({
+        theme: 'dark', language: 'en', vaults: [], agent: { enabled: false, modelProfiles: [] }
+      })
       expect(await readdir(root)).toEqual(['config.json'])
+    })
+  })
+
+  it('serializes agent replacement with ordinary patches without losing either update', async () => {
+    await withStore(async (store) => {
+      const agent = {
+        enabled: true,
+        modelProfiles: [{
+          id: 'default', name: 'Default',
+          provider: { type: 'builtin' as const, providerId: 'anthropic' },
+          modelId: 'claude-sonnet-4-5', thinkingLevel: 'medium' as const,
+          credentialSource: 'none' as const
+        }],
+        defaultModelProfileId: 'default'
+      }
+      await Effect.runPromise(Effect.all([
+        store.setAgent(agent),
+        store.update({ theme: 'dark' })
+      ], { concurrency: 'unbounded' }))
+      expect(await Effect.runPromise(store.get)).toEqual({
+        theme: 'dark', language: 'system', vaults: [], agent
+      })
+      expect(JSON.parse(await readFile(store.filePath, 'utf8'))).toEqual({
+        theme: 'dark', language: 'system', vaults: [], agent
+      })
+    })
+  })
+
+  it('rejects invalid main-process agent replacement without changing disk', async () => {
+    await withStore(async (store) => {
+      await Effect.runPromise(store.update({ theme: 'light' }))
+      const previous = await readFile(store.filePath, 'utf8')
+      const error = await Effect.runPromise(Effect.flip(store.setAgent(
+        // @ts-expect-error Deliberately invalid input exercises the main-process Schema boundary.
+        { enabled: true, modelProfiles: [], apiKey: 'must-not-persist' }
+      )))
+      expect(error).toMatchObject({ _tag: 'ConfigStoreError', operation: 'update' })
+      expect(JSON.stringify(error)).not.toContain('must-not-persist')
+      expect(await readFile(store.filePath, 'utf8')).toBe(previous)
     })
   })
 

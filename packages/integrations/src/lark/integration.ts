@@ -187,7 +187,6 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
     },
     Effect.ensuring(auth.release()),
     Effect.annotateLogs({ integration: 'lark', subsystem: 'integration' }),
-    Effect.withLogSpan('lark.integration.setup')
   )
 
   return defineIntegration({

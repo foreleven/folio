@@ -24,7 +24,7 @@ vi.mock('@effect/atom-react', () => ({
   useAtomValue: () => state.config
 }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
-vi.mock('../rpc/config-rpc', () => ({ configAtom: {} }))
+vi.mock('../rpc/config-rpc', () => ({ ConfigRpcClient: { watch: {} } }))
 vi.mock('../vault/use-vault-open', () => ({
   useVaultOpen: () => ({ openVault: state.openVault, opening: state.opening, failed: state.failed })
 }))

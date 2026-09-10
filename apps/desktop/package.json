@@ -16,6 +16,7 @@
     "@effect/atom-react": "^4.0.0-rc.112",
     "@effect/platform-node": "^4.0.0-rc.112",
     "@effect/sql-sqlite-node": "4.0.0-rc.112",
+    "@folio/agent": "file:../../packages/agent",
     "@folio/integrations": "file:../../packages/integrations",
     "@folio/ui": "file:../../packages/ui",
     "effect": "^4.0.0-rc.112",

@@ -11,12 +11,23 @@
     "types": [
       "node",
       "electron-vite/node"
-    ]
+    ],
+    "paths": {
+      "@folio/agent/config/schema": ["../../packages/agent/src/config/schema.ts"],
+      "@folio/agent/config/directory": ["../../packages/agent/src/config/directory.ts"],
+      "@folio/agent/config/loader": ["../../packages/agent/src/config/loader.ts"],
+      "@folio/agent/model": ["../../packages/agent/src/model/index.ts"]
+    }
   },
   "include": [
     "electron.vite.config.ts",
+    "vitest.config.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "../../packages/agent/src/config/schema.ts",
+    "../../packages/agent/src/config/directory.ts",
+    "../../packages/agent/src/config/loader.ts",
+    "../../packages/agent/src/model/**/*.ts"
   ]
 }

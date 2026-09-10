@@ -40,10 +40,11 @@ describe('Configuration RPC', () => {
         const saved = yield* first['config.update']({ theme: 'dark', language: 'zh-CN' })
         return { saved, first: yield* Fiber.join(firstValues), second: yield* Fiber.join(secondValues) }
       }).pipe(Effect.provide(handlers), Effect.scoped))
+      const disabledAgent = { enabled: false, modelProfiles: [] }
       const expected = [
-        { theme: 'system', language: 'system', vaults: [] },
-        { theme: 'system', language: 'system', vaults: [vault] },
-        { theme: 'dark', language: 'zh-CN', vaults: [vault] }
+        { theme: 'system', language: 'system', vaults: [], agent: disabledAgent },
+        { theme: 'system', language: 'system', vaults: [vault], agent: disabledAgent },
+        { theme: 'dark', language: 'zh-CN', vaults: [vault], agent: disabledAgent }
       ]
       expect(results.first).toEqual(expected)
       expect(results.second).toEqual(expected)

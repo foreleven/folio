@@ -8,15 +8,15 @@ import { Schema } from 'effect'
 import { useRef, useState } from 'react'
 import { GlobalConfigPatch, Language, Theme } from '../../../shared/config'
 import { useLocale } from '../preferences'
-import { configAtom, ConfigRpcClient } from '../rpc/config-rpc'
+import { ConfigRpcClient } from '../rpc/config-rpc'
 import { settingsMessages } from './messages'
 
 /** General preferences; controlled inputs reflect only persisted server values. */
 export function GeneralSettings(): React.JSX.Element {
   const locale = useLocale()
   const text = settingsMessages[locale]
-  const config = useAtomValue(configAtom)
-  const refresh = useAtomRefresh(configAtom)
+  const config = useAtomValue(ConfigRpcClient.watch)
+  const refresh = useAtomRefresh(ConfigRpcClient.watch)
   const update = useAtomSet(ConfigRpcClient.update, { mode: 'promise' })
   const saving = useRef(false)
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')

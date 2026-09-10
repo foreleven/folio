@@ -39,7 +39,7 @@ describe('VaultService', () => {
     expect(version(vault.id)).toBe(7)
     expect(vault).toMatchObject({ name: 'My Wiki', path: await realpath(selected) })
     expect(JSON.parse(await readFile(join(root, 'config/config.json'), 'utf8'))).toEqual({
-      theme: 'system', language: 'system', vaults: [vault]
+      theme: 'system', language: 'system', vaults: [vault], agent: { enabled: false, modelProfiles: [] }
     })
     const settingsFile = join(root, 'config/vaults', vault.id, 'config.json')
     expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
@@ -89,7 +89,9 @@ describe('VaultService', () => {
       expect(version(first.id)).toBe(7)
       expect(version(second.id)).toBe(7)
       expect((await readdir(join(root, 'config/vaults'))).sort()).toEqual([first.id, second.id].sort())
-      expect(await runtime.runPromise(config.get)).toEqual({ theme: 'dark', language: 'en', vaults: [first, second] })
+      expect(await runtime.runPromise(config.get)).toEqual({
+        theme: 'dark', language: 'en', vaults: [first, second], agent: { enabled: false, modelProfiles: [] }
+      })
       expect(await runtime.runPromise(store.register(b))).toEqual(second)
     } finally { await runtime.dispose() }
   })

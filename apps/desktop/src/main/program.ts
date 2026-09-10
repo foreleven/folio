@@ -20,6 +20,7 @@ import { ElectronApp, type ElectronAppEvent } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
 import { MainRpcLive } from './rpc/runtime'
 import { ConfigService } from './services/config-service'
+import { ModelService } from './services/model-service'
 import { SettingsWindow } from './electron/SettingsWindow'
 import { ApplicationMenuLive } from './electron/ApplicationMenu'
 import { ApplicationThemeLive } from './electron/ApplicationTheme'
@@ -84,6 +85,7 @@ export const application = Effect.gen(function*() {
 /** Complete main-process layer with one shared Electron application boundary. */
 export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive).pipe(
   Layer.provide(IntegrationsLive),
+  Layer.provide(ModelService.layer()),
   Layer.provide(VaultLauncher.layer),
   Layer.provideMerge(MainWindow.layer),
   Layer.provide(VaultService.layer),

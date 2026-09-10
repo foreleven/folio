@@ -1,3 +1,4 @@
+import { AgentSettings } from '@folio/agent/config/schema'
 import { Effect, Schema } from 'effect'
 import { Vault } from './vault'
 
@@ -9,7 +10,11 @@ export const Language = Schema.Literals(['system', 'zh-CN', 'en'])
 export const GlobalConfig = Schema.Struct({
   theme: Theme.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
-  vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([])))
+  vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  agent: AgentSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({
+    enabled: false,
+    modelProfiles: []
+  })))
 })
 
 export type GlobalConfig = typeof GlobalConfig.Type

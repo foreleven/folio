@@ -1,7 +1,7 @@
 import { useAtomValue } from '@effect/atom-react'
 import { createContext, useContext, useEffect, useLayoutEffect, useState } from 'react'
 import type { GlobalConfig } from '../../shared/config'
-import { configAtom } from './rpc/config-rpc'
+import { ConfigRpcClient } from './rpc/config-rpc'
 
 type Locale = 'en' | 'zh-CN'
 const LocaleContext = createContext<Locale>('en')
@@ -20,7 +20,7 @@ export function useLocale(): Locale {
 
 /** Applies persisted preferences in each window and follows OS changes in system mode. */
 export function PreferencesProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
-  const config = useAtomValue(configAtom)
+  const config = useAtomValue(ConfigRpcClient.watch)
   const [systemLanguage, setSystemLanguage] = useState(() => navigator.language)
   const theme = config._tag === 'Success' ? config.value.theme : 'system'
   const language = config._tag === 'Success' ? config.value.language : 'system'

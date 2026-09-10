@@ -1,3 +1,5 @@
+import { AgentSettings } from '@folio/agent/config/schema'
+import { resolveFolioConfigDirectory } from '@folio/agent/config/directory'
 import {
   Config,
   Context,
@@ -10,7 +12,6 @@ import {
   Semaphore,
   Stream
 } from 'effect'
-import { homedir } from 'node:os'
 import { ConfigStoreError, GlobalConfig, GlobalConfigPatch } from '../../shared/config'
 import { Vault } from '../../shared/vault'
 
@@ -28,6 +29,8 @@ export class ConfigService extends Context.Service<
     readonly watch: Stream.Stream<GlobalConfig, ConfigStoreError>
     /** Validates and merges a patch, then atomically persists and returns the result. */
     readonly update: (patch: GlobalConfigPatch) => Effect.Effect<GlobalConfig, ConfigStoreError>
+    /** Validates and replaces AgentSettings under the same lock as all other global config writes. */
+    readonly setAgent: (settings: AgentSettings) => Effect.Effect<GlobalConfig, ConfigStoreError>
     /** Adds a validated vault to the global index, reusing an existing canonical path under the write lock. */
     readonly addVault: (vault: Vault) => Effect.Effect<Vault, ConfigStoreError>
   }
@@ -38,11 +41,13 @@ export class ConfigService extends Context.Service<
     Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
-      const home = yield* Effect.sync(homedir)
       const configuredDirectory = yield* Config.nonEmptyString('FOLIO_CONFIG_DIR').pipe(
-        Config.withDefault(path.join(home, '.folio'))
+        Config.option,
+        Effect.map((value) => value._tag === 'Some' ? value.value : undefined)
       )
-      const directory = path.resolve(configuredDirectory)
+      const directory = yield* Effect.sync(() => resolveFolioConfigDirectory({
+        env: configuredDirectory === undefined ? {} : { FOLIO_CONFIG_DIR: configuredDirectory }
+      }))
       const filePath = path.join(directory, 'config.json')
       const lock = yield* Semaphore.make(1)
       const changes = yield* PubSub.unbounded<GlobalConfig>()
@@ -51,7 +56,10 @@ export class ConfigService extends Context.Service<
       // Only absence uses defaults: damaged files and permission errors must remain visible.
       const read = fs.readFileString(filePath).pipe(
         Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed('{}')),
-        Effect.flatMap(Schema.decodeUnknownEffect(ConfigJson))
+        Effect.flatMap((json) => Schema.decodeUnknownEffect(ConfigJson)(json, {
+          onExcessProperty: 'error',
+          errors: 'all'
+        }).pipe(Effect.mapError(() => new Error('Invalid global configuration'))))
       )
 
       const get = read.pipe(
@@ -103,6 +111,20 @@ export class ConfigService extends Context.Service<
         new ConfigStoreError({ path: filePath, operation: 'update', cause })
       ))
 
+      /** Agent settings are replaced as a validated aggregate so profile references cannot bypass ModelService invariants. */
+      const setAgent = Effect.fn('ConfigService.setAgent')(function*(settings: AgentSettings) {
+        const validated = yield* Schema.decodeUnknownEffect(AgentSettings)(settings, {
+          onExcessProperty: 'error',
+          errors: 'all'
+        }).pipe(Effect.mapError(() => new Error('Invalid agent configuration')))
+        const current = yield* read
+        const next = { ...current, agent: validated }
+        yield* write(next)
+        return next
+      }, lock.withPermit, Effect.mapError((cause) =>
+        new ConfigStoreError({ path: filePath, operation: 'update', cause })
+      ))
+
       /** Index mutations stay main-process-only; preference RPC cannot replace the vault array. */
       const addVault = Effect.fn('ConfigService.addVault')(function*(vault: Vault) {
         const validated = yield* Schema.decodeUnknownEffect(Vault)(vault)
@@ -115,7 +137,7 @@ export class ConfigService extends Context.Service<
         new ConfigStoreError({ path: filePath, operation: 'update', cause })
       ))
 
-      return ConfigService.of({ directory, filePath, get, watch, update, addVault })
+      return ConfigService.of({ directory, filePath, get, watch, update, setAgent, addVault })
     })
   )
 }

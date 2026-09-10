@@ -10,7 +10,8 @@ export class IntegrationRpcClient extends AtomRpc.Service<IntegrationRpcClient>(
   static readonly install = IntegrationRpcClient.mutation('integrations.install')
   static readonly inspect = IntegrationRpcClient.mutation('integrations.inspect')
   static readonly action = IntegrationRpcClient.mutation('integrations.action')
+
+  static readonly integrations = IntegrationRpcClient.runtime.atom(Stream.unwrap(
+    Effect.map(IntegrationRpcClient, (client) => client('integrations.watch', undefined))
+  ))
 }
-export const integrationsAtom = IntegrationRpcClient.runtime.atom(Stream.unwrap(
-  Effect.map(IntegrationRpcClient, (client) => client('integrations.watch', undefined))
-))

@@ -24,12 +24,17 @@ const vault = { id: '407bc090-c297-4b3b-96bb-6ced8f64b89c', name: 'wiki', path: 
 function runtime(
   register: Effect.Effect<typeof vault, VaultError> = Effect.succeed(vault),
   open: Effect.Effect<void, RendererLoadError> = Effect.void,
-  get: Effect.Effect<GlobalConfig, ConfigStoreError> = Effect.succeed({ theme: 'system', language: 'system', vaults: [vault] })
+  get: Effect.Effect<GlobalConfig, ConfigStoreError> = Effect.succeed({
+    theme: 'system',
+    language: 'system',
+    vaults: [vault],
+    agent: { enabled: false, modelProfiles: [] }
+  })
 ) {
   const save = vi.fn(() => register)
   const launch = vi.fn(() => open)
   const instance = ManagedRuntime.make(VaultLauncher.layer.pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeed(ConfigService)({ directory: '/config', filePath: '/config/config.json', get, watch: Stream.empty, update: () => get, addVault: (entry) => Effect.succeed(entry) }),
+    Layer.succeed(ConfigService)({ directory: '/config', filePath: '/config/config.json', get, watch: Stream.empty, update: () => get, setAgent: () => get, addVault: (entry) => Effect.succeed(entry) }),
     Layer.succeed(VaultService)({ register: save }),
     Layer.succeed(MainWindow)({ open: Effect.void, isOpen: Effect.succeed(false), openVault: launch, getVault: () => Effect.succeed(null) })
   ))))

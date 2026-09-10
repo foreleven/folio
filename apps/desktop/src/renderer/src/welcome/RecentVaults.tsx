@@ -7,7 +7,7 @@ import { cn } from '@folio/ui/lib/utils'
 import { CircleAlertIcon, FolderIcon, LoaderCircleIcon } from 'lucide-react'
 import type { Vault } from '../../../shared/vault'
 import { useLocale } from '../preferences'
-import { configAtom } from '../rpc/config-rpc'
+import { ConfigRpcClient } from '../rpc/config-rpc'
 
 interface RecentVaultsProps {
   opening: string | null
@@ -70,8 +70,8 @@ function RecentVaultSkeleton(): React.JSX.Element {
 /** Lists registered vaults newest first, with loading, empty, and retry states. */
 export function RecentVaults({ opening, onOpen }: RecentVaultsProps): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const config = useAtomValue(configAtom)
-  const refresh = useAtomRefresh(configAtom)
+  const config = useAtomValue(ConfigRpcClient.watch)
+  const refresh = useAtomRefresh(ConfigRpcClient.watch)
   const vaults = config._tag === 'Success' ? [...config.value.vaults].reverse() : []
   return (
     <section className="min-w-0" aria-labelledby="recent-vaults-heading">
