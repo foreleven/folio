@@ -98,6 +98,8 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
   const conflictRun = conflictSession && detail._tag === 'Success'
     ? detail.value.runs.find(run => run.sessionId === conflictSession.id && run.purpose === 'conflict-resolution')
     : undefined
+  // A persisted intent for a superseded operation is not actionable against the current receipt.
+  const activeConflictIntent = operation && conflictIntent && conflictIntent.operationId !== operation.id ? null : conflictIntent
   const syncRequest = syncIntent ?? (operation ? { id: operation.id, taskId, expectedSourceHead: operation.sourceHead } : null)
 
   // Keep only retry identities in session storage. A refresh can restore a request,
@@ -107,15 +109,9 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
       ...(submitted ? { submitted } : {}),
       ...(syncIntent ? { sync: syncIntent } : {}),
       ...(reprepareIntent ? { reprepare: reprepareIntent } : {}),
-      ...(conflictIntent ? { conflict: conflictIntent } : {})
+      ...(activeConflictIntent ? { conflict: activeConflictIntent } : {})
     })
-  }, [conflictIntent, intentKey, reprepareIntent, submitted, syncIntent])
-
-  // A successful reprepare retires the old operation. Do not keep a lost-response conflict
-  // request bound to that superseded coordinator, or a later click could target stale state.
-  useEffect(() => {
-    if (operation && conflictIntent && conflictIntent.operationId !== operation.id) setConflictIntent(null)
-  }, [conflictIntent, operation])
+  }, [activeConflictIntent, intentKey, reprepareIntent, submitted, syncIntent])
 
   /** Retains the exact save identity after a lost response; the server owns the filesystem root. */
   async function submit(retry?: SaveTaskWikiFiles | SaveRunWikiFiles): Promise<void> {
@@ -185,8 +181,8 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
 
   /** Starts the fixed-Agent conflict Run; the complete request is retained across a lost reply. */
   async function startConflictResolution(): Promise<void> {
-    if (syncInFlight.current || (!conflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
-    const request = conflictIntent ?? {
+    if (syncInFlight.current || (!activeConflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
+    const request = activeConflictIntent ?? {
       vaultId, taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
       // Derive both identities from the operation so a refresh before sessionStorage is flushed
       // cannot dispatch a second conflict Run for the same isolated coordinator.
@@ -284,8 +280,8 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
           ? (chinese ? 'main 已变化，重新准备' : 'Reprepare after main changed')
           : (chinese ? '在当前 main 上重新准备冲突' : 'Reprepare conflict on current main')}
       </Button> : null}
-      {(operation?.state === 'conflict' || conflictIntent) && !syncIntent ? <>
-        <Button variant="outline" size="sm" disabled={pending || (!sourceSession && !conflictIntent)} onClick={() => void startConflictResolution()}>
+      {(operation?.state === 'conflict' || activeConflictIntent) && !syncIntent ? <>
+        <Button variant="outline" size="sm" disabled={pending || (!sourceSession && !activeConflictIntent)} onClick={() => void startConflictResolution()}>
           {chinese ? '启动冲突解决 Run' : 'Start conflict-resolution Run'}
         </Button>
         {operation?.state === 'conflict' ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => void abortConflictResolution()}>
@@ -300,7 +296,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
           {chinese ? '放弃冲突现场' : 'Abort conflict'}
         </Button>
       </> : null}
-      {conflictIntent ? <p role="status" className="w-full text-support text-muted-foreground">
+      {activeConflictIntent ? <p role="status" className="w-full text-support text-muted-foreground">
         {chinese ? '冲突解决请求未确认，重试会复用原请求。' : 'The conflict-resolution request is unconfirmed; retry will reuse the original request.'}
       </p> : null}
       {selection && !submitted && !validSelection ? <p role="status" className="w-full text-support text-muted-foreground">{chinese ? '文件或基线已变化，请清除选择后重新选择。' : 'Files or baseline changed. Clear the selection and choose again.'}</p> : null}
