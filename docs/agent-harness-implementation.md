@@ -806,9 +806,11 @@ SQLite/Git 故障注入，分别覆盖 publish receipt 丢失和 alignment recei
 
 重新准备同一冻结 operation 的 renderer 请求现在使用 `reprepare-{supersededOperationId}`
 作为稳定 replacement ID；即使刷新发生在 `sessionStorage` 写入之前，也能从当前 operation
-重建同一请求，不会为同一 source interval 产生第二个 replacement。新增回归覆盖 renderer
-存储不可用时的刷新重试。另验证 reprepare 在新 main 上再次返回 `conflict` 后，文件面板会
-继续展示 `Start conflict-resolution Run`，并把新的 operation ID 传给固定 Agent 的启动入口。
+重建同一请求，不会为同一 source interval 产生第二个 replacement。conflict-resolution
+Run 的 Session/Run ID 同样由 operation ID 派生，避免响应丢失或 renderer 存储不可用时重复
+派发同一 coordinator 的 Run。新增回归覆盖 renderer 存储不可用时的刷新重试。另验证
+reprepare 在新 main 上再次返回 `conflict` 后，文件面板会继续展示
+`Start conflict-resolution Run`，并把新的 operation ID 传给固定 Agent 的启动入口。
 
-Task wiki 面板回归 12/12 通过。普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、
+Task wiki 面板回归 13/13 通过。普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、
 Integration 实际装配和 Agent 切换不在当前切片范围内。

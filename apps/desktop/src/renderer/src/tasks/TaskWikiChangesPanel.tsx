@@ -172,7 +172,9 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     if (syncInFlight.current || (!conflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
     const request = conflictIntent ?? {
       vaultId, taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
-      sessionId: crypto.randomUUID(), runId: crypto.randomUUID()
+      // Derive both identities from the operation so a refresh before sessionStorage is flushed
+      // cannot dispatch a second conflict Run for the same isolated coordinator.
+      sessionId: `conflict-session-${operation!.id}`, runId: `conflict-run-${operation!.id}`
     }
     setConflictIntent(request)
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
