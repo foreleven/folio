@@ -37,6 +37,16 @@ function writeTaskWikiIntent(key: string, intent: TaskWikiIntent): void {
   }
 }
 
+/** Derives a bounded, protocol-safe identity for one operation edge. */
+function stableOperationId(prefix: string, operationId: string): string {
+  let hash = 14695981039346656037n
+  for (const codePoint of operationId) {
+    hash ^= BigInt(codePoint.codePointAt(0)!)
+    hash = BigInt.asUintN(64, hash * 1099511628211n)
+  }
+  return `${prefix}-${hash.toString(16).padStart(16, '0')}`
+}
+
 /** Explicitly saves selected Task wiki files; browsing and diffing never writes Git. */
 export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; taskId: string }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
@@ -155,7 +165,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     // The replacement edge is deterministic for the superseded operation. This means a refresh
     // before sessionStorage is flushed can still reconstruct the same id instead of creating a
     // second replacement operation for the same frozen source interval.
-    const request = reprepareIntent ?? { id: `reprepare-${operation!.id}`, taskId, supersededId: operation!.id }
+    const request = reprepareIntent ?? { id: stableOperationId('reprepare', operation!.id), taskId, supersededId: operation!.id }
     setReprepareIntent(request)
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
@@ -174,7 +184,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
       vaultId, taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
       // Derive both identities from the operation so a refresh before sessionStorage is flushed
       // cannot dispatch a second conflict Run for the same isolated coordinator.
-      sessionId: `conflict-session-${operation!.id}`, runId: `conflict-run-${operation!.id}`
+      sessionId: stableOperationId('conflict-session', operation!.id), runId: stableOperationId('conflict-run', operation!.id)
     }
     setConflictIntent(request)
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')

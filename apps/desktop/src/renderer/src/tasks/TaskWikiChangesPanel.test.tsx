@@ -241,3 +241,17 @@ it('reconstructs the same conflict Run identity after refresh without renderer s
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   expect(mocks.startConflict.mock.calls[1]![0]).toEqual(request)
 })
+
+it('keeps derived retry identities within the protocol limit for long operation IDs', async () => {
+  const operationId = 'x'.repeat(128)
+  mocks.detail = { sessions: [{ id: 'source-session', purpose: 'task' }], runs: [] }
+  mocks.operations = [{ id: operationId, taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
+    sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
+    preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
+  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
+  const request = mocks.startConflict.mock.calls[0]![0].payload
+  expect(request.sessionId.length).toBeLessThanOrEqual(128)
+  expect(request.runId.length).toBeLessThanOrEqual(128)
+})
