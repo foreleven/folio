@@ -14,6 +14,8 @@ export class MainWindow extends Context.Service<
     readonly openVault: (vault: Vault, sourceWindowId?: number) => Effect.Effect<void, RendererLoadError>
     /** Returns the immutable vault context for an open window; unknown IDs return null. */
     readonly getVault: (id: string) => Effect.Effect<Vault | null>
+    /** Closes the window for a vault, waiting until Electron has emitted `closed`. */
+    readonly closeVault: (id: string) => Effect.Effect<void>
     /** Reports whether an application window is currently open. */
     readonly isOpen: Effect.Effect<boolean>
   }
@@ -21,7 +23,7 @@ export class MainWindow extends Context.Service<
   /** Live layer whose scope owns every window opened by the application. */
   static readonly layer = Layer.effect(
     MainWindow,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const windows = new Map<BrowserWindow, Vault | undefined>()
       const vaultWindows = new Map<string, { window: BrowserWindow; vault: Vault }>()
       const lock = yield* Semaphore.make(1)
@@ -45,7 +47,7 @@ export class MainWindow extends Context.Service<
       )
 
       /** Creates an owned window and rolls it back on failed or interrupted navigation. */
-      const create = Effect.fn('MainWindow.create')(function*(vault?: Vault) {
+      const create = Effect.fn('MainWindow.create')(function* (vault?: Vault) {
         const window = createRendererWindow({ title: vault ? `${vault.name} — Folio` : 'Folio' })
         // Maximize only when ready so startup does not reveal an unloaded renderer.
         window.once('ready-to-show', () => window.maximize())
@@ -58,15 +60,17 @@ export class MainWindow extends Context.Service<
           windows.delete(window)
         })
         yield* loadRenderer(window, vault ? `vault/${vault.id}` : undefined).pipe(
-          Effect.onError(() => Effect.sync(() => {
-            if (vault) vaultWindows.delete(vault.id)
-            destroyWindow(window)
-          }))
+          Effect.onError(() =>
+            Effect.sync(() => {
+              if (vault) vaultWindows.delete(vault.id)
+              destroyWindow(window)
+            })
+          )
         )
       })
 
       /** Serializes navigation so rapid opens cannot focus an incompletely loaded duplicate. */
-      const openVault = Effect.fn('MainWindow.openVault')(function*(vault: Vault, sourceWindowId?: number) {
+      const openVault = Effect.fn('MainWindow.openVault')(function* (vault: Vault, sourceWindowId?: number) {
         const existing = vaultWindows.get(vault.id)?.window
         if (existing && !existing.isDestroyed()) {
           if (existing.isMinimized()) existing.restore()
@@ -74,35 +78,49 @@ export class MainWindow extends Context.Service<
           existing.focus()
           return
         }
-        const source = sourceWindowId === undefined ? undefined
-          : Array.from(windows.keys()).find((window) => window.id === sourceWindowId)
+        const source = sourceWindowId === undefined ? undefined : Array.from(windows.keys()).find((window) => window.id === sourceWindowId)
         if (source && !source.isDestroyed() && windows.get(source) === undefined) {
           // Bind before navigation so the renderer can resolve its context immediately.
           windows.set(source, vault)
           vaultWindows.set(vault.id, { window: source, vault })
           yield* loadRenderer(source, `vault/${vault.id}`).pipe(
-            Effect.onError(() => Effect.gen(function*() {
-              vaultWindows.delete(vault.id)
-              if (!source.isDestroyed()) {
-                windows.set(source, undefined)
-                yield* loadRenderer(source).pipe(
-                  Effect.catch((error) => Effect.logError('Failed to restore welcome page', error))
-                )
-              }
-            }))
+            Effect.onError(() =>
+              Effect.gen(function* () {
+                vaultWindows.delete(vault.id)
+                if (!source.isDestroyed()) {
+                  windows.set(source, undefined)
+                  yield* loadRenderer(source).pipe(Effect.catch((error) => Effect.logError('Failed to restore welcome page', error)))
+                }
+              })
+            )
           )
           return
         }
         yield* create(vault)
       }, lock.withPermit)
 
+      /**
+       * Closes a vault window before its registration can be removed. Waiting for
+       * `closed` matters because renderers may still have database handles while
+       * Electron is processing the close request.
+       */
+      const closeVault = Effect.fn('MainWindow.closeVault')(function* (id: string) {
+        const current = vaultWindows.get(id)?.window
+        if (!current || current.isDestroyed()) return
+        yield* Effect.callback<void>((resume) => {
+          const onClosed = () => resume(Effect.void)
+          current.once('closed', onClosed)
+          current.close()
+          return Effect.sync(() => current.removeListener('closed', onClosed))
+        })
+      }, lock.withPermit)
+
       return MainWindow.of({
         open: create(),
         openVault,
+        closeVault,
         getVault: (id) => Effect.sync(() => vaultWindows.get(id)?.vault ?? null),
-        isOpen: Effect.sync(() =>
-          Array.from(windows.keys()).some((window) => !window.isDestroyed())
-        )
+        isOpen: Effect.sync(() => Array.from(windows.keys()).some((window) => !window.isDestroyed()))
       })
     })
   )

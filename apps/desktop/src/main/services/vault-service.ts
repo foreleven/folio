@@ -12,6 +12,8 @@ export class VaultService extends Context.Service<
   {
     /** Registers an empty directory or reopens a known entry, ensuring storage and its managed wiki link. */
     readonly register: (directory: string) => Effect.Effect<Vault, VaultError>
+    /** Deletes Folio's managed workspace for a vault and its published source link. */
+    readonly remove: (vault: Vault) => Effect.Effect<void, VaultError>
   }
 >()('folio/services/VaultService') {
   static readonly layer = Layer.effect(
@@ -34,20 +36,14 @@ export class VaultService extends Context.Service<
           let existing = entries.find((entry) => entry.path === requested)
           const canonicalPath = yield* fs
             .realPath(requested)
-            .pipe(
-              Effect.catchReason('PlatformError', 'NotFound', (cause) =>
-                existing ? Effect.succeed(null) : Effect.fail(cause)
-              )
-            )
+            .pipe(Effect.catchReason('PlatformError', 'NotFound', (cause) => (existing ? Effect.succeed(null) : Effect.fail(cause))))
           if (canonicalPath !== null && (yield* fs.stat(canonicalPath)).type !== 'Directory') {
             return yield* new VaultError({ message: 'Choose a directory for your vault.', cause: selected })
           }
           // Following the published link changes realPath, but must never allocate another Vault identity.
           if (!existing)
             for (const entry of entries) {
-              const target = yield* fs
-                .realPath(entry.path)
-                .pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(null)))
+              const target = yield* fs.realPath(entry.path).pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(null)))
               if (target !== null && target === canonicalPath) {
                 existing = entry
                 break
@@ -97,7 +93,30 @@ export class VaultService extends Context.Service<
         )
       )
 
-      return VaultService.of({ register })
+      /**
+       * Removes only paths proven to belong to this vault. The selected path is
+       * deleted only when it is a link to this vault's managed wiki directory;
+       * a user-replaced path is left untouched.
+       */
+      const remove = Effect.fn('VaultService.remove')(
+        function* (vault: Vault) {
+          const managed = path.join(config.directory, 'vaults', vault.id)
+          const managedWiki = path.join(managed, 'workspace', 'wiki')
+          const managedWikiCanonical = yield* fs.realPath(managedWiki)
+          const linkTarget = yield* fs.readLink(vault.path).pipe(
+            Effect.map((target) => path.resolve(path.dirname(vault.path), target)),
+            Effect.catch(() => Effect.succeed(null))
+          )
+          yield* fs.remove(managed, { recursive: true, force: true })
+          if (linkTarget === managedWikiCanonical) {
+            yield* fs.remove(vault.path, { force: true })
+          }
+        },
+        lock.withPermit,
+        Effect.mapError((cause) => (cause instanceof VaultError ? cause : new VaultError({ message: 'Could not delete the vault files.', cause })))
+      )
+
+      return VaultService.of({ register, remove })
     })
   )
 }

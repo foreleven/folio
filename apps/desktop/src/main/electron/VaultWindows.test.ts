@@ -23,6 +23,7 @@ class WindowDouble extends EventEmitter {
   show = vi.fn()
   focus = vi.fn()
   maximize = vi.fn()
+  close = vi.fn(() => { this.destroyed = true; this.emit('closed') })
   destroy = vi.fn(() => { this.destroyed = true; this.emit('closed') })
 }
 const first = { id: '407bc090-c297-4b3b-96bb-6ced8f64b89c', name: 'wiki', path: '/a/wiki' }
@@ -149,6 +150,19 @@ describe('vault windows', () => {
       expect(await runtime.runPromise(windows.getVault(second.id))).toEqual(second)
       for (const window of created) if (!window.isDestroyed()) window.destroy()
       expect(await runtime.runPromise(windows.isOpen)).toBe(false)
+    } finally { await runtime.dispose() }
+  })
+
+  it('waits for the native close event before releasing a vault context', async () => {
+    const runtime = ManagedRuntime.make(MainWindow.layer)
+    try {
+      const windows = await runtime.runPromise(MainWindow)
+      await runtime.runPromise(windows.openVault(first))
+      const current = created[0]
+      const closing = runtime.runPromise(windows.closeVault(first.id))
+      await closing
+      expect(current.close).toHaveBeenCalledOnce()
+      expect(await runtime.runPromise(windows.getVault(first.id))).toBeNull()
     } finally { await runtime.dispose() }
   })
 })

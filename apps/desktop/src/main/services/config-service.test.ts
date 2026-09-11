@@ -215,4 +215,16 @@ describe('ConfigService', () => {
       expect(await readdir(root)).toEqual(['config.json'])
     }, makeRuntime(root, failingFilesystem))
   })
+
+  it('removes a vault registration atomically while keeping other config values', async () => {
+    await withStore(async (store) => {
+      const first = { id: '407bc090-c297-4b3b-96bb-6ced8f64b89c', name: 'one', path: '/one' }
+      const second = { id: '3b933ccc-363a-4508-b4e6-6d222e3431bd', name: 'two', path: '/two' }
+      await Effect.runPromise(store.addVault(first))
+      await Effect.runPromise(store.addVault(second))
+      expect(await Effect.runPromise(store.removeVault(first.id))).toEqual(first)
+      expect(await Effect.runPromise(store.removeVault(first.id))).toBeNull()
+      expect(await Effect.runPromise(store.get)).toMatchObject({ theme: 'system', language: 'system', vaults: [second] })
+    })
+  })
 })

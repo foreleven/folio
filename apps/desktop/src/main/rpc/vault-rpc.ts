@@ -4,12 +4,15 @@ import { MainWindow } from '../electron/MainWindow'
 import { VaultLauncher } from '../electron/VaultLauncher'
 
 /** Routes vault operations through the application-owned window and selection services. */
-export const VaultRpcHandlersLive = VaultRpcs.toLayer(Effect.gen(function*() {
-  const launcher = yield* VaultLauncher
-  const windows = yield* MainWindow
-  return VaultRpcs.of({
-    'vault.open': () => launcher.open,
-    'vault.openExisting': ({ id }) => launcher.openExisting(id),
-    'vault.get': ({ id }) => windows.getVault(id)
+export const VaultRpcHandlersLive = VaultRpcs.toLayer(
+  Effect.gen(function* () {
+    const launcher = yield* VaultLauncher
+    const windows = yield* MainWindow
+    return VaultRpcs.of({
+      'vault.open': () => launcher.open,
+      'vault.openExisting': ({ id }) => launcher.openExisting(id),
+      'vault.get': ({ id }) => windows.getVault(id),
+      'vault.remove': ({ id }) => launcher.remove(id)
+    })
   })
-}))
+)

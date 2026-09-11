@@ -1,17 +1,6 @@
 import { AgentSettings } from '@folio/agent/config/schema'
 import { resolveFolioConfigDirectory } from '@folio/agent/config/directory'
-import {
-  Config,
-  Context,
-  Effect,
-  FileSystem,
-  Layer,
-  Path,
-  PubSub,
-  Schema,
-  Semaphore,
-  Stream
-} from 'effect'
+import { Config, Context, Effect, FileSystem, Layer, Path, PubSub, Schema, Semaphore, Stream } from 'effect'
 import { ConfigStoreError, GlobalConfig, GlobalConfigPatch } from '../../shared/config'
 import { Vault } from '../../shared/vault'
 
@@ -33,21 +22,25 @@ export class ConfigService extends Context.Service<
     readonly setAgent: (settings: AgentSettings) => Effect.Effect<GlobalConfig, ConfigStoreError>
     /** Adds a validated vault to the global index, reusing an existing canonical path under the write lock. */
     readonly addVault: (vault: Vault) => Effect.Effect<Vault, ConfigStoreError>
+    /** Removes a vault registration under the same lock; returns null when the ID is already absent. */
+    readonly removeVault: (id: string) => Effect.Effect<Vault | null, ConfigStoreError>
   }
 >()('folio/services/ConfigService') {
   /** Resolves the directory once per layer; filesystem access starts on get/update. */
   static readonly layer = Layer.effect(
     ConfigService,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const configuredDirectory = yield* Config.nonEmptyString('FOLIO_CONFIG_DIR').pipe(
         Config.option,
-        Effect.map((value) => value._tag === 'Some' ? value.value : undefined)
+        Effect.map((value) => (value._tag === 'Some' ? value.value : undefined))
       )
-      const directory = yield* Effect.sync(() => resolveFolioConfigDirectory({
-        env: configuredDirectory === undefined ? {} : { FOLIO_CONFIG_DIR: configuredDirectory }
-      }))
+      const directory = yield* Effect.sync(() =>
+        resolveFolioConfigDirectory({
+          env: configuredDirectory === undefined ? {} : { FOLIO_CONFIG_DIR: configuredDirectory }
+        })
+      )
       const filePath = path.join(directory, 'config.json')
       const lock = yield* Semaphore.make(1)
       const changes = yield* PubSub.unbounded<GlobalConfig>()
@@ -56,29 +49,31 @@ export class ConfigService extends Context.Service<
       // Only absence uses defaults: damaged files and permission errors must remain visible.
       const read = fs.readFileString(filePath).pipe(
         Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed('{}')),
-        Effect.flatMap((json) => Schema.decodeUnknownEffect(ConfigJson)(json, {
-          onExcessProperty: 'error',
-          errors: 'all'
-        }).pipe(Effect.mapError(() => new Error('Invalid global configuration'))))
+        Effect.flatMap((json) =>
+          Schema.decodeUnknownEffect(ConfigJson)(json, {
+            onExcessProperty: 'error',
+            errors: 'all'
+          }).pipe(Effect.mapError(() => new Error('Invalid global configuration')))
+        )
       )
 
-      const get = read.pipe(
-        Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause }))
-      )
+      const get = read.pipe(Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause })))
 
       // Subscribe and read under the write lock so an update cannot fall between
       // the initial snapshot and subscription, or deliver older queued values.
-      const watch = Stream.unwrap(Effect.gen(function*() {
-        const { subscription, initial } = yield* Effect.gen(function*() {
-          const subscription = yield* PubSub.subscribe(changes)
-          const initial = yield* get
-          return { subscription, initial }
-        }).pipe(lock.withPermit)
-        return Stream.concat(Stream.succeed(initial), Stream.fromSubscription(subscription))
-      }))
+      const watch = Stream.unwrap(
+        Effect.gen(function* () {
+          const { subscription, initial } = yield* Effect.gen(function* () {
+            const subscription = yield* PubSub.subscribe(changes)
+            const initial = yield* get
+            return { subscription, initial }
+          }).pipe(lock.withPermit)
+          return Stream.concat(Stream.succeed(initial), Stream.fromSubscription(subscription))
+        })
+      )
 
       /** Atomically replaces and publishes a complete config; callers hold the shared write lock. */
-      const write = Effect.fn('ConfigService.write')(function*(next: GlobalConfig) {
+      const write = Effect.fn('ConfigService.write')(function* (next: GlobalConfig) {
         const json = yield* Schema.encodeEffect(ConfigJson)(next)
         yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
 
@@ -92,52 +87,69 @@ export class ConfigService extends Context.Service<
         yield* fs.writeFileString(temporaryFile, `${json}\n`, { mode: 0o600 })
         // Once replacement starts, publish the committed value even if the
         // requesting window closes; other windows must observe persisted state.
-        yield* fs.rename(temporaryFile, filePath).pipe(
-          Effect.andThen(PubSub.publish(changes, next)),
-          Effect.uninterruptible
-        )
+        yield* fs.rename(temporaryFile, filePath).pipe(Effect.andThen(PubSub.publish(changes, next)), Effect.uninterruptible)
       }, Effect.scoped)
 
       /** Serializes preference updates with index changes so neither can overwrite the other. */
-      const update = Effect.fn('ConfigService.update')(function*(patch: GlobalConfigPatch) {
-        const validated = yield* Schema.decodeUnknownEffect(GlobalConfigPatch)(patch, {
-          onExcessProperty: 'error'
-        })
-        const current = yield* read
-        const next = { ...current, ...validated }
-        yield* write(next)
-        return next
-      }, lock.withPermit, Effect.mapError((cause) =>
-        new ConfigStoreError({ path: filePath, operation: 'update', cause })
-      ))
+      const update = Effect.fn('ConfigService.update')(
+        function* (patch: GlobalConfigPatch) {
+          const validated = yield* Schema.decodeUnknownEffect(GlobalConfigPatch)(patch, {
+            onExcessProperty: 'error'
+          })
+          const current = yield* read
+          const next = { ...current, ...validated }
+          yield* write(next)
+          return next
+        },
+        lock.withPermit,
+        Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'update', cause }))
+      )
 
       /** Agent settings are replaced as a validated aggregate so profile references cannot bypass ModelService invariants. */
-      const setAgent = Effect.fn('ConfigService.setAgent')(function*(settings: AgentSettings) {
-        const validated = yield* Schema.decodeUnknownEffect(AgentSettings)(settings, {
-          onExcessProperty: 'error',
-          errors: 'all'
-        }).pipe(Effect.mapError(() => new Error('Invalid agent configuration')))
-        const current = yield* read
-        const next = { ...current, agent: validated }
-        yield* write(next)
-        return next
-      }, lock.withPermit, Effect.mapError((cause) =>
-        new ConfigStoreError({ path: filePath, operation: 'update', cause })
-      ))
+      const setAgent = Effect.fn('ConfigService.setAgent')(
+        function* (settings: AgentSettings) {
+          const validated = yield* Schema.decodeUnknownEffect(AgentSettings)(settings, {
+            onExcessProperty: 'error',
+            errors: 'all'
+          }).pipe(Effect.mapError(() => new Error('Invalid agent configuration')))
+          const current = yield* read
+          const next = { ...current, agent: validated }
+          yield* write(next)
+          return next
+        },
+        lock.withPermit,
+        Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'update', cause }))
+      )
 
       /** Index mutations stay main-process-only; preference RPC cannot replace the vault array. */
-      const addVault = Effect.fn('ConfigService.addVault')(function*(vault: Vault) {
-        const validated = yield* Schema.decodeUnknownEffect(Vault)(vault)
-        const current = yield* read
-        const existing = current.vaults.find((entry) => entry.path === validated.path)
-        if (existing) return existing
-        yield* write({ ...current, vaults: [...current.vaults, validated] })
-        return validated
-      }, lock.withPermit, Effect.mapError((cause) =>
-        new ConfigStoreError({ path: filePath, operation: 'update', cause })
-      ))
+      const addVault = Effect.fn('ConfigService.addVault')(
+        function* (vault: Vault) {
+          const validated = yield* Schema.decodeUnknownEffect(Vault)(vault)
+          const current = yield* read
+          const existing = current.vaults.find((entry) => entry.path === validated.path)
+          if (existing) return existing
+          yield* write({ ...current, vaults: [...current.vaults, validated] })
+          return validated
+        },
+        lock.withPermit,
+        Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'update', cause }))
+      )
 
-      return ConfigService.of({ directory, filePath, get, watch, update, setAgent, addVault })
+      /** Removes a vault registration after its managed files have been deleted by VaultService. */
+      const removeVault = Effect.fn('ConfigService.removeVault')(
+        function* (id: string) {
+          const validatedId = yield* Schema.decodeUnknownEffect(Vault.fields.id)(id)
+          const current = yield* read
+          const removed = current.vaults.find((entry) => entry.id === validatedId) ?? null
+          if (removed === null) return null
+          yield* write({ ...current, vaults: current.vaults.filter((entry) => entry.id !== validatedId) })
+          return removed
+        },
+        lock.withPermit,
+        Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'update', cause }))
+      )
+
+      return ConfigService.of({ directory, filePath, get, watch, update, setAgent, addVault, removeVault })
     })
   )
 }

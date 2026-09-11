@@ -33,8 +33,8 @@ describe('ApplicationMenu', () => {
         quit: Effect.void
       }),
       Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) }),
-      Layer.succeed(MainWindow)({ open: Effect.sync(newWindow), isOpen: Effect.succeed(false), openVault: () => Effect.void, getVault: () => Effect.succeed(null) }),
-      Layer.succeed(VaultLauncher)({ open: Effect.sync(() => { open(); return null }), openExisting: () => Effect.die('unused') })
+      Layer.succeed(MainWindow)({ open: Effect.sync(newWindow), isOpen: Effect.succeed(false), openVault: () => Effect.void, closeVault: () => Effect.void, getVault: () => Effect.succeed(null) }),
+      Layer.succeed(VaultLauncher)({ open: Effect.sync(() => { open(); return null }), openExisting: () => Effect.die('unused'), remove: () => Effect.die('unused') })
     ))))
     try {
       await runtime.runPromise(Effect.void)

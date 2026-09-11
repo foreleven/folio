@@ -33,12 +33,15 @@ function runtime(
 ) {
   const save = vi.fn(() => register)
   const launch = vi.fn(() => open)
+  const close = vi.fn(() => Effect.void)
+  const remove = vi.fn(() => Effect.void)
+  const removeRegistration = vi.fn(() => Effect.succeed(vault))
   const instance = ManagedRuntime.make(VaultLauncher.layer.pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeed(ConfigService)({ directory: '/config', filePath: '/config/config.json', get, watch: Stream.empty, update: () => get, setAgent: () => get, addVault: (entry) => Effect.succeed(entry) }),
-    Layer.succeed(VaultService)({ register: save }),
-    Layer.succeed(MainWindow)({ open: Effect.void, isOpen: Effect.succeed(false), openVault: launch, getVault: () => Effect.succeed(null) })
+    Layer.succeed(ConfigService)({ directory: '/config', filePath: '/config/config.json', get, watch: Stream.empty, update: () => get, setAgent: () => get, addVault: (entry) => Effect.succeed(entry), removeVault: removeRegistration }),
+    Layer.succeed(VaultService)({ register: save, remove }),
+    Layer.succeed(MainWindow)({ open: Effect.void, isOpen: Effect.succeed(false), openVault: launch, closeVault: close, getVault: () => Effect.succeed(null) })
   ))))
-  return { instance, save, launch }
+  return { instance, save, launch, close, remove, removeRegistration }
 }
 
 describe('VaultLauncher', () => {
@@ -125,4 +128,18 @@ describe('VaultLauncher', () => {
       expect(launch).not.toHaveBeenCalled()
     } finally { await instance.dispose() }
   })
+
+  it('closes an open vault before removing its registration', async () => {
+    const { instance, close, remove, removeRegistration } = runtime()
+    try {
+      const service = await instance.runPromise(VaultLauncher)
+      await expect(instance.runPromise(service.remove(vault.id))).resolves.toEqual(vault)
+      expect(close).toHaveBeenCalledWith(vault.id)
+      expect(remove).toHaveBeenCalledWith(vault)
+      expect(removeRegistration).toHaveBeenCalledWith(vault.id)
+      expect(close.mock.invocationCallOrder[0]).toBeLessThan(remove.mock.invocationCallOrder[0])
+      expect(remove.mock.invocationCallOrder[0]).toBeLessThan(removeRegistration.mock.invocationCallOrder[0])
+    } finally { await instance.dispose() }
+  })
+
 })

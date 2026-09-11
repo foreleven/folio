@@ -137,6 +137,23 @@ describe('VaultService', () => {
     } finally { await restarted.dispose() }
   })
 
+  it('deletes the managed vault directory and its published link', async () => {
+    const selected = await folder('My Wiki')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const vault = await runtime.runPromise(store.register(selected))
+      const managed = join(root, 'config/vaults', vault.id)
+      await writeFile(join(selected, 'note.md'), 'content')
+      await runtime.runPromise(store.remove(vault))
+      await expect(lstat(managed)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(selected)).rejects.toMatchObject({ code: 'ENOENT' })
+      const config = await runtime.runPromise(ConfigService)
+      await runtime.runPromise(config.removeVault(vault.id))
+      expect((await runtime.runPromise(config.get)).vaults).toEqual([])
+    } finally { await runtime.dispose() }
+  })
+
   it('deduplicates simultaneous selections and symlink aliases', async () => {
     const selected = await folder('wiki')
     const alias = join(root, 'alias')

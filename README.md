@@ -53,9 +53,9 @@ The renderer applies the theme and resolves the interface language in each windo
 Main-process Effects access the shared `ConfigService` through `MainLive`:
 
 ```ts
-const config = yield* ConfigService
-const current = yield* config.get
-const updated = yield* config.update({ theme: 'dark' })
+const config = yield * ConfigService
+const current = yield * config.get
+const updated = yield * config.update({ theme: 'dark' })
 ```
 
 Reads return defaults for missing files/fields without creating files. The first
@@ -104,8 +104,10 @@ and full paths available on hover. Selecting one opens it directly without a
 folder picker, using its saved ID and path. Missing folders and configuration
 errors leave welcome open with a retryable error. The list follows the shared
 configuration stream, so vaults registered in other windows appear automatically.
-Closing a window does not delete its files or registration. Startup shows the
-welcome page; restoring the previous session is not implemented yet.
+Closing a window does not delete its files or registration. Settings → Vaults
+lists registered vaults and can delete a vault; Folio closes the vault window
+first when needed, then removes its managed data and linked folder. Startup shows
+the welcome page; restoring the previous session is not implemented yet.
 
 The global `~/.folio/config.json` contains the vault index alongside preferences:
 

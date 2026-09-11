@@ -9,11 +9,11 @@ import {
   SidebarMenuButton,
   SidebarMenuItem
 } from '@folio/ui/components/ui/sidebar'
-import { BlocksIcon, BotIcon, Settings2Icon } from 'lucide-react'
+import { BlocksIcon, BotIcon, FolderIcon, Settings2Icon } from 'lucide-react'
 import { useLocale } from '../preferences'
 import { settingsMessages } from './messages'
 
-export type SettingsPage = 'general' | 'models' | 'integrations'
+export type SettingsPage = 'general' | 'vaults' | 'models' | 'integrations'
 
 /** Navigates settings sections without changing the independent window's entry route. */
 export function SettingsSidebar({ page, onPageChange }: { page: SettingsPage; onPageChange: (page: SettingsPage) => void }): React.JSX.Element {
@@ -39,6 +39,17 @@ export function SettingsSidebar({ page, onPageChange }: { page: SettingsPage; on
                 >
                   <Settings2Icon aria-hidden="true" />
                   <span>{text.general}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={page === 'vaults'}
+                  className={itemClassName}
+                  aria-current={page === 'vaults' ? 'page' : undefined}
+                  onClick={() => onPageChange('vaults')}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span>{text.vaults}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
