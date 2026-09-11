@@ -64,6 +64,7 @@ describe('MainWindow live service', () => {
     expect(electronMocks.createBrowserWindow).toHaveBeenCalledWith(
       expect.objectContaining({
         backgroundColor: '#0a0a0a',
+        ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 12 } } : {}),
         webPreferences: expect.objectContaining({
           preload: expect.stringMatching(/index\.cjs$/)
         })

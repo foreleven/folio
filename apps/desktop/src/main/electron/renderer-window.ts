@@ -3,10 +3,7 @@ import { Effect, Schema } from 'effect'
 import { join } from 'node:path'
 
 /** Renderer navigation failed while opening an application window. */
-export class RendererLoadError extends Schema.TaggedError<RendererLoadError>()(
-  'RendererLoadError',
-  { cause: Schema.Defect() }
-) {}
+export class RendererLoadError extends Schema.TaggedError<RendererLoadError>()('RendererLoadError', { cause: Schema.Defect() }) {}
 
 /**
  * Opens a renderer-provided URL only when it uses a web protocol. Invalid and
@@ -42,6 +39,14 @@ export function createRendererWindow(options: BrowserWindowConstructorOptions = 
     minHeight: 520,
     show: false,
     backgroundColor: getRendererBackgroundColor(),
+    // Keep macOS traffic lights while letting the renderer own the titlebar surface.
+    // Other platforms retain their native window controls and frame.
+    ...(process.platform === 'darwin'
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 14, y: 12 }
+        }
+      : {}),
     ...options,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -64,10 +69,7 @@ export function createRendererWindow(options: BrowserWindowConstructorOptions = 
 }
 
 /** Loads the configured renderer and keeps navigation failures in Effect. */
-export function loadRenderer(
-  mainWindow: BrowserWindow,
-  page?: 'settings' | `vault/${string}`
-): Effect.Effect<void, RendererLoadError> {
+export function loadRenderer(mainWindow: BrowserWindow, page?: 'settings' | `vault/${string}`): Effect.Effect<void, RendererLoadError> {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
 
   if (rendererUrl && !page) {
