@@ -111,6 +111,12 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     })
   }, [conflictIntent, intentKey, reprepareIntent, submitted, syncIntent])
 
+  // A successful reprepare retires the old operation. Do not keep a lost-response conflict
+  // request bound to that superseded coordinator, or a later click could target stale state.
+  useEffect(() => {
+    if (operation && conflictIntent && conflictIntent.operationId !== operation.id) setConflictIntent(null)
+  }, [conflictIntent, operation])
+
   /** Retains the exact save identity after a lost response; the server owns the filesystem root. */
   async function submit(retry?: SaveTaskWikiFiles | SaveRunWikiFiles): Promise<void> {
     if (inFlight.current) return

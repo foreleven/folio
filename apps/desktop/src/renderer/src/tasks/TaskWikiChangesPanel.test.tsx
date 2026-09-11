@@ -202,6 +202,24 @@ it('offers conflict resolution again when reprepare returns a new conflict opera
   expect(mocks.startConflict.mock.calls[0]![0].payload).toMatchObject({ operationId: 'replacement-conflict', sourceSessionId: 'source-session' })
 })
 
+it('drops a stale lost-response conflict request when its operation is replaced', async () => {
+  mocks.detail = { sessions: [{ id: 'source-session', purpose: 'task' }], runs: [] }
+  mocks.operations = [{ id: 'old-conflict', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
+    sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
+    preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
+  const panel = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
+  mocks.reprepare.mockResolvedValueOnce({ id: 'replacement-conflict', state: 'conflict' })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare conflict on current main' })))
+
+  mocks.operations = [{ ...mocks.operations[0]!, id: 'replacement-conflict', supersedesId: 'old-conflict' }]
+  panel.rerender(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  mocks.startConflict.mockResolvedValueOnce({ id: 'replacement-run' })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
+  expect(mocks.startConflict.mock.calls[1]![0].payload.operationId).toBe('replacement-conflict')
+})
+
 it('shows conflict evidence and retries the fixed-Agent resolution Run with stable identities', async () => {
   mocks.detail = { sessions: [{ id: 'source-session', purpose: 'task' }, { id: 'conflict-session', purpose: 'conflict-resolution', syncOperationId: 'conflict-sync' }], runs: [
     { id: 'conflict-run', sessionId: 'conflict-session', prompt: 'resolve', purpose: 'conflict-resolution', state: 'running', syncState: 'not-required', baselineCommit: 'a'.repeat(40) }
