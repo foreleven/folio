@@ -1,39 +1,14 @@
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInset,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarProvider,
-  SidebarSeparator,
-  SidebarTrigger
-} from '@folio/ui/components/ui/sidebar'
-import { Separator } from '@folio/ui/components/ui/separator'
-import { FolderIcon, GitBranchIcon, LayoutDashboardIcon, ListTodoIcon, WorkflowIcon } from 'lucide-react'
+import { FolderIcon, GitBranchIcon, ListTodoIcon, WorkflowIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { VaultWorkspaceLayout, type WorkspaceSection } from './layouts/VaultWorkspaceLayout'
 import { useLocale } from '../preferences'
 import { VaultRpcClient } from '../rpc/vault-rpc'
 import { RoutinePanel } from '../routines/RoutinePanel'
 import { TaskPanel } from '../tasks/TaskPanel'
 import { OpenVaultButton } from './OpenVaultButton'
 import { WorkspaceChangesPanel } from './WorkspaceChangesPanel'
-
-type WorkspaceSection = 'overview' | 'changes' | 'routines' | 'tasks'
-
-const sectionIcons = {
-  overview: LayoutDashboardIcon,
-  changes: GitBranchIcon,
-  routines: WorkflowIcon,
-  tasks: ListTodoIcon
-} as const
 
 /** Resolves this window's vault by stable ID; reloads keep the same window context. */
 export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
@@ -81,88 +56,18 @@ export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
   }
 
   const vault = result.value
-  const sections: { id: WorkspaceSection; label: string; description: string }[] = [
-    { id: 'overview', label: chinese ? '概览' : 'Overview', description: chinese ? '知识库状态' : 'Vault status' },
-    { id: 'changes', label: chinese ? '文件变更' : 'File changes', description: chinese ? '检查并保存' : 'Review and save' },
-    { id: 'routines', label: 'Routines', description: chinese ? '自动化工作流' : 'Automated workflows' },
-    { id: 'tasks', label: chinese ? '任务' : 'Tasks', description: chinese ? 'Agent 工作区' : 'Agent workspaces' }
-  ]
-  const active = sections.find((item) => item.id === section) ?? sections[0]!
-
   return (
-    <SidebarProvider defaultOpen className="h-svh min-h-0" style={{ '--sidebar-width': '220px' } as React.CSSProperties}>
-      <Sidebar collapsible="icon" className="border-sidebar-border/70">
-        <SidebarHeader className="gap-3 border-b px-3 pt-8 pb-3 [-webkit-app-region:drag]">
-          <div className="flex min-w-0 items-center gap-2 group-data-[collapsible=icon]:justify-center">
-            <FolderIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
-            <div className="min-w-0 group-data-[collapsible=icon]:hidden">
-              <p className="truncate text-ui font-medium" title={vault.name}>
-                {vault.name}
-              </p>
-              <p className="truncate text-support text-muted-foreground" title={vault.path}>
-                {vault.path}
-              </p>
-            </div>
-          </div>
-        </SidebarHeader>
-        <SidebarContent>
-          <SidebarGroup className="p-2">
-            <SidebarGroupLabel className="px-2 text-support">{chinese ? '工作区' : 'Workspace'}</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {sections.map((item) => {
-                  const Icon = sectionIcons[item.id]
-                  return (
-                    <SidebarMenuItem key={item.id}>
-                      <SidebarMenuButton
-                        isActive={section === item.id}
-                        tooltip={item.label}
-                        aria-current={section === item.id ? 'page' : undefined}
-                        onClick={() => setSection(item.id)}
-                      >
-                        <Icon aria-hidden="true" />
-                        <span>{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  )
-                })}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        </SidebarContent>
-        <SidebarSeparator />
-        <SidebarFooter className="p-2">
-          <p className="truncate px-2 text-support text-muted-foreground group-data-[collapsible=icon]:hidden">{chinese ? '本地知识库' : 'Local vault'}</p>
-        </SidebarFooter>
-      </Sidebar>
-      <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
-        <header className="flex h-9 shrink-0 items-center gap-2 border-b px-3 [-webkit-app-region:drag]">
-          <SidebarTrigger className="[-webkit-app-region:no-drag]" aria-label={chinese ? '切换侧边栏' : 'Toggle sidebar'} />
-          <Separator orientation="vertical" className="h-4" />
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-ui font-semibold" title={active.label}>
-              {active.label}
-            </h1>
-          </div>
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto" role="region" aria-labelledby="workspace-page-title">
-          <div className="mx-auto w-full max-w-190 px-6 py-6 max-[600px]:px-4">
-            <h2 id="workspace-page-title" className="sr-only">
-              {active.label}
-            </h2>
-            {section === 'overview' ? (
-              <OverviewContent chinese={chinese} vaultName={vault.name} vaultPath={vault.path} onNavigate={setSection} />
-            ) : section === 'changes' ? (
-              <WorkspaceChangesPanel key={`changes:${vault.id}`} vaultId={vault.id} />
-            ) : section === 'routines' ? (
-              <RoutinePanel key={`routines:${vault.id}`} vaultId={vault.id} />
-            ) : (
-              <TaskPanel key={vault.id} vaultId={vault.id} />
-            )}
-          </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+    <VaultWorkspaceLayout chinese={chinese} vault={vault} section={section} onSectionChange={setSection}>
+      {section === 'overview' ? (
+        <OverviewContent chinese={chinese} vaultName={vault.name} vaultPath={vault.path} onNavigate={setSection} />
+      ) : section === 'changes' ? (
+        <WorkspaceChangesPanel key={`changes:${vault.id}`} vaultId={vault.id} />
+      ) : section === 'routines' ? (
+        <RoutinePanel key={`routines:${vault.id}`} vaultId={vault.id} />
+      ) : (
+        <TaskPanel key={vault.id} vaultId={vault.id} />
+      )}
+    </VaultWorkspaceLayout>
   )
 }
 
