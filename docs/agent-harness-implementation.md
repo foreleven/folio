@@ -812,5 +812,6 @@ Run 的 Session/Run ID 同样由 operation ID 的有界稳定摘要派生，避�
 reprepare 在新 main 上再次返回 `conflict` 后，文件面板会继续展示
 `Start conflict-resolution Run`，并把新的 operation ID 传给固定 Agent 的启动入口。
 
-Task wiki 面板回归 14/14 通过。普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、
-Integration 实际装配和 Agent 切换不在当前切片范围内。
+Task wiki 面板回归 14/14 通过；Desktop 全量 Vitest 现为 58 个文件、391/391 通过。
+普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、Integration 实际装配和 Agent
+切换不在当前切片范围内。
