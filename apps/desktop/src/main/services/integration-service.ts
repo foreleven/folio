@@ -1,8 +1,8 @@
 import { IntegrationContext, IntegrationError } from '@folio/integrations/base'
-import type { Integration, IntegrationEffect } from '@folio/integrations/base'
+import type { Integration, IntegrationEffect, IngestContext } from '@folio/integrations/base'
 import { Context, Effect, Fiber, FileSystem, Layer, Match, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
-import { join } from 'node:path'
+import { basename, delimiter, isAbsolute, join } from 'node:path'
 import { IntegrationSettingsError, type IntegrationView } from '../../shared/integration'
 import { IntegrationBrowser } from '../electron/IntegrationBrowser'
 import { ConfigService } from './config-service'
@@ -12,6 +12,13 @@ import { IntegrationAction } from '@folio/integrations/protocol'
 
 const failure = () => new IntegrationSettingsError({ message: 'The integration operation failed. Check its status and try again.' })
 
+/** Runtime-only paths and instructions. Credentials and opaque installation state never enter this result. */
+export interface PreparedIntegrationResources {
+  readonly skillPaths: readonly string[]
+  readonly executableDirectories: readonly string[]
+  readonly instructions: readonly string[]
+}
+
 /** Owns process-lifetime jobs, SQLite state, and a push stream shared by all settings windows. */
 export class IntegrationService extends Context.Service<IntegrationService, {
   readonly watch: Stream.Stream<readonly IntegrationView[], IntegrationSettingsError>
@@ -19,6 +26,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
   readonly install: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly inspect: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly action: (id: string, actionId: string, payload?: unknown) => Effect.Effect<void, IntegrationSettingsError>
+  readonly prepare: (ids: readonly string[], workspaceDirectory: string) => Effect.Effect<PreparedIntegrationResources, IntegrationSettingsError>
 }>()('folio/services/IntegrationService') {
   static readonly layer = Layer.effect(IntegrationService, Effect.gen(function*() {
     const catalog = yield* IntegrationCatalog
@@ -96,6 +104,48 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         ))
       )).pipe(Effect.mapError(() => new IntegrationError({ message: 'Could not register integration resource.' })))
     })
+    /**
+     * Rebinds installed resource IDs to trusted provider hooks and validates declared mounts.
+     * This prepares a Session only: no installation, authorization action, Prompt, or ingestion.
+     * The command gate excludes a new installation/action while preparing; existing jobs fail fast.
+     */
+    const prepare = Effect.fn('IntegrationService.prepare')(function*(ids: readonly string[], workspaceDirectory: string) {
+      if (!isAbsolute(workspaceDirectory)) return yield* failure()
+      const rows = yield* store.list
+      const skillPaths = new Set<string>()
+      const executableDirectories = new Set<string>()
+      const instructions = new Set<string>()
+      for (const id of new Set(ids)) {
+        const integration = catalog.find(item => item.id === id)
+        const installed = rows.find(row => row.id === id)
+        if (!integration || !installed || running.has(id)
+          || integration.states[installed.state]?.kind !== 'ready') return yield* failure()
+        if (integration.resources.some(resource => !installed.resources.some(row => row.id === resource.id))) return yield* failure()
+        // Readiness in SQLite can be stale; the provider owns the current executable/account check.
+        yield* withContext(id, integration.check())
+        const context: IngestContext = {
+          integrationDirectory: join(config.directory, 'integrations', id), workspaceDirectory,
+          skills: [], executableDirectories: [], instructions: [], env: {}
+        }
+        for (const resource of installed.resources) {
+          const implementation = integration.resources.find(item => item.id === resource.id)
+          if (!implementation) return yield* failure()
+          yield* implementation.onIngest(context)
+        }
+        // Environment credentials need a separate ephemeral channel; never quietly serialize them.
+        if (Object.keys(context.env).length) return yield* failure()
+        for (const path of context.skills) {
+          if (!isAbsolute(path) || basename(path) !== 'SKILL.md' || (yield* fs.stat(path)).type !== 'File') return yield* failure()
+          skillPaths.add(path)
+        }
+        for (const path of context.executableDirectories) {
+          if (!isAbsolute(path) || path.includes(delimiter) || (yield* fs.stat(path)).type !== 'Directory') return yield* failure()
+          executableDirectories.add(path)
+        }
+        for (const instruction of context.instructions) instructions.add(instruction)
+      }
+      return { skillPaths: [...skillPaths], executableDirectories: [...executableDirectories], instructions: [...instructions] }
+    }, commands.withPermit, Effect.mapError(failure))
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
       const revision = revisions.get(integration.id) ?? 0
@@ -248,6 +298,6 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     }
     yield* Effect.logInfo('Integration service ready').pipe(Effect.annotateLogs({ integrationCount: catalog.length }))
     return IntegrationService.of({ list, watch, install: (id) => start(id, 'install'), inspect: (id) => start(id, 'inspect'),
-      action })
+      action, prepare })
   }))
 }

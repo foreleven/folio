@@ -53,6 +53,21 @@ describe("loadFolioAgentConfig", () => {
       });
   });
 
+  it("uses a strict Session snapshot independently of global defaults and rejects secret fields", async () => {
+    const root = await makeRoot();
+    await writeFile(join(root, "config.json"), "damaged global config");
+    const env = { FOLIO_CONFIG_DIR: root, FOLIO_SESSION_MODEL_PROFILE: JSON.stringify(profile) };
+    expect(await Effect.runPromise(loadFolioAgentConfig({ env }))).toMatchObject({
+      defaultProfile: profile, settings: { enabled: true, modelProfiles: [profile], defaultModelProfileId: profile.id },
+    });
+    const error = await Effect.runPromise(Effect.flip(loadFolioAgentConfig({ env: {
+      ...env, FOLIO_SESSION_MODEL_PROFILE: JSON.stringify({ ...profile, apiKey: "secret-sentinel" }),
+    } })));
+    expect(error.reason).toBe("configuration_invalid");
+    expect(JSON.stringify(error)).not.toContain("secret-sentinel");
+    expect(await import("node:fs/promises").then(fs => fs.readFile(join(root, "config.json"), "utf8"))).toBe("damaged global config");
+  });
+
   it("uses safe disabled defaults only when config.json is absent", async () => {
     const root = await makeRoot();
     await expect(Effect.runPromise(loadFolioAgentConfig({ env: { FOLIO_CONFIG_DIR: root } })))

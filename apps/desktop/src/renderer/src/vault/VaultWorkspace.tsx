@@ -5,6 +5,9 @@ import { useEffect } from 'react'
 import { useLocale } from '../preferences'
 import { VaultRpcClient } from '../rpc/vault-rpc'
 import { OpenVaultButton } from './OpenVaultButton'
+import { RoutinePanel } from '../routines/RoutinePanel'
+import { TaskPanel } from '../tasks/TaskPanel'
+import { WorkspaceChangesPanel } from './WorkspaceChangesPanel'
 
 /** Resolves this window's vault by stable ID; reloads keep the same window context. */
 export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
@@ -53,6 +56,9 @@ export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
               <h2 id="vault-overview-title" className="text-lg leading-6 font-semibold">{chinese ? '知识库已打开' : 'Your vault is open'}</h2>
               <p className="mt-2 text-base leading-[26px] text-foreground">{chinese ? '此文件夹是你的个人 Wiki 文件存储位置。' : 'This folder is home to your personal wiki files.'}</p>
               <code className="mt-4 block max-w-full border-l-2 border-primary/50 pl-3 text-support text-muted-foreground wrap-anywhere">{vault.path}</code>
+              <WorkspaceChangesPanel key={`changes:${vault.id}`} vaultId={vault.id} />
+              <RoutinePanel key={`routines:${vault.id}`} vaultId={vault.id} />
+              <TaskPanel key={vault.id} vaultId={vault.id} />
             </article>
           </div>
         </section>

@@ -3,11 +3,13 @@ import { join, resolve } from "node:path";
 
 export const FOLIO_CONFIG_DIR_ENV = "FOLIO_CONFIG_DIR";
 export const FOLIO_AGENT_DIR_ENV = "FOLIO_AGENT_DIR";
+export const FOLIO_SESSION_STORAGE_DIR_ENV = "FOLIO_SESSION_STORAGE_DIR";
 
 export interface AgentDirectoryEnvironment {
   readonly [key: string]: string | undefined;
   readonly FOLIO_CONFIG_DIR?: string;
   readonly FOLIO_AGENT_DIR?: string;
+  readonly FOLIO_SESSION_STORAGE_DIR?: string;
 }
 
 export interface ResolveAgentDirectoryOptions {
@@ -41,4 +43,12 @@ export const resolveFolioAgentDirectory = (options: ResolveAgentDirectoryOptions
   const explicitAgentDirectory = env.FOLIO_AGENT_DIR?.trim();
   if (explicitAgentDirectory) return resolveOverride(explicitAgentDirectory, homeDirectory);
   return join(resolveFolioConfigDirectory({ env, homeDirectory }), "agent");
+};
+
+/** Vault history is independent of the shared credential directory; standalone CLI callers retain their existing default. */
+export const resolveFolioSessionStorageDirectory = (options: ResolveAgentDirectoryOptions = {}): string => {
+  const env = options.env ?? process.env;
+  const homeDirectory = options.homeDirectory ?? homedir();
+  const directory = env.FOLIO_SESSION_STORAGE_DIR?.trim();
+  return directory ? resolveOverride(directory, homeDirectory) : resolveFolioAgentDirectory({ env, homeDirectory });
 };

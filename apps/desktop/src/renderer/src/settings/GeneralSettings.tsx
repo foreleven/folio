@@ -106,6 +106,9 @@ export function GeneralSettings(): React.JSX.Element {
               </ToggleGroup>
             </Field>
           </FieldGroup>
+          {status === 'saving' || status === 'saved' ? <p role="status" className="text-support text-muted-foreground">
+            {status === 'saving' ? text.saving : text.saved}
+          </p> : null}
           {status === 'error' ? (
             <Alert variant="destructive">
               <AlertTitle>{text.saveError}</AlertTitle>

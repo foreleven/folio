@@ -1,4 +1,6 @@
 import { IntegrationRpcs } from '../../shared/rpc/integration-rpc'
+import { TaskRpcs } from '../../shared/rpc/task-rpc'
+import { TaskRpcHandlersLive } from './task-rpc'
 import { IntegrationRpcHandlersLive } from './integration-rpc'
 import { ModelRpcs } from '../../shared/rpc/model-rpc'
 import { ModelRpcHandlersLive } from './model-rpc'
@@ -27,10 +29,11 @@ const RpcDependenciesLive = Layer.mergeAll(
   ModelRpcHandlersLive,
   IntegrationRpcHandlersLive,
   VaultRpcHandlersLive,
+  TaskRpcHandlersLive,
   ElectronRpcProtocolLive
 )
 
 /** Complete main-process Effect RPC server Layer. */
-export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ConfigRpcs, ModelRpcs, VaultRpcs, IntegrationRpcs)).pipe(
+export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ConfigRpcs, ModelRpcs, VaultRpcs, IntegrationRpcs, TaskRpcs)).pipe(
   Layer.provide(RpcDependenciesLive)
 )

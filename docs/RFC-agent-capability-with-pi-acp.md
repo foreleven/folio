@@ -8,6 +8,8 @@
 
 ## Summary
 
+> 后续设计：2026-09-10 的 [Harness 执行与存储 RFC](./RFC-agent-harness-execution-storage.md) 定义了 Folio 自有 Routine / Task / Session / Run、每 Session 独立进程、每 Task worktree、ACP 事件持久化和自动 Git 同步。与本文的运行位置、任务范围及首期权限策略冲突时，以新 RFC 已确认决策为准；本文的模型配置和 ACP 协议细节仍是参考，尚未实现的内容不因此视为完成。
+
 本 RFC 规划 Folio 第一轮编码 Agent 能力：
 
 1. 完善 Pi 模型配置，并通过现有 Settings > Agent > Models 页面管理模型、认证状态和默认模型。

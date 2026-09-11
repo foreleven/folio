@@ -24,7 +24,6 @@ describe('main application program', () => {
         { _tag: 'Activate' as const },
         { _tag: 'WindowAllClosed' as const }
       ),
-      quitOnWindowAllClosed: true,
       quit: Effect.sync(() => {
         actions.push('quit')
       })
@@ -47,10 +46,10 @@ describe('main application program', () => {
       )
     )
 
-    expect(actions).toEqual(['ready', 'open', 'is-open', 'open', 'quit'])
+    expect(actions).toEqual(['ready', 'open', 'is-open', 'open'])
   })
 
-  it('keeps an existing window and preserves the macOS application process', async () => {
+  it('keeps an existing window and preserves the background application process', async () => {
     const actions: Array<string> = []
     const ElectronAppTest = Layer.succeed(ElectronApp)({
       metadata: Effect.succeed({
@@ -65,7 +64,6 @@ describe('main application program', () => {
         { _tag: 'Activate' as const },
         { _tag: 'WindowAllClosed' as const }
       ),
-      quitOnWindowAllClosed: false,
       quit: Effect.sync(() => {
         actions.push('quit')
       })

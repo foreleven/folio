@@ -22,8 +22,10 @@ export {
 export {
   FOLIO_AGENT_DIR_ENV,
   FOLIO_CONFIG_DIR_ENV,
+  FOLIO_SESSION_STORAGE_DIR_ENV,
   resolveFolioAgentDirectory,
   resolveFolioConfigDirectory,
+  resolveFolioSessionStorageDirectory,
   type AgentDirectoryEnvironment,
   type ResolveAgentDirectoryOptions,
 } from "./directory.js";

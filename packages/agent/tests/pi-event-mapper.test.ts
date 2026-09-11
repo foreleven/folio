@@ -100,15 +100,15 @@ describe("Pi AgentSessionEvent to ACP v2 mapper", () => {
       status: "in_progress",
     }]);
     expect(progress).toEqual([{
-      sessionUpdate: "tool_call_content_chunk",
+      sessionUpdate: "tool_call_update",
       toolCallId: "tool-1",
-      content: { type: "content", content: { type: "text", text: "read 4 bytes" } },
+      content: [{ type: "content", content: { type: "text", text: "read 4 bytes" } }],
     }]);
     expect(completed).toEqual([
       {
-        sessionUpdate: "tool_call_content_chunk",
+        sessionUpdate: "tool_call_update",
         toolCallId: "tool-1",
-        content: { type: "content", content: { type: "text", text: "done" } },
+        content: [{ type: "content", content: { type: "text", text: "done" } }],
       },
       {
         sessionUpdate: "tool_call_update",

@@ -5,7 +5,7 @@ const requiredString = (label: string) =>
 
 const identifier = (label: string) =>
   requiredString(label).check(
-    Schema.makeFilter((value) => value === value.trim(), {
+    Schema.makeFilter((value) => typeof value === "string" && value === value.trim(), {
       expected: `${label} must not have leading or trailing whitespace`,
     }),
   );
@@ -39,6 +39,7 @@ export type BuiltinProvider = typeof BuiltinProvider.Type;
 
 const HttpsUrl = requiredString("baseUrl").check(
   Schema.makeFilter((value) => {
+    if (typeof value !== "string") return false;
     try {
       return new URL(value).protocol === "https:";
     } catch {
@@ -64,14 +65,18 @@ export const CustomModel = Schema.Struct({
   contextWindow: Schema.Int.check(Schema.isGreaterThan(0)),
   maxTokens: Schema.Int.check(Schema.isGreaterThan(0)),
 }).check(
-  Schema.makeFilter(({ contextWindow, maxTokens }) => maxTokens <= contextWindow, {
+  Schema.makeFilter((value) => {
+    if (!value || typeof value !== "object") return true;
+    const { contextWindow, maxTokens } = value as { contextWindow?: unknown; maxTokens?: unknown };
+    return typeof contextWindow === "number" && typeof maxTokens === "number" && maxTokens <= contextWindow;
+  }, {
     expected: "maxTokens must not exceed contextWindow",
   }),
 );
 export type CustomModel = typeof CustomModel.Type;
 
 const EnvironmentVariable = identifier("environmentVariable").check(
-  Schema.makeFilter((value) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(value), {
+  Schema.makeFilter((value) => typeof value === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(value), {
     expected: "a valid environment variable name",
   }),
 );
@@ -90,12 +95,19 @@ const ModelProfileFields = Schema.Struct({
 /** Non-sensitive model selection. Secret values and arbitrary headers are deliberately absent. */
 export const ModelProfile = ModelProfileFields.check(
   Schema.makeFilter(
-    ({ credentialSource, environmentVariable }) =>
-      credentialSource === "environment" ? environmentVariable !== undefined : environmentVariable === undefined,
+    (value) => {
+      if (!value || typeof value !== "object") return true;
+      const { credentialSource, environmentVariable } = value as { credentialSource?: unknown; environmentVariable?: unknown };
+      return credentialSource === "environment" ? environmentVariable !== undefined : environmentVariable === undefined;
+    },
     { expected: "environmentVariable must be present only when credentialSource is environment" },
   ),
   Schema.makeFilter(
-    ({ provider, customModel }) => provider.type === "builtin" ? customModel === undefined : true,
+    (value) => {
+      if (!value || typeof value !== "object") return true;
+      const { provider, customModel } = value as { provider?: unknown; customModel?: unknown };
+      return !provider || typeof provider !== "object" || (provider as { type?: unknown }).type !== "builtin" || customModel === undefined;
+    },
     { expected: "customModel is allowed only for custom providers" },
   ),
 );
@@ -109,12 +121,21 @@ const AgentSettingsFields = Schema.Struct({
 
 export const AgentSettings = AgentSettingsFields.check(
   Schema.makeFilter(
-    ({ modelProfiles }) => new Set(modelProfiles.map(({ id }) => id)).size === modelProfiles.length,
+    (value) => {
+      if (!value || typeof value !== "object") return true;
+      const { modelProfiles } = value as { modelProfiles?: unknown };
+      if (!Array.isArray(modelProfiles)) return true;
+      return new Set(modelProfiles.map((profile) => profile && typeof profile === "object" ? (profile as { id?: unknown }).id : undefined)).size === modelProfiles.length;
+    },
     { expected: "model profile ids must be unique" },
   ),
   Schema.makeFilter(
-    ({ modelProfiles, defaultModelProfileId }) =>
-      defaultModelProfileId === undefined || modelProfiles.some(({ id }) => id === defaultModelProfileId),
+    (value) => {
+      if (!value || typeof value !== "object") return true;
+      const { modelProfiles, defaultModelProfileId } = value as { modelProfiles?: unknown; defaultModelProfileId?: unknown };
+      if (!Array.isArray(modelProfiles)) return true;
+      return defaultModelProfileId === undefined || modelProfiles.some((profile) => profile && typeof profile === "object" && (profile as { id?: unknown }).id === defaultModelProfileId);
+    },
     { expected: "defaultModelProfileId must reference an existing model profile" },
   ),
 );

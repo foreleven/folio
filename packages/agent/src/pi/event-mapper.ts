@@ -39,6 +39,7 @@ const displayText = (value: unknown): string | undefined => {
   return text.length > 0 ? text : undefined;
 };
 
+/** Maps Pi events to ACP; tool results are snapshots and replace prior display content. */
 export const makePiEventMapper = ({ createMessageId }: PiEventMapperOptions): PiEventMapper => {
   let assistantMessageId: string | undefined;
 
@@ -94,9 +95,9 @@ export const makePiEventMapper = ({ createMessageId }: PiEventMapperOptions): Pi
         case "tool_execution_update": {
           const text = displayText(event.partialResult);
           return text === undefined ? [] : [{
-            sessionUpdate: "tool_call_content_chunk",
+            sessionUpdate: "tool_call_update",
             toolCallId: event.toolCallId,
-            content: textContent(text),
+            content: [textContent(text)],
           }];
         }
 
@@ -105,9 +106,9 @@ export const makePiEventMapper = ({ createMessageId }: PiEventMapperOptions): Pi
           const updates: SessionUpdate[] = [];
           if (text !== undefined) {
             updates.push({
-              sessionUpdate: "tool_call_content_chunk",
+              sessionUpdate: "tool_call_update",
               toolCallId: event.toolCallId,
-              content: textContent(text),
+              content: [textContent(text)],
             });
           }
           updates.push({

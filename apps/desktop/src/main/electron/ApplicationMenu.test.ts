@@ -30,7 +30,7 @@ describe('ApplicationMenu', () => {
       Layer.succeed(ElectronApp)({
         metadata: Effect.succeed({ version: '1', path: '/test', isPackaged: false }),
         whenReady: Effect.sync(ready), events: Stream.empty,
-        quitOnWindowAllClosed: false, quit: Effect.void
+        quit: Effect.void
       }),
       Layer.succeed(SettingsWindow)({ toggle: Effect.sync(toggle) }),
       Layer.succeed(MainWindow)({ open: Effect.sync(newWindow), isOpen: Effect.succeed(false), openVault: () => Effect.void, getVault: () => Effect.succeed(null) }),

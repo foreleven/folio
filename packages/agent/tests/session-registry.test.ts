@@ -1,12 +1,14 @@
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   ModelRuntime,
+  createAgentSession,
+  type EditToolInput,
   type AgentSession,
   type AgentSessionEvent,
   type CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -155,7 +157,9 @@ const makeFakeFactory = () => {
 };
 
 describe("Pi session factory", () => {
-  it("uses the public factory with explicit Folio isolation and no tools", async () => {
+  it("uses the public factory with explicit Folio configuration and full-access tools", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "folio-pi-factory-storage-"));
+    temporaryDirectories.push(directory);
     const session = new FakePiSession("/workspace");
     const createAgentSession = vi.fn(async (_options: CreateAgentSessionOptions) => ({
       session: session as unknown as AgentSession,
@@ -163,6 +167,7 @@ describe("Pi session factory", () => {
     const modelRuntime = { getAvailableSnapshot: () => registryModels } as unknown as ModelRuntime;
     const factory = makePiSessionFactory({
       agentDirectory: "/folio/agent",
+      sessionDirectory: directory,
       modelRuntime,
       profile: compiledProfile,
       createAgentSession,
@@ -178,8 +183,7 @@ describe("Pi session factory", () => {
       modelRuntime,
       model: compiledProfile.model,
       thinkingLevel: "medium",
-      noTools: "all",
-      tools: [],
+      tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       customTools: [],
       sessionManager: expect.objectContaining({
         getCwd: expect.any(Function),
@@ -207,16 +211,16 @@ describe("Pi session factory", () => {
       getAgentsFiles: () => { agentsFiles: unknown[] };
     };
     expect(sessionManager.getCwd()).toBe("/workspace");
-    expect(sessionManager.isPersisted()).toBe(false);
+    expect(sessionManager.isPersisted()).toBe(true);
     expect(settingsManager.isProjectTrusted()).toBe(false);
-    expect(settingsManager.getDefaultTools()).toEqual([]);
+    expect(settingsManager.getDefaultTools()).toBeUndefined();
     expect(resourceLoader.getExtensions().extensions).toEqual([]);
     expect(resourceLoader.getSkills().skills).toEqual([]);
     expect(resourceLoader.getPrompts().prompts).toEqual([]);
     expect(resourceLoader.getAgentsFiles().agentsFiles).toEqual([]);
   });
 
-  it("constructs and disposes a real Pi AgentSession without network, tools, or persistence", async () => {
+  it("constructs and disposes a real Pi AgentSession without network, with full-access tools and durable native metadata", async () => {
     const directory = await mkdtemp(join(tmpdir(), "folio-pi-session-factory-"));
     temporaryDirectories.push(directory);
     const runtime = await ModelRuntime.create({
@@ -230,12 +234,65 @@ describe("Pi session factory", () => {
     });
 
     const session = await Effect.runPromise(factory.create(directory));
-    expect(session.getActiveToolNames()).toEqual([]);
+    expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls"]);
     expect(session.sessionManager.getCwd()).toBe(directory);
-    expect(session.sessionManager.isPersisted()).toBe(false);
+    expect(session.sessionManager.isPersisted()).toBe(true);
     expect(session.thinkingLevel).toBe("off");
     await session.waitForIdle();
     session.dispose();
+  });
+
+  it("loads only explicit skills and Task AGENTS.md and executes native file and shell tools", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "folio-pi-tools-"));
+    temporaryDirectories.push(directory);
+    const cwd = join(directory, "task");
+    const skill = join(directory, "selected-skill");
+    await mkdir(cwd);
+    await mkdir(skill);
+    await mkdir(join(cwd, ".pi", "skills", "unselected"), { recursive: true });
+    await writeFile(join(directory, "AGENTS.md"), "PARENT_CONTEXT_SENTINEL");
+    await writeFile(join(cwd, "AGENTS.md"), "TASK_CONTEXT_SENTINEL");
+    await writeFile(join(skill, "SKILL.md"), "---\nname: selected-skill\ndescription: Selected integration\n---\nRun its script.\n");
+    await writeFile(join(skill, "fetch.sh"), 'pwd > script-cwd.txt\nprintf raw > raw.txt\n');
+    await writeFile(join(cwd, ".pi", "skills", "unselected", "SKILL.md"),
+      "---\nname: unselected\ndescription: UNSELECTED_SKILL_SENTINEL\n---\nDo not load.\n");
+    const runtime = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
+    let native: AgentSession | undefined;
+    const factory = makePiSessionFactory({
+      agentDirectory: join(directory, "agent"),
+      modelRuntime: runtime,
+      profile: compiledProfile,
+      skillPaths: [skill],
+      createAgentSession: async (options) => {
+        const result = await createAgentSession(options);
+        native = result.session;
+        return result;
+      },
+    });
+    const session = await Effect.runPromise(factory.create(cwd));
+    try {
+      expect(native!.systemPrompt).toContain("TASK_CONTEXT_SENTINEL");
+      expect(native!.systemPrompt).toContain("selected-skill");
+      expect(native!.systemPrompt).not.toContain("PARENT_CONTEXT_SENTINEL");
+      expect(native!.systemPrompt).not.toContain("UNSELECTED_SKILL_SENTINEL");
+      const tool = (name: string) => native!.agent.state.tools.find((entry) => entry.name === name)!;
+      await tool("write").execute("write-1", { path: "wiki/page.md", content: "before" });
+      await tool("edit").execute("edit-1", { path: "wiki/page.md", edits: [{ oldText: "before", newText: "after" }] } satisfies EditToolInput);
+      expect(await readFile(join(cwd, "wiki/page.md"), "utf8")).toBe("after");
+      const read = await tool("read").execute("read-1", { path: "wiki/page.md" });
+      expect(read.content).toContainEqual({ type: "text", text: "after" });
+      await tool("bash").execute("bash-1", { command: `bash '${join(skill, "fetch.sh")}'` });
+      expect((await readFile(join(cwd, "script-cwd.txt"), "utf8")).trim()).toBe(await realpath(cwd));
+      expect(await readFile(join(cwd, "raw.txt"), "utf8")).toBe("raw");
+      await expect(tool("bash").execute("bash-failure", { command: "exit 7" })).rejects.toThrow();
+      const controller = new AbortController();
+      const running = tool("bash").execute("bash-cancel", { command: "sleep 30" }, controller.signal);
+      const timer = setTimeout(() => controller.abort(), 100);
+      try { await expect(running).rejects.toThrow(); } finally { clearTimeout(timer); }
+    } finally {
+      await session.abort();
+      session.dispose();
+    }
   });
 
   it("rejects relative Folio agent directory before invoking Pi", async () => {
@@ -276,6 +333,18 @@ describe("Pi session factory", () => {
 });
 
 describe("Session Registry", () => {
+  it("does not report end_turn when an emitted event could not be persisted or delivered", async () => {
+    const { factory, sessions } = makeFakeFactory();
+    const registry = makeSessionRegistry({ sessionFactory: factory, onEvent: () => { throw new Error("unavailable sink"); } });
+    await Effect.runPromise(registry.create("archive-failure", "/workspace"));
+    const handle = await Effect.runPromise(registry.prompt("archive-failure", "test"));
+    const pi = sessions.get("/workspace")!;
+    pi.emit(piEvent({ type: "agent_start" }));
+    pi.complete();
+    await expect(handle.completion).rejects.toMatchObject({ reason: "prompt_failed" });
+    await Effect.runPromise(registry.shutdown);
+  });
+
   it("isolates Pi sessions, serializes per-session events, and rejects concurrent work", async () => {
     const { factory, sessions } = makeFakeFactory();
     const updates: string[] = [];

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Effect, Predicate, Schema } from "effect";
 import { resolveFolioAgentDirectory, resolveFolioConfigDirectory, type ResolveAgentDirectoryOptions } from "./directory.js";
-import { decodeAgentSettings, type AgentSettings, type ModelProfile } from "./schema.js";
+import { decodeAgentSettings, type AgentSettings, ModelProfile } from "./schema.js";
 
 export const AgentConfigLoadFailureReason = Schema.Literals([
   "configuration_unavailable",
@@ -47,6 +47,16 @@ export const loadFolioAgentConfig = Effect.fn("AgentConfigLoader.loadFolioAgentC
   function*(options: LoadFolioAgentConfigOptions = {}) {
     const configDirectory = resolveFolioConfigDirectory(options);
     const agentDirectory = resolveFolioAgentDirectory(options);
+    // Desktop supplies the immutable non-secret Session snapshot. Global defaults must not
+    // change a restored Session or be required by a Provider-only configuration.
+    const override = (options.env ?? process.env).FOLIO_SESSION_MODEL_PROFILE;
+    if (override) {
+      const profile = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ModelProfile))(override, {
+        onExcessProperty: "error",
+      }).pipe(Effect.mapError(() => failure("configuration_invalid")));
+      return { configDirectory, agentDirectory, defaultProfile: profile,
+        settings: { enabled: true, modelProfiles: [profile], defaultModelProfileId: profile.id } } satisfies FolioAgentConfigSnapshot;
+    }
     const filePath = join(configDirectory, "config.json");
     const read = options.readConfigFile ?? ((path: string) => readFile(path, "utf8"));
     const source = yield* Effect.tryPromise({

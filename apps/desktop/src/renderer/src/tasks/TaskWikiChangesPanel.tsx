@@ -339,8 +339,8 @@ function TaskWikiConflictRunHistory({ vaultId, taskId, sessionId, runId }: { vau
   if (history._tag !== 'Success') return <p role="status" className="text-support text-muted-foreground">
     {history._tag === 'Failure' ? (chinese ? '无法读取冲突解决消息，请刷新重试。' : 'Could not load conflict-resolution messages.') : (chinese ? '正在读取冲突解决消息…' : 'Loading conflict-resolution messages…')}
   </p>
-  const messages = history.value.messages.filter(message => message.runId === runId && message.data.role !== 'user')
-  const tools = history.value.tools.filter(tool => tool.runId === runId)
+  const messages = history.value.messages.filter(message => message.runId === runId && message.kind === 'message' && message.data.role !== 'user')
+  const tools = history.value.messages.filter(tool => tool.runId === runId && tool.kind === 'tool_call')
   if (!messages.length && !tools.length) return <p className="text-support text-muted-foreground">{chinese ? '冲突解决 Run 尚无消息。' : 'No conflict-resolution messages yet.'}</p>
   return <details className="space-y-2 rounded border p-2" open>
     <summary className="text-support font-medium">{chinese ? '冲突解决 Run 消息' : 'Conflict-resolution Run messages'}</summary>

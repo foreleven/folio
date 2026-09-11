@@ -1,7 +1,9 @@
 # Folio integrations
 
 An `Integration` owns a provider connection. Its resources describe ingestion
-capabilities; Lark currently registers `im` and `email`, with empty `onIngest` hooks.
+capabilities; Lark registers `im` and `email`. Their `onIngest` hooks declare the
+corresponding installed Skills, shared rules, and managed CLI directory. They do
+not fetch data or start an Agent; the harness mounts these resources for the Task.
 
 ## Ownership
 

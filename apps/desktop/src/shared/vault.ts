@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 
-/** Global registry entry; new identities use UUID v7 and paths point to canonical content directories. */
+/** Global registry entry; UUID v7 identity and stable user entry path, linking to managed workspace/wiki. */
 export const Vault = Schema.Struct({
   id: Schema.String.check(Schema.isUUID()),
   name: Schema.NonEmptyString,

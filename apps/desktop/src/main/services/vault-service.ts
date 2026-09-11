@@ -1,50 +1,103 @@
 import { Context, Effect, FileSystem, Layer, Path, Schema, Semaphore } from 'effect'
 import { v7 as uuidv7 } from 'uuid'
+import { ChildProcessSpawner } from 'effect/unstable/process'
 import { Vault, VaultError } from '../../shared/vault'
 import { ConfigService } from './config-service'
 import { vaultDatabaseLayer } from './vault-database'
+import { initializeVaultWorkspace } from './vault-workspace'
 
-/** Owns vault registration; user content remains in the selected directory. */
-export class VaultService extends Context.Service<VaultService, {
-  /** Resolves an existing directory, saves its identity, and ensures its settings and database. */
-  readonly register: (directory: string) => Effect.Effect<Vault, VaultError>
-}>()('folio/services/VaultService') {
-  static readonly layer = Layer.effect(VaultService, Effect.gen(function*() {
-    const fs = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
-    const config = yield* ConfigService
-    const lock = yield* Semaphore.make(1)
+/** Owns stable Vault identities and publishes a reverse link to Folio-managed content. */
+export class VaultService extends Context.Service<
+  VaultService,
+  {
+    /** Registers an empty directory or reopens a known entry, ensuring storage and its managed wiki link. */
+    readonly register: (directory: string) => Effect.Effect<Vault, VaultError>
+  }
+>()('folio/services/VaultService') {
+  static readonly layer = Layer.effect(
+    VaultService,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const config = yield* ConfigService
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      const lock = yield* Semaphore.make(1)
 
-    /** Uses the global index for identity; incomplete settings/database initialization retries with the same ID. */
-    const register = Effect.fn('VaultService.register')(function*(selected: string) {
-      yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(selected)
-      const canonicalPath = yield* fs.realPath(path.resolve(selected))
-      if ((yield* fs.stat(canonicalPath)).type !== 'Directory') {
-        return yield* new VaultError({ message: 'Choose a directory for your vault.', cause: selected })
-      }
-      const vault = yield* config.addVault({
-        id: uuidv7(),
-        name: path.basename(canonicalPath) || 'vault',
-        path: canonicalPath
-      })
-      const directory = path.join(config.directory, 'vaults', vault.id)
-      const filePath = path.join(directory, 'config.json')
-      if (!(yield* fs.exists(filePath))) {
-        yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
-        const temporary = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.config-' })
-        const staged = path.join(temporary, 'config.json')
-        // Identity lives only in the global index; this file is reserved for vault-level settings.
-        yield* fs.writeFileString(staged, '{}\n', { mode: 0o600 })
-        yield* fs.rename(staged, filePath).pipe(Effect.uninterruptible)
-      }
-      // Initialize existing vaults too; the registration scope closes the client
-      // before returning, and later SQL consumers acquire their own scoped layer.
-      yield* Layer.build(vaultDatabaseLayer(directory))
-      return vault
-    }, Effect.scoped, lock.withPermit, Effect.mapError((cause) =>
-      new VaultError({ message: 'Could not register the vault. Check the folder and vault configuration.', cause })
-    ))
+      /** Uses the global index for identity; incomplete settings/database initialization retries with the same ID. */
+      const register = Effect.fn('VaultService.register')(
+        function* (selected: string) {
+          yield* Schema.decodeUnknownEffect(Schema.NonEmptyString)(selected)
+          const resolved = path.resolve(selected)
+          // Normalize parents even if the final link is absent after an interrupted publication.
+          const requested = path.join(yield* fs.realPath(path.dirname(resolved)), path.basename(resolved))
+          const entries = (yield* config.get).vaults
+          let existing = entries.find((entry) => entry.path === requested)
+          const canonicalPath = yield* fs
+            .realPath(requested)
+            .pipe(
+              Effect.catchReason('PlatformError', 'NotFound', (cause) =>
+                existing ? Effect.succeed(null) : Effect.fail(cause)
+              )
+            )
+          if (canonicalPath !== null && (yield* fs.stat(canonicalPath)).type !== 'Directory') {
+            return yield* new VaultError({ message: 'Choose a directory for your vault.', cause: selected })
+          }
+          // Following the published link changes realPath, but must never allocate another Vault identity.
+          if (!existing)
+            for (const entry of entries) {
+              const target = yield* fs
+                .realPath(entry.path)
+                .pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(null)))
+              if (target !== null && target === canonicalPath) {
+                existing = entry
+                break
+              }
+            }
+          if (!existing && (yield* fs.readDirectory(canonicalPath!)).length > 0) {
+            return yield* new VaultError({
+              message: 'Choose an empty directory for a new vault. Existing content is not migrated.',
+              cause: undefined
+            })
+          }
+          const vault =
+            existing ??
+            (yield* config.addVault({
+              id: uuidv7(),
+              name: path.basename(canonicalPath!) || 'vault',
+              path: canonicalPath!
+            }))
+          const directory = path.join(config.directory, 'vaults', vault.id)
+          const filePath = path.join(directory, 'config.json')
+          if (!(yield* fs.exists(filePath))) {
+            yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
+            const temporary = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.config-' })
+            const staged = path.join(temporary, 'config.json')
+            // Identity lives only in the global index; this file is reserved for vault-level settings.
+            yield* fs.writeFileString(staged, '{}\n', { mode: 0o600 })
+            yield* fs.rename(staged, filePath).pipe(Effect.uninterruptible)
+          }
+          // Initialize existing vaults too; the registration scope closes the client
+          // before returning, and later SQL consumers acquire their own scoped layer.
+          yield* Layer.build(vaultDatabaseLayer(directory))
+          yield* initializeVaultWorkspace(directory, vault.path).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)
+          )
+          return vault
+        },
+        Effect.scoped,
+        lock.withPermit,
+        Effect.mapError((cause) =>
+          cause instanceof VaultError
+            ? cause
+            : new VaultError({
+                message: 'Could not register the vault. Check the folder and vault configuration.',
+                cause
+              })
+        )
+      )
 
-    return VaultService.of({ register })
-  }))
+      return VaultService.of({ register })
+    })
+  )
 }

@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node'
-import { IntegrationContext, IntegrationError, type Integration } from '@folio/integrations/base'
+import { IntegrationContext, IntegrationError, type Integration, type IntegrationResource } from '@folio/integrations/base'
 import { ConfigProvider, Deferred, Effect, Layer, ManagedRuntime, Option, Stream } from 'effect'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -25,9 +25,9 @@ function fixture(background = false, form = false) {
   const checkStarted = Effect.runSync(Deferred.make<void>())
   const checkResume = Effect.runSync(Deferred.make<void>())
   const state = { installs: 0, healthChecks: 0, inspections: 0, actions: 0, failInstall: false, failHealthCheck: false, failInspect: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
-  const resource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
+  const resource: IntegrationResource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
-    id: 'notes', name: 'Notes', description: 'Test provider', states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
+    id: 'notes', name: 'Notes', description: 'Test provider', states: { ready: { kind: 'ready', label: 'Ready' } }, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
     setup: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
     resources: [resource], actions: [{ id: 'install', label: 'Install' }, { id: 'authorize', label: 'Authorize', fields: form ? [{ id: 'accessKey', label: 'AccessKey', type: 'password', required: true }] : undefined }, { id: 'open', label: 'Open account page' }],
     install: () => Effect.gen(function*() {
@@ -92,6 +92,50 @@ function rows() {
 }
 
 describe('desktop integration lifecycle', () => {
+  it('prepares installed resources without installation or ingestion and rejects stale or missing mounts', async () => {
+    const f = fixture()
+    const workspace = join(directory, 'workspace')
+    const selected = join(directory, 'integrations/notes/skills/selected/SKILL.md')
+    const bin = join(directory, 'integrations/notes/cli')
+    let hookCalls = 0
+    const resource = f.integration.resources[0]!
+    const mounted: IntegrationResource = { ...resource, onIngest: context => Effect.sync(() => {
+      hookCalls++
+      expect(context.integrationDirectory).toBe(join(directory, 'integrations/notes'))
+      expect(context.workspaceDirectory).toBe(workspace)
+      context.skills.push(selected)
+      context.executableDirectories.push(bin)
+    }) }
+    // The fixture catalog is host-owned; its persisted row still contains only resource identity.
+    Object.assign(resource, mounted)
+    try {
+      const service = await f.service()
+      expect(await f.runtime.runPromise(service.prepare([], workspace))).toEqual({ skillPaths: [], executableDirectories: [], instructions: [] })
+      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace))).rejects.toThrow()
+      expect(f.state.installs).toBe(0)
+      await f.runtime.runPromise(service.install('notes'))
+      await f.settled('login_required')
+      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace))).rejects.toThrow()
+      expect(hookCalls).toBe(0)
+      await f.runtime.runPromise(f.publish('ready'))
+      await expect(f.runtime.runPromise(service.prepare(['unknown'], workspace))).rejects.toThrow()
+      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace))).rejects.toThrow()
+      await mkdir(join(directory, 'integrations/notes/skills/selected'), { recursive: true })
+      await mkdir(bin)
+      await writeFile(selected, '---\nname: selected\ndescription: A selected resource\n---\n')
+      expect(await f.runtime.runPromise(service.prepare(['notes', 'notes'], workspace))).toEqual({
+        skillPaths: [selected], executableDirectories: [bin], instructions: []
+      })
+      expect(f.state.installs).toBe(1)
+      expect(f.state.actions).toBe(0)
+      expect(f.opened).toEqual([])
+      f.state.failHealthCheck = true
+      const previousCalls = hookCalls
+      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace))).rejects.toThrow()
+      expect(hookCalls).toBe(previousCalls)
+    } finally { await f.runtime.dispose() }
+  })
+
   it('migrates legacy action IDs without losing resources or reopening a persisted URL', async () => {
     const db = new DatabaseSync(join(directory, 'data.db'))
     try {

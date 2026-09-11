@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { Context, Effect, Layer, Queue, Schema, Stream } from 'effect'
+import { Cause, Context, Effect, Layer, Queue, Schema, Stream } from 'effect'
 
 export const AppMetadata = Schema.Struct({
   version: Schema.String,
@@ -13,32 +13,6 @@ export type ElectronAppEvent =
   | { readonly _tag: 'Activate' }
   | { readonly _tag: 'WindowAllClosed' }
 
-const events = Stream.callback<ElectronAppEvent>(
-  Effect.fn('ElectronApp.events')(function*(queue) {
-    const onActivate = () =>
-      Queue.offerUnsafe(queue, { _tag: 'Activate' } as const)
-    const onWindowAllClosed = () =>
-      Queue.offerUnsafe(queue, { _tag: 'WindowAllClosed' } as const)
-    // Ending the stream lets the application program complete and release all
-    // scoped resources before Electron finishes its normal quit sequence.
-    const onBeforeQuit = () => Queue.endUnsafe(queue)
-
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        app.on('activate', onActivate)
-        app.on('window-all-closed', onWindowAllClosed)
-        app.on('before-quit', onBeforeQuit)
-      }),
-      () =>
-        Effect.sync(() => {
-          app.removeListener('activate', onActivate)
-          app.removeListener('window-all-closed', onWindowAllClosed)
-          app.removeListener('before-quit', onBeforeQuit)
-        })
-    )
-  })
-)
-
 /** Process-level Electron boundary used by the main application program. */
 export class ElectronApp extends Context.Service<
   ElectronApp,
@@ -49,22 +23,39 @@ export class ElectronApp extends Context.Service<
     readonly whenReady: Effect.Effect<void>
     /** Emits lifecycle events until Electron begins quitting. */
     readonly events: Stream.Stream<ElectronAppEvent>
-    /** Whether closing every window should terminate this platform's process. */
-    readonly quitOnWindowAllClosed: boolean
     /** Requests a normal Electron application shutdown. */
     readonly quit: Effect.Effect<void>
   }
 >()('folio/main/electron/ElectronApp') {
-  /** Live adapter backed by Electron's process-global application object. */
-  static readonly layer = Layer.succeed(ElectronApp)({
-    metadata: Effect.sync(() => ({
-      version: app.getVersion(),
-      path: app.getAppPath(),
-      isPackaged: app.isPackaged
-    })),
-    whenReady: Effect.promise(() => app.whenReady()),
-    events,
-    quitOnWindowAllClosed: process.platform !== 'darwin',
-    quit: Effect.sync(() => app.quit())
-  })
+  /** Owns the quit barrier for the lifetime of the outer application layer, including dependent cleanup. */
+  static readonly layer = Layer.effect(ElectronApp, Effect.gen(function*() {
+    const events = yield* Queue.unbounded<ElectronAppEvent, Cause.Done>()
+    let quitRequested = false
+    const onActivate = () => { if (!quitRequested) Queue.offerUnsafe(events, { _tag: 'Activate' }) }
+    const onWindowAllClosed = () => { if (!quitRequested) Queue.offerUnsafe(events, { _tag: 'WindowAllClosed' }) }
+    const onBeforeQuit = (event: { preventDefault(): void }) => {
+      // End the application workflow while keeping Electron alive for asynchronous resource cleanup.
+      // Repeated quit requests must remain intercepted until this outer layer is released.
+      event.preventDefault()
+      quitRequested = true
+      Queue.endUnsafe(events)
+    }
+    yield* Effect.acquireRelease(Effect.sync(() => {
+      app.on('activate', onActivate)
+      app.on('window-all-closed', onWindowAllClosed)
+      app.on('before-quit', onBeforeQuit)
+    }), () => Effect.sync(() => {
+      app.removeListener('activate', onActivate)
+      app.removeListener('window-all-closed', onWindowAllClosed)
+      app.removeListener('before-quit', onBeforeQuit)
+      // MainLive provides this layer outside its services, so their finalizers finish first.
+      if (quitRequested) app.quit()
+    }))
+    return ElectronApp.of({
+      metadata: Effect.sync(() => ({ version: app.getVersion(), path: app.getAppPath(), isPackaged: app.isPackaged })),
+      whenReady: Effect.promise(() => app.whenReady()),
+      events: Stream.fromQueue(events),
+      quit: Effect.sync(() => app.quit())
+    })
+  }))
 }

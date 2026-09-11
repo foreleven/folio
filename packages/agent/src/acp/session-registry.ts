@@ -6,6 +6,7 @@ import {
   type PiSessionFactory,
   type PiSessionRuntime,
 } from "../pi/session-factory.js";
+import type { PiSessionIdentity } from "../pi/session-storage.js";
 
 export const SessionRegistryFailureReason = Schema.Literals([
   "session_exists",
@@ -61,6 +62,7 @@ interface SessionRegistryEntry {
   work?: Promise<void>;
   cancelRequested: boolean;
   events: Promise<void>;
+  eventFailed: boolean;
 }
 
 export interface SessionRegistryOptions {
@@ -91,7 +93,8 @@ export type SessionConfigMutation =
   | { readonly configId: "thought_level"; readonly value: string };
 
 export interface SessionRegistry {
-  readonly create: (sessionId: string, cwd: string) => Effect.Effect<SessionRegistryEntryView, SessionRegistryError>;
+  readonly create: (sessionId: string, cwd: string, resume?: PiSessionIdentity) => Effect.Effect<SessionRegistryEntryView, SessionRegistryError>;
+  readonly native: (sessionId: string) => Effect.Effect<PiSessionIdentity, SessionRegistryError>;
   readonly get: (sessionId: string) => Effect.Effect<SessionRegistryEntryView, SessionRegistryError>;
   readonly list: () => readonly SessionRegistryEntryView[];
   readonly config: (sessionId: string) => Effect.Effect<SessionConfigSnapshot, SessionRegistryError>;
@@ -212,12 +215,12 @@ export const makeSessionRegistry = ({
     return entry;
   };
 
-  const create = Effect.fn("SessionRegistry.create")(function*(sessionId: string, cwd: string) {
+  const create = Effect.fn("SessionRegistry.create")(function*(sessionId: string, cwd: string, resume?: PiSessionIdentity) {
     if (shuttingDown) return yield* failure("session_closed");
     if (entries.has(sessionId) || creating.has(sessionId)) return yield* failure("session_exists");
     beginCreation(sessionId);
     return yield* Effect.gen(function*() {
-      const piSession = yield* sessionFactory.create(cwd).pipe(
+      const piSession = yield* sessionFactory.create(cwd, resume).pipe(
         Effect.mapError(() => failure("session_unavailable")),
       );
       if (shuttingDown) {
@@ -232,13 +235,14 @@ export const makeSessionRegistry = ({
         state: "idle",
         cancelRequested: false,
         events: Promise.resolve(),
+        eventFailed: false,
       };
       entry.unsubscribe = yield* Effect.try({
         try: () => piSession.subscribe((event) => {
           if (entry.state === "closed") return;
           entry.events = entry.events
             .then(() => onEvent(sessionId, event))
-            .then(() => undefined, () => undefined);
+            .then(() => undefined, () => { entry.eventFailed = true; });
         }),
         catch: () => failure("session_unavailable"),
       }).pipe(
@@ -257,6 +261,17 @@ export const makeSessionRegistry = ({
       catch: (error) => error instanceof SessionRegistryError ? error : failure("session_not_found"),
     }));
   });
+
+  /** Exposes the SDK identity without confusing it with the ACP session identifier. */
+  const native = Effect.fn("SessionRegistry.native")((sessionId: string) => Effect.try({
+    try: () => {
+      const manager = requireEntry(sessionId).piSession.sessionManager;
+      const nativeSessionFile = manager.getSessionFile();
+      if (!nativeSessionFile) throw failure("session_unavailable");
+      return { nativeSessionId: manager.getSessionId(), nativeSessionFile };
+    },
+    catch: () => failure("session_unavailable"),
+  }));
 
   const list = (): readonly SessionRegistryEntryView[] => [...entries.values()]
     .filter(({ state }) => state !== "closed")
@@ -340,6 +355,7 @@ export const makeSessionRegistry = ({
 
     entry.state = "prompting";
     entry.cancelRequested = false;
+    entry.eventFailed = false;
     yield* Effect.tryPromise({
       try: () => Promise.resolve(onAccepted()),
       catch: () => failure("prompt_failed"),
@@ -349,6 +365,7 @@ export const makeSessionRegistry = ({
     const completion = entry.piSession.prompt(text, PI_ACP_PROMPT_OPTIONS)
       .then(async (): Promise<SessionPromptStopReason> => {
         await entry.events.catch(() => undefined);
+        if (entry.eventFailed) throw failure("prompt_failed");
         return entry.cancelRequested ? "cancelled" : "end_turn";
       })
       .catch(async () => {
@@ -413,5 +430,5 @@ export const makeSessionRegistry = ({
     return shutdownPromise;
   });
 
-  return { create, get, list, config, setConfig, prompt, cancel, close, shutdown };
+  return { create, native, get, list, config, setConfig, prompt, cancel, close, shutdown };
 };

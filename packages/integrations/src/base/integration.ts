@@ -33,16 +33,20 @@ export class IntegrationContext extends Context.Service<IntegrationContext, {
   readonly registerResource: (resource: IntegrationResource) => Effect.Effect<void, IntegrationError>
 }>()('@folio/integrations/base/IntegrationContext') {}
 export interface IngestContext {
+  /** Host-resolved installation root; never supplied as an arbitrary renderer path. */
+  readonly integrationDirectory: string
   readonly workspaceDirectory: string
   readonly instructions: string[]
   readonly skills: string[]
+  /** Prepend these directories after the bundled Node runtime when launching the Agent. */
+  readonly executableDirectories: string[]
   readonly env: Record<string, string>
 }
 export interface IntegrationResource {
   readonly id: string
   readonly name: IntegrationText
   readonly description?: IntegrationText
-  /** Reserved for enriching an agent run; does not execute the agent. */
+  /** Declares resources for the Agent; does not fetch data, start a Run, or modify the workspace. */
   readonly onIngest: (context: IngestContext) => Effect.Effect<void, IntegrationError>
 }
 export interface Integration<R = never> extends IntegrationMetadata {

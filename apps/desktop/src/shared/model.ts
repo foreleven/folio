@@ -1,5 +1,11 @@
-import { ModelProfile } from '@folio/agent/config/schema'
+import { ModelProfile, ThinkingLevel } from '@folio/agent/config/schema'
 import { Schema } from 'effect'
+
+/** Explicit model intent contains no credentials or custom endpoint supplied by the renderer. */
+export const SessionModelSelection = Schema.Struct({
+  providerId: Schema.NonEmptyString, modelId: Schema.NonEmptyString, thinkingLevel: ThinkingLevel
+})
+export type SessionModelSelection = typeof SessionModelSelection.Type
 
 export const ModelConnectionStatus = Schema.Literals(['untested', 'ready', 'unavailable'])
 export type ModelConnectionStatus = typeof ModelConnectionStatus.Type

@@ -4,6 +4,7 @@ import { Reactivity } from 'effect/unstable/reactivity'
 import { SqlClient } from 'effect/unstable/sql'
 import { join } from 'node:path'
 import { VaultError } from '../../shared/vault'
+import { migrateVault } from './vault-migrations'
 
 /**
  * Opens data.db in an existing, trusted vault configuration directory.
@@ -19,6 +20,12 @@ export function vaultDatabaseLayer(directory: string) {
         message: 'Could not open the vault database. Check the vault configuration directory.',
         cause
       })))
+    )
+    // Composite foreign keys prevent a Run from borrowing another Task's Session or recovery history.
+    yield* client`PRAGMA foreign_keys = ON`
+    yield* migrateVault.pipe(
+      Effect.provideService(SqlClient.SqlClient, client),
+      Effect.mapError((cause) => new VaultError({ message: 'Could not initialize the vault database.', cause }))
     )
     return Context.make(SqliteClient.SqliteClient, client).pipe(
       Context.add(SqlClient.SqlClient, client)

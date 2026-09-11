@@ -9,10 +9,12 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "package": "npm run build && electron-builder",
+    "prototype:wiki-boundary": "node scripts/manual-wiki-boundary-prototype.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "@effect/atom-react": "^4.0.0-rc.112",
     "@effect/platform-node": "^4.0.0-rc.112",
     "@effect/sql-sqlite-node": "4.0.0-rc.112",

@@ -196,13 +196,18 @@ async function privateState(directory: string) {
 }
 
 describe('Lark integration lifecycle', () => {
-  it('defines serializable actions and independent empty resource hooks', async () => {
+  it('declares only selected Skill mounts and the managed CLI without performing ingestion', async () => {
     expect(lark.id).toBe('lark')
     expect(JSON.parse(JSON.stringify(lark.actions)).map((a: { id: string }) => a.id))
       .toEqual(['open_authorization', 'install', 'connect'])
-    const context = { workspaceDirectory: '/unused', instructions: [], skills: [], env: {} }
+    const context = { integrationDirectory: '/managed/lark', workspaceDirectory: '/unused', instructions: [], skills: [], executableDirectories: [], env: {} }
+    await Effect.runPromise(lark.resources[0]!.onIngest(context))
+    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md'])
     for (const resource of lark.resources) await Effect.runPromise(resource.onIngest(context))
-    expect(context).toEqual({ workspaceDirectory: '/unused', instructions: [], skills: [], env: {} })
+    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md', '/managed/lark/skills/lark-mail/SKILL.md'])
+    expect(context.executableDirectories).toEqual(['/managed/lark/cli'])
+    expect(context.instructions).toEqual([])
+    expect(context.env).toEqual({})
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

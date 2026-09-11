@@ -3,6 +3,8 @@ export {
   type FolioAgentApp,
   type FolioAgentOptions,
 } from "./acp/server.js";
+export { SessionArchive, SessionArchiveError, type ArchivedSessionHeader } from "./acp/session-archive.js";
+export { PiSessionIdentity } from "./pi/session-storage.js";
 export {
   makeFakePiSessionFactory,
   type FakePiSessionFactoryOptions,
@@ -68,3 +70,12 @@ export {
   type FolioAgentRuntimeCompositionOptions,
   type InitializedFolioAgentRuntime,
 } from "./runtime/composition.js";
+export { openCodexConnection, CodexConnectionError, type CodexConnectionOptions, type CodexServerEvent } from "./codex/connection.js";
+export { openCodexSession, CodexSessionError, type CodexSessionOptions } from "./codex/session.js";
+export { openCodexTurnRuntime, CodexTurnError, type CodexTurnRuntimeOptions, type CodexTurnRuntime, type CodexTurnOutcome } from "./codex/turn-runtime.js";
+export { mapCodexEvent, codexItemId, CodexEventError } from "./codex/event-mapper.js";
+export { makePiAcpBackend } from "./pi/acp-backend.js";
+export { makeCodexAcpBackend, type CodexAcpBackendOptions } from "./codex/acp-backend.js";
+export { nativeAgent, NativeSessionIdentity, CodexSessionIdentity, type AcpSessionBackend, type AcpSessionBackendFactory } from "./acp/session-backend.js";
+
+export { SessionLeaseError } from "./acp/session-lease.js";

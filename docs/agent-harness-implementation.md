@@ -817,3 +817,33 @@ superseded operation。
 Task wiki 面板回归 15/15 通过；Desktop 全量 Vitest 现为 58 个文件、391/391 通过。
 普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、Integration 实际装配和 Agent
 切换不在当前切片范围内。
+
+## 2026-09-11 — ACP 异常字节诊断
+
+在 SDK 的 NDJSON 解码前增加入站字节观察层。非法 UTF-8、非法 JSON 和超过 1 MiB 的行会写入
+`acp_protocol_diagnostics`，仅保存原因、字节长度和 SHA-256；原始字节不会进入 SQLite、消息投影
+或 renderer。正常帧继续交给 ACP SDK，原有 parse-error 行为不变；诊断使用与 ACP 连接相同的
+`connectionId`，因此初始化阶段的异常也能关联到 Folio Session。
+
+验证：真实 Agent 子进程输出非法 UTF-8 与非法 JSON 的 2 项诊断测试，以及 Vault EventStore
+持久化/重启边界测试通过；Desktop Node 类型检查和相关 lint 通过。该诊断不等于外部 Agent
+或逃逸进程的停止证明，仍需真实外部 Agent 重放期间的人工验收。
+
+## 2026-09-11 — 手动 wiki 外围复验与诊断内存边界
+
+按当前优先级继续排除 Agent、Skill、Integration 和 `raws`，使用同一套真实 Git 临时探针分别
+通过 newline-delimited stdin 和交互式状态机执行手动 Task 文件修改。普通路径和同文件冲突路径
+均返回 0：Run 未终止、写入者未停止、main 脏、main 在 prepare 后前进、Task 新草稿等 gate
+都会拒绝后续操作；writer-stopped 前置条件满足后，source capture、隔离 canonical、main
+fast-forward、普通 Task reconciliation commit 及最终 tree 收敛均可完成。
+
+生产回归分组通过：保存/快照/日志/应用/变更面板 34/34，Task worktree 与 Task RPC 47/47，
+TaskGitSynchronization 37/37，ACP process/EventStore/ACP client 23/23。为异常 NDJSON 诊断
+补充超大单 chunk 用例，并将采样改为固定 1 MiB 缓冲，避免 `subarray` 保活超大底层 buffer；
+SQLite 诊断表同时限制 byte length（最大值表示截断）及小写 hex SHA-256。相关 lint、Desktop
+Node typecheck 和 `git diff --check` 通过。Desktop Web typecheck 仍被仓库既有的 `packages/ui`
+与应用 React 类型副本冲突阻断。
+
+本轮验证仍不证明外部编辑器或逃逸进程在 clean preflight 后不会继续写入，也不把手动 writer-stopped
+开关当作生产停止证明；普通 Run 自动保存、真实外部 Agent 重放人工验收、Skill、`raws` 和 Agent
+切换继续保留在 RFC 后续范围。

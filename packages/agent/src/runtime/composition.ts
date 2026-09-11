@@ -54,7 +54,13 @@ type RuntimeFactory = (options: CreateModelRuntimeOptions) => Promise<ModelRunti
 type SessionFactoryBuilder = typeof makePiSessionFactory;
 
 export interface FolioAgentRuntimeCompositionOptions {
+  /** Explicit mounted entrypoints; no global/project Skill discovery is enabled. */
+  readonly skillPaths?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Native Pi history may live in a Vault while provider credentials remain in the global Agent directory. */
+  readonly sessionDirectory?: string;
+  /** Session-private generated model files; credentials remain in snapshot.agentDirectory. */
+  readonly runtimeDirectory?: string;
   /** Test seam around Pi's public ModelRuntime.create. */
   readonly runtimeFactory?: RuntimeFactory;
   /** Test seam around the already-audited safe Pi Session factory. */
@@ -110,7 +116,7 @@ const writeDerivedModelConfig = (
 
 /**
  * Composes Folio's standalone config, secure credential store, generated Pi model config, shared
- * ModelRuntime and isolated text-only Pi Session factory. The snapshot is immutable for the process:
+ * ModelRuntime and full-access Pi Session factory. The snapshot is immutable for the process:
  * existing sessions keep it, while a restarted process observes later config changes.
  */
 export const makeFolioAgentRuntimeComposition = (
@@ -132,7 +138,7 @@ export const makeFolioAgentRuntimeComposition = (
       Effect.mapError(compilerFailure),
     );
     const modelsPath = yield* writeDerivedModelConfig(
-      snapshot.agentDirectory,
+      options.runtimeDirectory ?? snapshot.agentDirectory,
       serializeDerivedPiModelConfig(derived),
     );
     const compiled = yield* compileDefaultModelProfile(snapshot.settings, {
@@ -146,7 +152,7 @@ export const makeFolioAgentRuntimeComposition = (
       try: (signal) => runtimeFactory({
         credentials,
         modelsPath,
-        modelsStorePath: join(snapshot.agentDirectory, "models-store.json"),
+        modelsStorePath: join(options.runtimeDirectory ?? snapshot.agentDirectory, "models-store.json"),
         allowModelNetwork: false,
         refreshOnCreate: true,
         signal,
@@ -191,6 +197,8 @@ export const makeFolioAgentRuntimeComposition = (
     runtime = created;
     const sessionFactory = sessionFactoryBuilder({
       agentDirectory: snapshot.agentDirectory,
+      sessionDirectory: options.sessionDirectory,
+      skillPaths: options.skillPaths,
       modelRuntime: created,
       profile: {
         profileId: compiled.profileId,
@@ -218,8 +226,8 @@ export const makeFolioAgentRuntimeComposition = (
   });
 
   const sessionFactory: PiSessionFactory = {
-    create: (cwd) => initialize.pipe(
-      Effect.flatMap(({ sessionFactory: factory }) => factory.create(cwd)),
+    create: (cwd, resume) => initialize.pipe(
+      Effect.flatMap(({ sessionFactory: factory }) => factory.create(cwd, resume)),
       Effect.mapError(() => new PiSessionFactoryError({
         reason: "session_unavailable",
         message: "Pi session could not be created.",

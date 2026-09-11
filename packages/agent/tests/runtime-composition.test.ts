@@ -1,7 +1,8 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRuntime, CreateModelRuntimeOptions } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
-import { access, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +14,8 @@ import {
   makeFolioAgentRuntimeComposition,
 } from "../src/runtime/composition.js";
 import type { PiSessionFactoryOptions } from "../src/pi/session-factory.js";
+import { makePiSessionFactory } from "../src/pi/session-factory.js";
+import { resolveSessionSkillPaths } from "../src/config/session-skills.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -105,13 +108,41 @@ afterEach(async () => {
 });
 
 describe("Folio Agent runtime composition", () => {
+  it("loads explicit mounts through production composition into the real Pi system prompt", async () => {
+    const input = await snapshot("none");
+    const selected = join(input.configDirectory, 'selected');
+    await mkdir(selected);
+    await writeFile(join(selected, 'SKILL.md'), '---\nname: selected\ndescription: EXPLICIT_INTEGRATION_SENTINEL\n---\nUse the adjacent script.\n');
+    await mkdir(join(input.agentDirectory, 'skills/unselected'), { recursive: true });
+    await writeFile(join(input.agentDirectory, 'skills/unselected/SKILL.md'), '---\nname: unselected\ndescription: UNSELECTED_INTEGRATION_SENTINEL\n---\n');
+    const skillPaths = await resolveSessionSkillPaths(JSON.stringify([selected]));
+    let systemPrompt = '';
+    const composition = makeFolioAgentRuntimeComposition(input, {
+      skillPaths,
+      sessionFactoryBuilder: options => makePiSessionFactory({ ...options, createAgentSession: async options => {
+        const result = await createAgentSession(options);
+        systemPrompt = result.session.systemPrompt;
+        return result;
+      } }),
+    });
+    try {
+      const session = await Effect.runPromise(composition.sessionFactory.create(input.configDirectory));
+      try {
+        expect(systemPrompt).toContain('EXPLICIT_INTEGRATION_SENTINEL');
+        expect(systemPrompt).not.toContain('UNSELECTED_INTEGRATION_SENTINEL');
+      } finally { session.dispose(); }
+    } finally { await composition.shutdown(); }
+  });
+
   it("builds a credential-blind shared runtime from the managed Folio credential store", async () => {
     const input = await snapshot("managed");
     const secret = "managed-runtime-secret";
     const credentials = new SecureCredentialStore({ authPath: join(input.agentDirectory, "auth.json") });
     await credentials.modify(model.provider, async () => ({ type: "api_key", key: secret }));
     const harness = makeRuntimeHarness();
-    const composition = makeFolioAgentRuntimeComposition(input, harness);
+    const sessionDirectory = join(input.configDirectory, 'vaults', 'test-vault', 'agent-history', 'sessions');
+    const skillPaths = [join(input.configDirectory, 'mounted/lark-im/SKILL.md')];
+    const composition = makeFolioAgentRuntimeComposition(input, { ...harness, sessionDirectory, skillPaths });
 
     const initialized = await Effect.runPromise(composition.initialize);
 
@@ -134,6 +165,8 @@ describe("Folio Agent runtime composition", () => {
     expect(harness.factoryOptions).toHaveLength(1);
     expect(harness.factoryOptions[0]).toMatchObject({
       agentDirectory: input.agentDirectory,
+      sessionDirectory,
+      skillPaths,
       modelRuntime: harness.runtime,
       profile: { profileId: "default-profile", model, thinkingLevel: "medium" },
     });
@@ -147,6 +180,33 @@ describe("Folio Agent runtime composition", () => {
     expect(generated).not.toContain("apiKey");
     expect((await lstat(input.agentDirectory)).mode & 0o777).toBe(0o700);
     expect((await lstat(join(input.agentDirectory, "models.generated.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("isolates concurrent custom-provider runtime files while sharing only credentials", async () => {
+    const input = await snapshot("managed");
+    const credentials = new SecureCredentialStore({ authPath: join(input.agentDirectory, "auth.json") });
+    await credentials.modify(model.provider, async () => ({ type: "api_key", key: "shared-secret" }));
+    const before = await readFile(join(input.agentDirectory, "auth.json"), "utf8");
+    const otherProfile = { ...input.defaultProfile!, customModel: { ...input.defaultProfile!.customModel!, displayName: "Other selection" } };
+    const other = { ...input, defaultProfile: otherProfile, settings: { ...input.settings, modelProfiles: [otherProfile] } };
+    const directories = [join(input.configDirectory, "history/runtime/a"), join(input.configDirectory, "history/runtime/b")];
+    const harnesses = [makeRuntimeHarness(), makeRuntimeHarness()];
+    const compositions = [input, other].map((value, index) => makeFolioAgentRuntimeComposition(value, {
+      ...harnesses[index]!, runtimeDirectory: directories[index]!,
+    }));
+    try {
+      await Promise.all(compositions.map(composition => Effect.runPromise(composition.initialize)));
+      const files = await Promise.all(directories.map(directory => readFile(join(directory, "models.generated.json"), "utf8")));
+      expect(files[0]).toContain("Test model");
+      expect(files[0]).not.toContain("Other selection");
+      expect(files[1]).toContain("Other selection");
+      for (const [index, harness] of harnesses.entries()) {
+        expect(harness.runtimeFactory.mock.calls[0]![0].modelsStorePath).toBe(join(directories[index]!, "models-store.json"));
+        expect(files[index]).not.toContain("shared-secret");
+      }
+      expect(await readFile(join(input.agentDirectory, "auth.json"), "utf8")).toBe(before);
+      await expect(access(join(input.agentDirectory, "models.generated.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await Promise.all(compositions.map(composition => composition.shutdown())); }
   });
 
   it("keeps environment credentials in Pi's runtime overlay only and removes them on shutdown", async () => {

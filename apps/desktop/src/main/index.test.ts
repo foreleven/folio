@@ -8,8 +8,9 @@ vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwi
 
 
 const electronMocks = vi.hoisted(() => ({
-  appListeners: new Map<string, () => void>(),
+  appListeners: new Map<string, (event?: { preventDefault(): void }) => void>(),
   createBrowserWindow: vi.fn(),
+  quit: vi.fn(),
   destroyWindow: vi.fn(),
   isWindowDestroyed: vi.fn(() => false),
   loadFile: vi.fn(() => Promise.resolve()),
@@ -20,7 +21,7 @@ const electronMocks = vi.hoisted(() => ({
     electronMocks.appListeners.delete(event)
   }),
   removeIpcListener: vi.fn(),
-  onAppEvent: vi.fn((event: string, listener: () => void) => {
+  onAppEvent: vi.fn((event: string, listener: (event?: { preventDefault(): void }) => void) => {
     electronMocks.appListeners.set(event, listener)
   }),
   onWebContentsEvent: vi.fn(),
@@ -67,7 +68,7 @@ vi.mock('electron', () => {
       getVersion: () => '0.1.0',
       isPackaged: false,
       on: electronMocks.onAppEvent,
-      quit: vi.fn(),
+      quit: electronMocks.quit,
       removeListener: electronMocks.removeAppListener,
       whenReady: () => Promise.resolve()
     },
@@ -92,9 +93,11 @@ async function shutdownMain(): Promise<void> {
   await vi.waitFor(() =>
     expect(electronMocks.appListeners.has('before-quit')).toBe(true)
   )
-  electronMocks.appListeners.get('before-quit')?.()
+  const preventDefault = vi.fn()
+  electronMocks.appListeners.get('before-quit')?.({ preventDefault })
+  expect(preventDefault).toHaveBeenCalledOnce()
   await vi.waitFor(() =>
-    expect(electronMocks.removeIpcListener).toHaveBeenCalledOnce()
+    expect(electronMocks.quit).toHaveBeenCalledOnce()
   )
 }
 
@@ -136,6 +139,8 @@ describe('desktop main window', () => {
     )
     await shutdownMain()
     expect(electronMocks.destroyWindow).toHaveBeenCalledOnce()
+    expect(electronMocks.removeIpcListener).toHaveBeenCalledOnce()
+    expect(electronMocks.quit.mock.invocationCallOrder[0]).toBeGreaterThan(electronMocks.destroyWindow.mock.invocationCallOrder[0]!)
     expect(electronMocks.removeAppListener).toHaveBeenCalledTimes(3)
   })
 

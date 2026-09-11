@@ -6,7 +6,7 @@ export const settingsMessages = {
     language: 'Language', languageDescription: 'Choose the language used in Folio.',
     system: 'System', light: 'Light', dark: 'Dark',
     loading: 'Loading preferences…', retry: 'Try again',
-    loadError: 'Couldn’t load preferences', loadDetail: 'Check your configuration file and try again.',
+    loadError: 'Couldn’t load preferences', loadDetail: 'Check your configuration file and try again.', saving: 'Saving…', saved: 'Saved',
     saveError: 'Couldn’t save changes', saveDetail: 'Your previous preferences are still active. Please try again.'
   },
   'zh-CN': {
@@ -15,7 +15,7 @@ export const settingsMessages = {
     language: '语言', languageDescription: '选择 Folio 界面使用的语言。',
     system: '跟随系统', light: '浅色', dark: '深色',
     loading: '正在读取配置…', retry: '重试',
-    loadError: '无法读取配置', loadDetail: '请检查配置文件后重试。',
+    loadError: '无法读取配置', loadDetail: '请检查配置文件后重试。', saving: '正在保存…', saved: '已保存',
     saveError: '无法保存更改', saveDetail: '之前的配置仍然有效，请重试。'
   }
 }

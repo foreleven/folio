@@ -1,5 +1,6 @@
 import {
   compileDerivedPiModelConfig,
+  compileModelProfile,
   makePiModelRuntimeAdapter,
   type ModelRuntimeAdapterError,
   serializeDerivedPiModelConfig,
@@ -10,6 +11,7 @@ import { resolveFolioAgentDirectory } from '@folio/agent/config/directory'
 import { AgentSettings, ModelProfile } from '@folio/agent/config/schema'
 import { Context, Effect, FileSystem, Layer, Path, PubSub, Redacted, Ref, Schema, Semaphore, Stream } from 'effect'
 import {
+  SessionModelSelection,
   type ModelCatalogView,
   ModelServiceError,
   type ModelServiceFailureReason,
@@ -54,6 +56,7 @@ export interface ModelServiceOptions {
 
 /** Owns main-process model commands; all externally visible state is credential-blind. */
 export class ModelService extends Context.Service<ModelService, {
+  readonly resolveSessionModel: (selection: SessionModelSelection) => Effect.Effect<ModelProfile, ModelServiceError>
   readonly directory: string
   readonly setProviderCredential: (providerId: string, apiKey: Redacted.Redacted<string>) => Effect.Effect<ModelSettingsView, ModelServiceError>
   readonly modelsPath: string
@@ -309,6 +312,25 @@ export class ModelService extends Context.Service<ModelService, {
         Effect.mapError(runtimeFailure)
       )).pipe(commands.withPermit)
 
+      /** Resolves Provider-only UI choices without mutating global defaults or making a model request. */
+      const resolveSessionModel = Effect.fn('ModelService.resolveSessionModel')(function*(input: SessionModelSelection) {
+        const choice = yield* Schema.decodeUnknownEffect(SessionModelSelection)(input, { onExcessProperty: 'error' }).pipe(
+          Effect.mapError(() => failure('invalid_profile')))
+        const settings = yield* getSettings
+        const catalog = yield* runtime.listCatalog(settings).pipe(Effect.mapError(runtimeFailure))
+        const entry = catalog.models.find(model => model.providerId === choice.providerId && model.modelId === choice.modelId)
+        if (!entry || entry.source !== 'builtin') return yield* failure('invalid_profile')
+        const profile: ModelProfile = {
+          id: 'session-model', name: entry.modelName,
+          provider: { type: 'builtin', providerId: choice.providerId }, modelId: choice.modelId,
+          thinkingLevel: choice.thinkingLevel, credentialSource: 'managed'
+        }
+        yield* compileModelProfile(profile, { credentials, env: environment }).pipe(
+          Effect.mapError(error => failure(error.reason === 'credential_missing' || error.reason === 'credential_store_unavailable'
+            ? 'credential_unavailable' : 'invalid_profile')))
+        return profile
+      }, commands.withPermit)
+
       const refreshCatalog = Effect.flatMap(getSettings, (settings) => runtime.refreshCatalog(settings).pipe(
         Effect.mapError(runtimeFailure)
       )).pipe(commands.withPermit)
@@ -331,6 +353,7 @@ export class ModelService extends Context.Service<ModelService, {
       const rebuildDerivedConfig = Effect.flatMap(getSettings, writeDerived).pipe(commands.withPermit)
 
       return ModelService.of({
+        resolveSessionModel,
         setProviderCredential,
         directory,
         modelsPath,

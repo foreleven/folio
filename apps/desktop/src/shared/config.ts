@@ -11,7 +11,9 @@ export const GlobalConfig = Schema.Struct({
   theme: Theme.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
-  agent: AgentSettings.pipe(Schema.withDecodingDefaultKey(Effect.succeed({
+  // AgentSettings has nested defaults; use a type-side default so `{}` is not
+  // interpreted as an encoded object missing its required nested fields.
+  agent: AgentSettings.pipe(Schema.withDecodingDefaultTypeKey(Effect.succeed({
     enabled: false,
     modelProfiles: []
   })))

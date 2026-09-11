@@ -44,6 +44,12 @@ export default defineConfig({
         '@renderer': resolve('src/renderer/src')
       }
     },
+    optimizeDeps: {
+      // These shim entry points are CommonJS files. Pre-bundle them so the
+      // renderer never asks the browser to resolve named ESM exports from
+      // the raw CommonJS modules.
+      include: ['use-sync-external-store/shim', 'use-sync-external-store/shim/with-selector']
+    },
     plugins: [react(), tailwindcss()]
   }
 })

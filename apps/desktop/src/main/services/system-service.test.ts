@@ -13,7 +13,6 @@ describe('SystemService', () => {
       }),
       whenReady: Effect.void,
       events: Stream.empty,
-      quitOnWindowAllClosed: false,
       quit: Effect.void
     })
     const program = Effect.gen(function*() {

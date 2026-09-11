@@ -7,6 +7,10 @@
 
 ## Summary
 
+> Design update (2026-09-10): The [Harness execution and storage RFC](./RFC-agent-harness-execution-storage.md) supersedes this document's per-run workspace and integration-first execution flow. The initial harness runs agents with full access; sandbox enforcement is deferred. This document remains a future isolation proposal, not a description of the initial runtime's guarantees.
+
+> Implementation update: standalone Node preparation and Electron resource packaging are implemented with macOS arm64 runtime checks. See [Agent runtime packaging](./agent-runtime-packaging.md) for commands and remaining platform/assembly limits. This does not implement the sandbox described below.
+
 Folio needs to run agent-driven work in a workspace with OS-enforced filesystem and network restrictions. This RFC defines how to combine Electron, a Node runtime, and Anthropic's `sandbox-runtime` without making integrations responsible for process execution or sandbox policy.
 
 `sandbox-runtime` is a sandboxing library and process wrapper. It does not ship Node, npm, or a virtual Node environment. It uses the host operating system's isolation primitives and applies restrictions to a process tree.

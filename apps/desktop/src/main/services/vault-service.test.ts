@@ -1,22 +1,26 @@
 import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
 import * as NodePath from '@effect/platform-node/NodePath'
+import * as NodeChildProcessSpawner from '@effect/platform-node/NodeChildProcessSpawner'
 import { ConfigProvider, Effect, FileSystem, Layer, ManagedRuntime } from 'effect'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { version } from 'uuid'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConfigService } from './config-service'
 import { VaultService } from './vault-service'
 
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-vault-test-')) })
-afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }) })
 
 /** Shares an isolated config service so tests can interleave preference and registration writes. */
 function makeRuntime(filesystem = NodeFileSystem.layer) {
   return ManagedRuntime.make(VaultService.layer.pipe(
     Layer.provideMerge(ConfigService.layer),
+    Layer.provide(NodeChildProcessSpawner.layer),
     Layer.provide(Layer.merge(filesystem, NodePath.layer)),
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord({ FOLIO_CONFIG_DIR: join(root, 'config') })))
   ))
@@ -30,14 +34,91 @@ async function folder(relative: string): Promise<string> {
 }
 
 describe('VaultService', () => {
+  it('preserves a file written after the initial empty-directory check', async () => {
+    const selected = await folder('wiki')
+    const concurrentWriter = Layer.effect(FileSystem.FileSystem, Effect.gen(function*() {
+      const fs = yield* FileSystem.FileSystem
+      return FileSystem.FileSystem.of({ ...fs, rename: (from, to) =>
+        basename(to) === 'workspace'
+          ? fs.writeFileString(join(selected, 'late.md'), 'concurrent user edit').pipe(Effect.andThen(fs.rename(from, to)))
+          : fs.rename(from, to)
+      })
+    })).pipe(Layer.provide(NodeFileSystem.layer))
+    const runtime = makeRuntime(concurrentWriter)
+    try {
+      const store = await runtime.runPromise(VaultService)
+      expect(await runtime.runPromise(store.register(selected).pipe(Effect.flip))).toMatchObject({ _tag: 'VaultError' })
+      expect(await readFile(join(selected, 'late.md'), 'utf8')).toBe('concurrent user edit')
+      expect((await lstat(selected)).isDirectory()).toBe(true)
+      const config = await runtime.runPromise(ConfigService)
+      const vault = (await runtime.runPromise(config.get)).vaults[0]!
+      expect(await readFile(join(root, 'config/vaults', vault.id, 'workspace/AGENTS.md'), 'utf8')).toContain('Folio owns Git')
+    } finally { await runtime.dispose() }
+  })
+
+  it('refuses nonempty selected directories without moving or registering their content', async () => {
+    const selected = await folder('existing')
+    await writeFile(join(selected, 'keep.md'), 'original')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      expect(await runtime.runPromise(store.register(selected).pipe(Effect.flip))).toMatchObject({ message: expect.stringContaining('empty directory') })
+      expect(await readFile(join(selected, 'keep.md'), 'utf8')).toBe('original')
+      expect((await lstat(selected)).isSymbolicLink()).toBe(false)
+      expect((await runtime.runPromise(Effect.flatMap(ConfigService, config => config.get))).vaults).toEqual([])
+    } finally { await runtime.dispose() }
+  })
+
+  it('initializes only managed files and repairs a missing link without resetting user edits', async () => {
+    const selected = await folder('wiki')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const vault = await runtime.runPromise(store.register(selected))
+      const workspace = join(root, 'config/vaults', vault.id, 'workspace')
+      const git = (args: string[]) => promisify(execFile)('git', ['-C', workspace, ...args]).then(result => result.stdout.trim())
+      expect(await git(['branch', '--show-current'])).toBe('main')
+      expect((await git(['ls-files'])).split('\n')).toEqual(['.gitignore', 'AGENTS.md'])
+      const initial = await git(['rev-parse', 'HEAD'])
+      await writeFile(join(workspace, 'AGENTS.md'), 'User instructions')
+      await writeFile(join(selected, 'note.md'), 'User content')
+      await unlink(selected)
+      expect(await runtime.runPromise(store.register(selected))).toEqual(vault)
+      expect(await readFile(join(selected, 'note.md'), 'utf8')).toBe('User content')
+      expect(await readFile(join(workspace, 'AGENTS.md'), 'utf8')).toBe('User instructions')
+      expect(await git(['rev-parse', 'HEAD'])).toBe(initial)
+      expect(await runtime.runPromise(store.register(join(workspace, 'wiki')))).toEqual(vault)
+    } finally { await runtime.dispose() }
+  })
+
+  it('retains the selected directory and retries the same ID after Git is unavailable', async () => {
+    const selected = await folder('wiki')
+    const runtime = makeRuntime()
+    try {
+      vi.stubEnv('PATH', join(root, 'no-executables'))
+      const store = await runtime.runPromise(VaultService)
+      expect(await runtime.runPromise(store.register(selected).pipe(Effect.flip))).toMatchObject({ _tag: 'VaultError' })
+      expect((await lstat(selected)).isDirectory()).toBe(true)
+      const config = await runtime.runPromise(ConfigService)
+      const vault = (await runtime.runPromise(config.get)).vaults[0]!
+      vi.unstubAllEnvs()
+      // Parent Git context must not redirect initialization into this nonexistent foreign repository.
+      vi.stubEnv('GIT_DIR', join(root, 'foreign'))
+      vi.stubEnv('GIT_INDEX_FILE', join(root, 'foreign-index'))
+      expect(await runtime.runPromise(store.register(selected))).toEqual(vault)
+      expect((await lstat(selected)).isSymbolicLink()).toBe(true)
+      await expect(lstat(join(root, 'foreign-index'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { vi.unstubAllEnvs(); await runtime.dispose() }
+  })
+
   it('persists a UUID v7 in the global index and keeps settings under its ID across restarts', async () => {
     const selected = await folder('My Wiki')
-    await writeFile(join(selected, 'note.md'), '# My note')
     const runtime = makeRuntime()
     const vault = await runtime.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))
     await runtime.dispose()
     expect(version(vault.id)).toBe(7)
-    expect(vault).toMatchObject({ name: 'My Wiki', path: await realpath(selected) })
+    expect(vault).toMatchObject({ name: 'My Wiki', path: join(await realpath(root), 'My Wiki') })
+    expect(await realpath(selected)).toBe(join(await realpath(root), 'config/vaults', vault.id, 'workspace/wiki'))
     expect(JSON.parse(await readFile(join(root, 'config/config.json'), 'utf8'))).toEqual({
       theme: 'system', language: 'system', vaults: [vault], agent: { enabled: false, modelProfiles: [] }
     })
@@ -45,7 +126,8 @@ describe('VaultService', () => {
     expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
     const databaseFile = join(root, 'config/vaults', vault.id, 'data.db')
     expect((await readFile(databaseFile)).subarray(0, 16).toString()).toBe('SQLite format 3\0')
-    expect(await readdir(selected)).toEqual(['note.md'])
+    expect(await readdir(selected)).toEqual([])
+    await writeFile(join(selected, 'note.md'), '# My note')
     expect(await readFile(join(selected, 'note.md'), 'utf8')).toBe('# My note')
     await writeFile(settingsFile, '{"custom":"preserved"}')
     const restarted = makeRuntime()

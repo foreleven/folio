@@ -25,6 +25,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "test:codex-protocol": "npm run build && node scripts/codex-protocol-spike.mjs",
+    "test:codex-skills": "npm run build && node scripts/codex-skills-spike.mjs",
     "test:live-provider-policy": "node scripts/live-provider-policy-check.mjs",
     "test:live-provider": "npm run build && node scripts/live-provider-smoke.mjs"
   },
@@ -32,6 +34,8 @@
     "@agentclientprotocol/sdk": "1.4.0",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/sql-sqlite-node": "4.0.0-rc.112",
     "effect": "4.0.0-rc.112",
     "proper-lockfile": "4.1.2"
   },

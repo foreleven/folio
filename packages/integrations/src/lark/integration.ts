@@ -1,4 +1,5 @@
 import { Effect, FileSystem, Schedule } from 'effect'
+import { join } from 'node:path'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { defineIntegration, IntegrationContext, IntegrationError } from '../base/index.ts'
 import type { CheckResult, IngestContext, IntegrationAction } from '../base/index.ts'
@@ -9,11 +10,18 @@ import { larkMetadata } from './metadata.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
 
-/** Agent context enrichment remains outside the connection/settings lifecycle. */
-const onIngest = (_context: IngestContext) => Effect.void
+/** Mounts the selected capability and shared rules; the Agent decides which CLI commands to execute. */
+const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) => Effect.sync(() => {
+  for (const name of ['lark-shared', skill]) {
+    const entrypoint = join(context.integrationDirectory, 'skills', name, 'SKILL.md')
+    if (!context.skills.includes(entrypoint)) context.skills.push(entrypoint)
+  }
+  const cli = join(context.integrationDirectory, 'cli')
+  if (!context.executableDirectories.includes(cli)) context.executableDirectories.push(cli)
+})
 const resources = [
-  { id: 'im', name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest },
-  { id: 'email', name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest }
+  { id: 'im', name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('lark-im') },
+  { id: 'email', name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest: onIngest('lark-mail') }
 ] as const
 const actions = [
   { id: 'open_authorization', label: { en: 'Continue in browser', 'zh-CN': '前往授权' } },

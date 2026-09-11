@@ -1,3 +1,4 @@
+import { RoutineSchedulerLive } from './services/routine-scheduler'
 import { NodeServices } from '@effect/platform-node'
 import { lark, LarkCliArchive, LarkSkillsDirectory } from '@folio/integrations/lark'
 import { app } from 'electron'
@@ -15,6 +16,7 @@ import { IntegrationStore } from './services/integration-store'
 import { IntegrationBrowser } from './electron/IntegrationBrowser'
 import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
 import * as NodePath from '@effect/platform-node/NodePath'
+import * as NodeChildProcessSpawner from '@effect/platform-node/NodeChildProcessSpawner'
 import { Effect, Layer, References, Stream } from 'effect'
 import { ElectronApp, type ElectronAppEvent } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
@@ -26,6 +28,8 @@ import { ApplicationMenuLive } from './electron/ApplicationMenu'
 import { ApplicationThemeLive } from './electron/ApplicationTheme'
 
 import { VaultService } from './services/vault-service'
+import { TaskService } from './services/task-service'
+import { AgentRuntime } from './services/agent-runtime'
 import { VaultLauncher } from './electron/VaultLauncher'
 
 const ConfigLive = ConfigService.layer.pipe(
@@ -53,7 +57,6 @@ const IntegrationsLive = IntegrationService.layer.pipe(
 /** Handles one Electron lifecycle event through the injected application services. */
 const handleEvent = Effect.fn('main.handleElectronEvent')(
   function*(event: ElectronAppEvent) {
-    const electronApp = yield* ElectronApp
     const mainWindow = yield* MainWindow
 
     switch (event._tag) {
@@ -63,9 +66,8 @@ const handleEvent = Effect.fn('main.handleElectronEvent')(
         }
         return
       case 'WindowAllClosed':
-        if (electronApp.quitOnWindowAllClosed) {
-          yield* electronApp.quit
-        }
+        // A Task belongs to the application scope, not a window. Explicit Quit ends that scope.
+        return
     }
   }
 )
@@ -83,12 +85,15 @@ export const application = Effect.gen(function*() {
 })
 
 /** Complete main-process layer with one shared Electron application boundary. */
-export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive).pipe(
-  Layer.provide(IntegrationsLive),
-  Layer.provide(ModelService.layer()),
+export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, RoutineSchedulerLive).pipe(
   Layer.provide(VaultLauncher.layer),
   Layer.provideMerge(MainWindow.layer),
   Layer.provide(VaultService.layer),
+  Layer.provide(TaskService.layer),
+  Layer.provide(IntegrationsLive),
+  Layer.provide(ModelService.layer()),
+  Layer.provideMerge(AgentRuntime.layer(join(app.getAppPath(), 'out/main'))),
+  Layer.provide(NodeChildProcessSpawner.layer),
   Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)),
   Layer.provide(SettingsWindow.layer),
   Layer.provide(ApplicationThemeLive),
