@@ -451,6 +451,6 @@ Skill 选择和 `raws` 契约暂不作为当前外围 Git 闭环的前置条件�
 
 ### 2026-09-11 实现状态补充：conflict-resolution Run
 
-`tasks.startConflictResolution` 已将隔离 coordinator 接入原 Task 的独立 conflict-resolution Run：复用原 Agent/model snapshot，cwd 固定为 `sync-worktrees/{operationId}`，Prompt 携带 Task goal、共同基线、双方 diff 和冲突文件；Agent 只能编辑 `wiki/**`，成功 terminal 后 Folio 自动验证、暂存并继续 publish/align，失败或取消保留现场。稳定 Run/RPC ID 重试不重复 Prompt。剩余工作是 terminal receipt 与后置接纳之间的崩溃窗口、稳定 reprepare 的 UI 状态恢复，以及重放后再次冲突的用户交互入口。
+`tasks.startConflictResolution` 已将隔离 coordinator 接入原 Task 的独立 conflict-resolution Run：复用原 Agent/model snapshot，cwd 固定为 `sync-worktrees/{operationId}`，Prompt 携带 Task goal、共同基线、双方 diff 和冲突文件；Agent 只能编辑 `wiki/**`，成功 terminal 后 Folio 自动验证、暂存并继续 publish/align，失败或取消保留现场。稳定 Run/RPC ID 重试不重复 Prompt。terminal receipt 与后置接纳之间的 publish/alignment receipt 丢失恢复、稳定 reprepare 的 UI 状态恢复，以及重放后再次冲突的用户交互入口均已覆盖；真实外部 Agent 重放期间的人工验收仍待进行。
 
 稳定 reprepare 的 UI 恢复现已覆盖；当前剩余的是 terminal receipt 与后置接纳之间的崩溃窗口，以及重放后再次冲突的用户交互收尾。
