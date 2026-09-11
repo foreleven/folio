@@ -438,8 +438,8 @@ Skill 选择和 `raws` 契约暂不作为当前外围 Git 闭环的前置条件�
 已确认的产品规则不在这里重复询问。以下仍需证据或后续设计：
 
 1. Run 结束后选定 `wiki` 的显式保存和同步后端已能保留一个或多个 Run 的完整来源并投影同步状态；无文件变更的成功 Run 也已有逐 Run 的显式 `not-required` 收据；Task 文件选择/差异 UI 已接入。terminal receipt 已位于 Folio-owned Agent 进程回收之后，但逃逸进程和外部编辑器仍需 sandbox/所有权边界，不能只用 ACP idle 代替停止证明。
-2. conflict-resolution Run 的 terminal receipt 与后置 Git 接纳之间依赖稳定重试；当前已为 conflict/resolving 状态保存不可变的 resolution input，并可在 main 前进后创建 replacement operation，使用三方 patch 自动重放，且回放前校验 source/parent/tree 身份和 `wiki/**` 范围。重放再次冲突时会重新进入隔离 coordinator。publish receipt 和 alignment receipt 丢失的接纳窗口崩溃注入覆盖、稳定 reprepare 的 UI 状态恢复，以及冲突 Run 消息嵌入文件面板均已完成；仍需收尾重放后多次冲突的用户交互。
-   2026-09-11 更新：稳定 reprepare 的 UI 状态恢复、冲突 Run 消息嵌入文件面板，以及 publish/alignment receipt 丢失后的接纳重试覆盖均已完成；本项剩余为重放后多次冲突的交互收尾。
+2. conflict-resolution Run 的 terminal receipt 与后置 Git 接纳之间依赖稳定重试；当前已为 conflict/resolving 状态保存不可变的 resolution input，并可在 main 前进后创建 replacement operation，使用三方 patch 自动重放，且回放前校验 source/parent/tree 身份和 `wiki/**` 范围。重放再次冲突时会重新进入隔离 coordinator，并可从文件面板继续启动新的 conflict-resolution Run。publish receipt 和 alignment receipt 丢失的接纳窗口崩溃注入覆盖、稳定 reprepare 的 UI 状态恢复、冲突 Run 消息嵌入文件面板及 replacement/retry 身份恢复均已完成。
+   2026-09-11 更新：本项的后端重放、接纳收据恢复和多次冲突 UI 入口均已覆盖；剩余只保留真实外部 Agent 重放期间的人工验收。
 3. clean preflight 后外部编辑器再次写入的竞态、外部 Git 接纳流程、未保存缓冲区协调和撤销已同步变更的语义。
 4. ACP 流式记录的重放去重、子进程退出确认、原生 Session 与 UI 记录的一致性。
 5. raws 日期、幂等命名与不可改写冲突契约；当前同步实现明确不处理 raws。
@@ -447,7 +447,7 @@ Skill 选择和 `raws` 契约暂不作为当前外围 Git 闭环的前置条件�
 7. 初始 Agent 模型选择已按 Agent 配置承载：Task 创建时固定 Agent，Pi 使用显式 provider/model 快照；Codex 仍沿用本地配置适配，后续补齐统一模型配置体验，不允许用默认字段掩盖缺失配置。
 8. AGENTS.md、除 raws/wiki 外的新文件如何分类提交，以及业务产物的检查标准。
 
-下一轮优先补齐重放后再次冲突的交互收尾；第 1 项的 Task 文件选择 UI 已完成，但 terminal receipt 后的 writer quiescence 仍需 sandbox/所有权边界，不能把它描述为自动同步闭环。
+下一轮优先补齐真实外部 Agent 重放期间的人工验收；第 1 项的 Task 文件选择 UI 已完成，但 terminal receipt 后的 writer quiescence 仍需 sandbox/所有权边界，不能把它描述为自动同步闭环。
 
 ### 2026-09-11 实现状态补充：conflict-resolution Run
 

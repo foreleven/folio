@@ -801,3 +801,14 @@ SQLite/Git 故障注入，分别覆盖 publish receipt 丢失和 alignment recei
 回归 7 个文件 130/130 通过（其中同步测试 37/37）。Skill、`raws`、Integration 实际装配
 和 Agent 切换仍未纳入；普通 Run 自动保存、逃逸进程/外部编辑器停止证明及重放后再次冲突的
 交互收尾继续保留为后续工作。
+
+## 2026-09-11 — replacement identity 与再次冲突 UI 回归
+
+重新准备同一冻结 operation 的 renderer 请求现在使用 `reprepare-{supersededOperationId}`
+作为稳定 replacement ID；即使刷新发生在 `sessionStorage` 写入之前，也能从当前 operation
+重建同一请求，不会为同一 source interval 产生第二个 replacement。新增回归覆盖 renderer
+存储不可用时的刷新重试。另验证 reprepare 在新 main 上再次返回 `conflict` 后，文件面板会
+继续展示 `Start conflict-resolution Run`，并把新的 operation ID 传给固定 Agent 的启动入口。
+
+Task wiki 面板回归 12/12 通过。普通外部 Agent 重放期间的人工验收仍待进行；Skill、`raws`、
+Integration 实际装配和 Agent 切换不在当前切片范围内。
