@@ -86,112 +86,31 @@ export const migrateVault = SqliteMigrator.run({
     '0006_routines': Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
       yield* sql`CREATE TABLE routines (
-        id TEXT PRIMARY KEY NOT NULL, definition TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
-        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
+        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), model_provider_id TEXT,
+        model_id TEXT, thinking_level TEXT, skill_ids TEXT NOT NULL DEFAULT '[]',
+        integration_ids TEXT NOT NULL DEFAULT '[]', interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0),
+        time_zone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+        revision INTEGER NOT NULL CHECK(revision > 0), next_trigger_at INTEGER,
+        last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        CHECK(json_valid(skill_ids)), CHECK(json_valid(integration_ids)),
+        CHECK((agent='pi') = (model_provider_id IS NOT NULL AND model_id IS NOT NULL AND thinking_level IS NOT NULL))
       )`
-      // task_id reserves an identity before Task/worktree creation; it intentionally has no
-      // tasks FK because the durable trigger must survive a failed materialization attempt.
-      yield* sql`CREATE TABLE routine_triggers (
-        id TEXT PRIMARY KEY NOT NULL, routine_id TEXT NOT NULL REFERENCES routines(id),
-        expected_revision INTEGER NOT NULL CHECK(expected_revision > 0), task_id TEXT NOT NULL UNIQUE,
-        snapshot TEXT NOT NULL, created_at INTEGER NOT NULL
-      )`
-      yield* sql`CREATE INDEX routine_triggers_by_routine ON routine_triggers(routine_id, created_at)`
-    }),
-    '0007_routine_execution_gate': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // Use the immutable occurrence relationship rather than a caller-supplied Routine ID.
-      // SQLite serializes these checks with the write, across independent connections/processes.
-      yield* sql`CREATE TRIGGER runs_routine_insert BEFORE INSERT ON runs
-        WHEN NEW.state IN ('preparing', 'running') AND EXISTS (
-          SELECT 1 FROM routine_triggers own
-          JOIN routine_triggers sibling ON sibling.routine_id=own.routine_id
-          JOIN runs r ON r.task_id=sibling.task_id
-          WHERE own.task_id=NEW.task_id AND r.task_id<>NEW.task_id
-            AND (r.state IN ('preparing', 'running') OR r.sync_state='conflict'
-              OR (r.state='succeeded' AND r.sync_state NOT IN ('completed', 'not-required')))
-        ) BEGIN SELECT RAISE(ABORT, 'Routine already has an active Run'); END`
-      yield* sql`CREATE TRIGGER runs_routine_update BEFORE UPDATE OF task_id, state ON runs
-        WHEN NEW.state IN ('preparing', 'running') AND (OLD.state NOT IN ('preparing', 'running') OR NEW.task_id<>OLD.task_id) AND EXISTS (
-          SELECT 1 FROM routine_triggers own
-          JOIN routine_triggers sibling ON sibling.routine_id=own.routine_id
-          JOIN runs r ON r.task_id=sibling.task_id
-          WHERE own.task_id=NEW.task_id AND r.task_id<>NEW.task_id
-            AND (r.state IN ('preparing', 'running') OR r.sync_state='conflict'
-              OR (r.state='succeeded' AND r.sync_state NOT IN ('completed', 'not-required'))) AND r.id<>OLD.id
-        ) BEGIN SELECT RAISE(ABORT, 'Routine already has an active Run'); END`
-      yield* sql`CREATE TRIGGER routine_origin_immutable BEFORE UPDATE OF routine_id, task_id ON routine_triggers
-        WHEN NEW.routine_id<>OLD.routine_id OR NEW.task_id<>OLD.task_id
-        BEGIN SELECT RAISE(ABORT, 'Routine occurrence identity is immutable'); END`
-      yield* sql`CREATE TRIGGER routine_origin_retained BEFORE DELETE ON routine_triggers
-        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id)
-        BEGIN SELECT RAISE(ABORT, 'Task still owns this Routine occurrence'); END`
-      yield* sql`CREATE TRIGGER routine_origin_reserved BEFORE INSERT ON routine_triggers
-        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id)
-        BEGIN SELECT RAISE(ABORT, 'Routine occurrence must reserve a new Task identity'); END`
-    }),
-    '0008_routine_execution_intent': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // IDs precede their native/Run records. A retry must never allocate a second first Prompt.
       yield* sql`CREATE TABLE routine_executions (
-        trigger_id TEXT PRIMARY KEY NOT NULL REFERENCES routine_triggers(id),
-        session_id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
-      )`
-    }),
-    '0009_protocol_messages': Effect.void,
-    '0010_routine_wakeups': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE UNIQUE INDEX routine_trigger_identity ON routine_triggers(id, routine_id)`
-      // No configuration snapshot until dispatch: all pending occurrences share the then-current definition.
-      yield* sql`CREATE TABLE routine_wakeups (
         id TEXT PRIMARY KEY NOT NULL, routine_id TEXT NOT NULL REFERENCES routines(id),
-        triggered_at INTEGER NOT NULL CHECK(triggered_at>=0), received_at INTEGER NOT NULL,
-        trigger_id TEXT, FOREIGN KEY(trigger_id, routine_id) REFERENCES routine_triggers(id, routine_id)
+        task_id TEXT REFERENCES tasks(id), routine_date TEXT NOT NULL,
+        trigger_time INTEGER NOT NULL, first_trigger_time INTEGER NOT NULL,
+        trigger_count INTEGER NOT NULL DEFAULT 1 CHECK(trigger_count > 0),
+        is_end INTEGER NOT NULL DEFAULT 0 CHECK(is_end IN (0, 1)),
+        window_start INTEGER, window_end INTEGER, routine_revision INTEGER NOT NULL CHECK(routine_revision > 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+        started_at INTEGER, ended_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        CHECK(status='pending' OR task_id IS NOT NULL), CHECK(window_end IS NULL OR window_start IS NULL OR window_end >= window_start)
       )`
-      yield* sql`CREATE INDEX routine_wakeups_pending ON routine_wakeups(routine_id, trigger_id, triggered_at)`
-      yield* sql`CREATE TRIGGER routine_wakeup_immutable BEFORE UPDATE ON routine_wakeups
-        WHEN NEW.id<>OLD.id OR NEW.routine_id<>OLD.routine_id OR NEW.triggered_at<>OLD.triggered_at
-          OR NEW.received_at<>OLD.received_at OR (OLD.trigger_id IS NOT NULL AND NEW.trigger_id IS NOT OLD.trigger_id)
-        BEGIN SELECT RAISE(ABORT, 'Routine wakeup identity and accepted batch are immutable'); END`
-    }),
-    '0011_routine_conflict_pause': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // Pausing is part of the same transaction as conflict registration, including recovery writes.
-      // Revision invalidates open editors; repeated conflict observations do not keep bumping it.
-      yield* sql`CREATE TRIGGER routine_pause_on_conflict_insert AFTER INSERT ON runs
-        WHEN NEW.sync_state='conflict' BEGIN
-          UPDATE routines SET definition=json_set(definition, '$.enabled', json('false')), revision=revision+1,
-            updated_at=MAX(updated_at, CAST(unixepoch('subsec')*1000 AS INTEGER))
-          WHERE id IN (SELECT routine_id FROM routine_triggers WHERE task_id=NEW.task_id)
-            AND json_extract(definition, '$.enabled')=1;
-        END`
-      yield* sql`CREATE TRIGGER routine_pause_on_conflict_update AFTER UPDATE OF sync_state ON runs
-        WHEN NEW.sync_state='conflict' BEGIN
-          UPDATE routines SET definition=json_set(definition, '$.enabled', json('false')), revision=revision+1,
-            updated_at=MAX(updated_at, CAST(unixepoch('subsec')*1000 AS INTEGER))
-          WHERE id IN (SELECT routine_id FROM routine_triggers WHERE task_id=NEW.task_id)
-            AND json_extract(definition, '$.enabled')=1;
-        END`
-      yield* sql`CREATE TRIGGER routine_enable_without_conflicts BEFORE UPDATE OF definition ON routines
-        WHEN json_extract(NEW.definition, '$.enabled')=1 AND EXISTS (
-          SELECT 1 FROM routine_triggers rt JOIN runs r ON r.task_id=rt.task_id
-          WHERE rt.routine_id=NEW.id AND r.sync_state='conflict'
-        ) BEGIN SELECT RAISE(ABORT, 'Resolve Routine synchronization conflicts before enabling'); END`
-      // Existing ledger conflicts receive the same pause without touching Task files or accepted snapshots.
-      yield* sql`UPDATE routines SET definition=json_set(definition, '$.enabled', json('false')), revision=revision+1,
-        updated_at=MAX(updated_at, CAST(unixepoch('subsec')*1000 AS INTEGER))
-        WHERE json_extract(definition, '$.enabled')=1 AND EXISTS (
-          SELECT 1 FROM routine_triggers rt JOIN runs r ON r.task_id=rt.task_id
-          WHERE rt.routine_id=routines.id AND r.sync_state='conflict'
-        )`
-    }),
-    '0012_daily_routine_schedules': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE vault_schedule_settings (id INTEGER PRIMARY KEY CHECK(id=1), time_zone TEXT NOT NULL)`
-      yield* sql`CREATE TABLE routine_schedules (
-        routine_id TEXT PRIMARY KEY REFERENCES routines(id), time TEXT NOT NULL,
-        revision INTEGER NOT NULL CHECK(revision>0), next_at INTEGER NOT NULL
-      )`
+      yield* sql`CREATE UNIQUE INDEX routine_one_pending_execution ON routine_executions(routine_id) WHERE status='pending'`
+      yield* sql`CREATE UNIQUE INDEX routine_one_end_execution ON routine_executions(routine_id, routine_date) WHERE is_end=1`
+      yield* sql`CREATE INDEX routine_executions_by_date ON routine_executions(routine_id, routine_date, trigger_time)`
+      yield* sql`CREATE INDEX routine_executions_by_task ON routine_executions(task_id) WHERE task_id IS NOT NULL`
     }),
     '0013_git_change_preparations': Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
@@ -463,5 +382,40 @@ export const migrateVault = SqliteMigrator.run({
         BEGIN SELECT RAISE(ABORT, 'Git synchronization checkpoint is incomplete'); END`
     }),
     '0018_protocol_diagnostics': Effect.void
+    ,
+    // Existing development vaults may already be at 0018 with the retired five-table
+    // Routine model. This intentionally destructive replacement is allowed because the
+    // new contract does not promise compatibility; fresh installs also converge here.
+    '0019_routines_simplified': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`DROP TABLE IF EXISTS routine_wakeups`
+      yield* sql`DROP TABLE IF EXISTS routine_triggers`
+      yield* sql`DROP TABLE IF EXISTS routine_schedules`
+      yield* sql`DROP TABLE IF EXISTS routine_executions`
+      yield* sql`DROP TABLE IF EXISTS routines`
+      yield* sql`CREATE TABLE routines (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
+        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), model_provider_id TEXT,
+        model_id TEXT, thinking_level TEXT, skill_ids TEXT NOT NULL DEFAULT '[]', integration_ids TEXT NOT NULL DEFAULT '[]',
+        interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0), time_zone TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)), revision INTEGER NOT NULL CHECK(revision > 0),
+        next_trigger_at INTEGER, last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        CHECK(json_valid(skill_ids)), CHECK(json_valid(integration_ids)),
+        CHECK((agent='pi') = (model_provider_id IS NOT NULL AND model_id IS NOT NULL AND thinking_level IS NOT NULL))
+      )`
+      yield* sql`CREATE TABLE routine_executions (
+        id TEXT PRIMARY KEY NOT NULL, routine_id TEXT NOT NULL REFERENCES routines(id), task_id TEXT REFERENCES tasks(id),
+        routine_date TEXT NOT NULL, trigger_time INTEGER NOT NULL, first_trigger_time INTEGER NOT NULL,
+        trigger_count INTEGER NOT NULL DEFAULT 1 CHECK(trigger_count > 0), is_end INTEGER NOT NULL DEFAULT 0 CHECK(is_end IN (0, 1)),
+        window_start INTEGER, window_end INTEGER, routine_revision INTEGER NOT NULL CHECK(routine_revision > 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+        started_at INTEGER, ended_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        CHECK(status='pending' OR task_id IS NOT NULL), CHECK(window_end IS NULL OR window_start IS NULL OR window_end >= window_start)
+      )`
+      yield* sql`CREATE UNIQUE INDEX routine_one_pending_execution ON routine_executions(routine_id) WHERE status='pending'`
+      yield* sql`CREATE UNIQUE INDEX routine_one_end_execution ON routine_executions(routine_id, routine_date) WHERE is_end=1`
+      yield* sql`CREATE INDEX routine_executions_by_date ON routine_executions(routine_id, routine_date, trigger_time)`
+      yield* sql`CREATE INDEX routine_executions_by_task ON routine_executions(task_id) WHERE task_id IS NOT NULL`
+    })
   })
 })

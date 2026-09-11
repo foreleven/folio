@@ -29,8 +29,7 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
   const choices = catalog._tag === 'Success' && settings._tag === 'Success' && task.configuration.agent === 'pi'
     ? catalog.value.models.filter(model => model.source === 'builtin' && settings.value.configuredProviders?.includes(model.providerId)) : []
   const routine = detail._tag === 'Success' ? detail.value.routine : null
-  const routineModel = routine?.snapshot.definition.model
-  const routineModelKey = routineModel ? JSON.stringify([routineModel.providerId, routineModel.modelId]) : ''
+  const routineModelKey = ''
   // A user selection (including clearing it) takes precedence over the immutable Routine default.
   const selectedModelKey = modelKey ?? routineModelKey
   const model = choices.find(entry => JSON.stringify([entry.providerId, entry.modelId]) === selectedModelKey)
@@ -39,7 +38,7 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
   async function initialize(session?: SessionRecord): Promise<void> {
     if (busy.current || (!session && task.configuration.agent === 'pi' && !model)) return
     const selection = !session && task.configuration.agent === 'pi' && model
-      ? { providerId: model.providerId, modelId: model.modelId, thinkingLevel: selectedModelKey === routineModelKey && routineModel ? routineModel.thinkingLevel : 'off' as const } : undefined
+      ? { providerId: model.providerId, modelId: model.modelId, thinkingLevel: 'off' as const } : undefined
     const previous = submitted.current
     const input: OpenTaskSessionInput = session
       ? { vaultId, taskId: task.id, sessionId: session.id, agent: session.agent }
@@ -72,7 +71,7 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
   }
 
   return <div className="space-y-3 border-t pt-3">
-    {routine ? <p className="text-support text-muted-foreground">{chinese ? '来自 Routine：' : 'From Routine: '}{routine.snapshot.definition.name}</p> : null}
+    {routine ? <p className="text-support text-muted-foreground">{chinese ? '来自 Routine 执行：' : 'From Routine execution: '}{routine.routineDate}</p> : null}
     <div className="flex flex-wrap items-end gap-3">
       <div className="space-y-1 text-ui"><span className="block">{chinese ? '会话 Agent' : 'Session Agent'}</span>
         <span className="inline-flex h-8 items-center rounded-md border px-2">{task.configuration.agent === 'pi' ? 'pi' : 'Codex'}</span>
@@ -81,9 +80,6 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
         <select className="h-8 w-full rounded-md border bg-background px-2" disabled={pending} value={selectedModelKey}
           onChange={event => setModelKey(event.target.value)}>
           <option value="">{chinese ? '请选择模型' : 'Choose a model'}</option>
-          {selectedModelKey && !model && routineModel && selectedModelKey === routineModelKey ? <option value={selectedModelKey}>
-            {routineModel.providerId} / {routineModel.modelId} ({chinese ? '当前不可用' : 'currently unavailable'})
-          </option> : null}
           {choices.map(entry => <option key={JSON.stringify([entry.providerId, entry.modelId])} value={JSON.stringify([entry.providerId, entry.modelId])}>
             {entry.providerName} / {entry.modelName}
           </option>)}

@@ -1,175 +1,209 @@
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { randomUUID } from 'node:crypto'
-import { DailyTime, nextDailyOccurrence, VaultTimeZone } from '../../shared/routine-schedule'
 import { HarnessStoreError } from '../../shared/harness'
-import { EnqueueRoutine, RoutineDefinition, RoutineExecution, RoutineRecord, RoutineTrigger, RoutineWakeup, SaveRoutine, TriggerRoutine } from '../../shared/routine'
+import { RoutineExecution, RoutineRecord, SaveRoutine, previousRoutineDate, routineDateAt, routineDayEnd } from '../../shared/routine'
+import { SessionModelSelection } from '../../shared/model'
 
-const RecordRow = Schema.Struct({ ...RoutineRecord.fields, definition: Schema.fromJsonString(RoutineDefinition) })
-const TriggerRow = Schema.Struct({ ...RoutineTrigger.fields, snapshot: Schema.fromJsonString(RoutineRecord) })
 const now = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
-const fail = (reason: HarnessStoreError['reason']) => new HarnessStoreError({ reason,
-  message: reason === 'not-found' ? 'Routine was not found.' : reason === 'invalid-state'
-    ? 'Routine has changed, is paused, or this identity already belongs to another operation.' : 'Could not save Routine state.' })
-const safe = (error: unknown) => error instanceof HarnessStoreError ? error : fail('storage')
+const safe = (error: unknown) => error instanceof HarnessStoreError ? error
+  : new HarnessStoreError({ reason: 'storage', message: error instanceof Error && error.message ? error.message : 'Could not save Routine state.' })
+const fail = (reason: HarnessStoreError['reason'], message?: string) => new HarnessStoreError({ reason,
+  message: message ?? (reason === 'not-found' ? 'Routine was not found.' : reason === 'invalid-state' ? 'Routine has changed or is not ready.' : 'Could not save Routine state.') })
 
-/** Vault-local definitions and accepted trigger snapshots. No Integration, Git or Agent side effects occur here. */
+const DbRoutine = Schema.Struct({
+  id: RoutineRecord.fields.id, name: RoutineRecord.fields.name, prompt: RoutineRecord.fields.prompt,
+  agent: RoutineRecord.fields.agent, modelProviderId: Schema.NullOr(Schema.String), modelId: Schema.NullOr(Schema.String),
+  thinkingLevel: Schema.NullOr(SessionModelSelection.fields.thinkingLevel),
+  skillIds: Schema.fromJsonString(Schema.Array(Schema.NonEmptyString)),
+  integrationIds: Schema.fromJsonString(Schema.Array(Schema.NonEmptyString)),
+  intervalMinutes: RoutineRecord.fields.intervalMinutes, timeZone: RoutineRecord.fields.timeZone,
+  enabled: Schema.Union([Schema.Boolean, Schema.Number]), revision: RoutineRecord.fields.revision,
+  nextTriggerAt: RoutineRecord.fields.nextTriggerAt, lastTriggerAt: RoutineRecord.fields.lastTriggerAt,
+  createdAt: RoutineRecord.fields.createdAt, updatedAt: RoutineRecord.fields.updatedAt
+})
+const DbExecution = Schema.Struct({
+  id: RoutineExecution.fields.id, routineId: RoutineExecution.fields.routineId, taskId: RoutineExecution.fields.taskId,
+  routineDate: RoutineExecution.fields.routineDate, triggerTime: RoutineExecution.fields.triggerTime,
+  firstTriggerTime: RoutineExecution.fields.firstTriggerTime, triggerCount: RoutineExecution.fields.triggerCount,
+  isEnd: Schema.Union([Schema.Boolean, Schema.Number]), windowStart: RoutineExecution.fields.windowStart, windowEnd: RoutineExecution.fields.windowEnd,
+  routineRevision: RoutineExecution.fields.routineRevision, status: RoutineExecution.fields.status,
+  startedAt: RoutineExecution.fields.startedAt, endedAt: RoutineExecution.fields.endedAt,
+  createdAt: RoutineExecution.fields.createdAt, updatedAt: RoutineExecution.fields.updatedAt
+})
+
+function decodeRoutine(row: typeof DbRoutine.Type): RoutineRecord {
+  const model = row.modelProviderId && row.modelId && row.thinkingLevel
+    ? { providerId: row.modelProviderId, modelId: row.modelId, thinkingLevel: row.thinkingLevel }
+    : null
+  return { ...row, enabled: row.enabled === true || row.enabled === 1, model }
+}
+
+function decodeExecution(row: typeof DbExecution.Type): RoutineExecution {
+  return { ...row, isEnd: row.isEnd === true || row.isEnd === 1 }
+}
+
+/** Owns flat Routine configuration and the single coalescing execution ledger. */
 export class RoutineStore extends Context.Service<RoutineStore, {
   readonly list: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
+  readonly get: (id: string) => Effect.Effect<RoutineRecord, HarnessStoreError>
   readonly save: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
-  readonly claim: (input: TriggerRoutine) => Effect.Effect<RoutineTrigger, HarnessStoreError>
-  readonly prepareExecution: (triggerId: string) => Effect.Effect<RoutineExecution, HarnessStoreError>
-  readonly triggers: (routineId: string) => Effect.Effect<readonly RoutineTrigger[], HarnessStoreError>
-  readonly forTask: (taskId: string) => Effect.Effect<RoutineTrigger | null, HarnessStoreError>
-  readonly enqueue: (input: EnqueueRoutine) => Effect.Effect<RoutineWakeup, HarnessStoreError>
-  readonly wakeups: (routineId: string) => Effect.Effect<readonly RoutineWakeup[], HarnessStoreError>
-  readonly claimPending: (routineId: string) => Effect.Effect<RoutineTrigger | null, HarnessStoreError>
+  readonly schedule: (routineId: string, at?: number) => Effect.Effect<RoutineExecution, HarnessStoreError>
+  readonly executions: (routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
+  readonly executionForTask: (taskId: string) => Effect.Effect<RoutineExecution | null, HarnessStoreError>
+  readonly attachTask: (executionId: string, taskId: string) => Effect.Effect<RoutineExecution, HarnessStoreError>
+  readonly setStatus: (taskId: string, status: RoutineExecution['status'], startedAt?: number, endedAt?: number) => Effect.Effect<void, HarnessStoreError>
 }>()('folio/services/RoutineStore') {
   static readonly layer = Layer.effect(RoutineStore, Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const records = Schema.decodeUnknownEffect(Schema.Array(RecordRow))
-    const triggers = Schema.decodeUnknownEffect(Schema.Array(TriggerRow))
-    const wakeupRows = Schema.decodeUnknownEffect(Schema.Array(RoutineWakeup))
-    const list = sql`SELECT id, definition, revision, created_at AS createdAt, updated_at AS updatedAt
-      FROM routines ORDER BY created_at DESC, id`.pipe(Effect.flatMap(records), Effect.mapError(safe))
+    const decodeRoutines = Schema.decodeUnknownEffect(Schema.Array(DbRoutine))
+    const decodeExecutions = (input: unknown) => Schema.decodeUnknownEffect(Schema.Array(DbExecution))(input).pipe(Effect.map(rows => rows.map(decodeExecution)))
 
-    /** Compare-and-swap edits protect concurrent windows; an exact lost-reply retry is read-only. */
+    const readRoutines = sql`SELECT id, name, prompt, agent, model_provider_id AS modelProviderId, model_id AS modelId,
+      thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds,
+      interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
+      next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt, created_at AS createdAt, updated_at AS updatedAt
+      FROM routines ORDER BY created_at DESC, id`.pipe(Effect.flatMap(decodeRoutines), Effect.map(rows => rows.map(decodeRoutine)), Effect.mapError(safe))
+
+    const readExecutionRows = (routineId?: string) => (routineId
+      ? sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
+          first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd,
+          window_start AS windowStart, window_end AS windowEnd, routine_revision AS routineRevision, status,
+          started_at AS startedAt, ended_at AS endedAt, created_at AS createdAt, updated_at AS updatedAt
+          FROM routine_executions WHERE routine_id=${routineId} ORDER BY routine_date DESC, trigger_time DESC, id`
+      : sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
+          first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd,
+          window_start AS windowStart, window_end AS windowEnd, routine_revision AS routineRevision, status,
+          started_at AS startedAt, ended_at AS endedAt, created_at AS createdAt, updated_at AS updatedAt
+          FROM routine_executions ORDER BY routine_date DESC, trigger_time DESC, id`).pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
+
+    const list = readRoutines
+    const get = Effect.fn('RoutineStore.get')(function*(id: string) {
+      const row = (yield* sql`SELECT id, name, prompt, agent, model_provider_id AS modelProviderId, model_id AS modelId,
+        thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds,
+        interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
+        next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt, created_at AS createdAt, updated_at AS updatedAt
+        FROM routines WHERE id=${id}`.pipe(Effect.flatMap(decodeRoutines))).at(0)
+      return row ? decodeRoutine(row) : yield* fail('not-found')
+    }, Effect.mapError(safe))
+
     const save = Effect.fn('RoutineStore.save')(function*(input: SaveRoutine) {
       const value = yield* Schema.decodeUnknownEffect(SaveRoutine)(input, { onExcessProperty: 'error' })
-      if ((value.definition.configuration.agent === 'pi') !== (value.definition.model !== null)) return yield* fail('invalid-state')
-      const definition = { ...value.definition, configuration: { ...value.definition.configuration,
-        skillIds: [...new Set(value.definition.configuration.skillIds)].sort(),
-        integrationIds: [...new Set(value.definition.configuration.integrationIds)].sort() } }
+      if ((value.agent === 'pi') !== (value.model !== null)) return yield* fail('invalid-state', 'Pi requires a model selection and Codex uses local configuration.')
+      const skillIds = [...new Set(value.skillIds)].sort()
+      const integrationIds = [...new Set(value.integrationIds)].sort()
       return yield* sql.withTransaction(Effect.gen(function*() {
-        const [previous] = yield* sql`SELECT id, definition, revision, created_at AS createdAt, updated_at AS updatedAt
-          FROM routines WHERE id=${value.id}`.pipe(Effect.flatMap(records))
-        if (definition.enabled && (yield* sql`SELECT r.id FROM routine_triggers rt JOIN runs r ON r.task_id=rt.task_id
-          WHERE rt.routine_id=${value.id} AND r.sync_state='conflict' LIMIT 1`).length) {
-          return yield* new HarnessStoreError({ reason: 'routine-conflict',
-            message: 'Resolve this Routine’s synchronization conflicts before enabling it.' })
-        }
+        const previous = yield* get(value.id).pipe(Effect.catchTag('HarnessStoreError', (error) => error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error)))
         const revision = (value.expectedRevision ?? 0) + 1
-        if (previous?.revision === revision && JSON.stringify(previous.definition) === JSON.stringify(definition)) return previous
+        if (previous && previous.revision === revision && JSON.stringify({ ...value, skillIds, integrationIds }) === JSON.stringify({
+          id: previous.id, expectedRevision: previous.revision - 1, name: previous.name, prompt: previous.prompt, agent: previous.agent,
+          model: previous.model, skillIds: previous.skillIds, integrationIds: previous.integrationIds, intervalMinutes: previous.intervalMinutes,
+          timeZone: previous.timeZone, enabled: previous.enabled
+        })) return previous
         if (previous ? previous.revision !== value.expectedRevision : value.expectedRevision !== null) return yield* fail('invalid-state')
         const time = yield* now
-        if (previous) yield* sql`UPDATE routines SET definition=${JSON.stringify(definition)}, revision=${revision}, updated_at=${time}
-          WHERE id=${value.id} AND revision=${value.expectedRevision}`
-        else yield* sql`INSERT INTO routines (id, definition, revision, created_at, updated_at)
-          VALUES (${value.id}, ${JSON.stringify(definition)}, 1, ${time}, ${time})`
-        if (previous && !previous.definition.enabled && definition.enabled) {
-          // Re-enable can precede the first scheduler tick after restart. Skip the paused interval
-          // atomically with the definition change, while retaining already accepted wakeups.
-          const [schedule] = yield* sql`SELECT s.time, v.time_zone AS timeZone FROM routine_schedules s
-            JOIN vault_schedule_settings v ON v.id=1 WHERE s.routine_id=${value.id}`.pipe(
-            Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({ time: DailyTime, timeZone: VaultTimeZone })))))
-          if (schedule) yield* sql`UPDATE routine_schedules SET next_at=${nextDailyOccurrence(schedule.time, schedule.timeZone, time)}
-            WHERE routine_id=${value.id}`
+        const modelProviderId = value.model?.providerId ?? null
+        const modelId = value.model?.modelId ?? null
+        const thinkingLevel = value.model?.thinkingLevel ?? null
+        if (previous) {
+          yield* sql`UPDATE routines SET name=${value.name}, prompt=${value.prompt}, agent=${value.agent},
+            model_provider_id=${modelProviderId}, model_id=${modelId}, thinking_level=${thinkingLevel},
+            skill_ids=${JSON.stringify(skillIds)}, integration_ids=${JSON.stringify(integrationIds)},
+            interval_minutes=${value.intervalMinutes}, time_zone=${value.timeZone}, enabled=${value.enabled ? 1 : 0},
+            revision=${revision}, updated_at=${time} WHERE id=${value.id} AND revision=${value.expectedRevision}`
+        } else {
+          yield* sql`INSERT INTO routines (id, name, prompt, agent, model_provider_id, model_id, thinking_level,
+            skill_ids, integration_ids, interval_minutes, time_zone, enabled, revision, next_trigger_at, last_trigger_at, created_at, updated_at)
+            VALUES (${value.id}, ${value.name}, ${value.prompt}, ${value.agent}, ${modelProviderId}, ${modelId}, ${thinkingLevel},
+              ${JSON.stringify(skillIds)}, ${JSON.stringify(integrationIds)}, ${value.intervalMinutes}, ${value.timeZone}, ${value.enabled ? 1 : 0}, 1, NULL, NULL, ${time}, ${time})`
         }
-        return { id: value.id, definition, revision, createdAt: previous?.createdAt ?? time, updatedAt: time }
+        return yield* get(value.id)
       }))
     }, Effect.mapError(safe))
 
-    /** Persist one accepted occurrence before filesystem work; retries never consult a newer definition. */
-    const claim = Effect.fn('RoutineStore.claim')(function*(input: TriggerRoutine) {
-      const value = yield* Schema.decodeUnknownEffect(TriggerRoutine)(input, { onExcessProperty: 'error' })
+    const executionRows = (routineId: string) => readExecutionRows(routineId)
+    const executions = Effect.fn('RoutineStore.executions')((routineId: string) => executionRows(routineId))
+    const executionForTask = Effect.fn('RoutineStore.executionForTask')(function*(taskId: string) {
+      return (yield* sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
+        first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd, window_start AS windowStart,
+        window_end AS windowEnd, routine_revision AS routineRevision, status, started_at AS startedAt, ended_at AS endedAt,
+        created_at AS createdAt, updated_at AS updatedAt FROM routine_executions WHERE task_id=${taskId}`.pipe(Effect.flatMap(decodeExecutions))).at(0) ?? null
+    }, Effect.mapError(safe))
+
+    const schedule = Effect.fn('RoutineStore.schedule')(function*(routineId: string, at = Date.now()) {
       return yield* sql.withTransaction(Effect.gen(function*() {
-        const [previous] = yield* sql`SELECT id, routine_id AS routineId, expected_revision AS expectedRevision,
-          task_id AS taskId, snapshot, created_at AS createdAt FROM routine_triggers WHERE id=${value.id}`.pipe(Effect.flatMap(triggers))
-        if (previous) {
-          if (previous.routineId !== value.routineId || previous.expectedRevision !== value.expectedRevision) return yield* fail('invalid-state')
-          return previous
+        const routine = yield* get(routineId)
+        if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
+        const today = routineDateAt(at, routine.timeZone)
+        const previousDate = previousRoutineDate(today, routine.timeZone)
+        const candidates = yield* executionRows(routineId)
+        const pending = candidates.find((execution) => execution.status === 'pending')
+          ?? candidates.find((execution) => ['failed', 'interrupted', 'cancelled'].includes(execution.status))
+        const time = yield* now
+        if (pending) {
+          if (pending.routineDate === today && !pending.isEnd) {
+            yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at}, trigger_count=trigger_count+1,
+              status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+          } else if (pending.routineDate === previousDate && !pending.isEnd) {
+            const end = routineDayEnd(previousDate, routine.timeZone)
+            yield* sql`UPDATE routine_executions SET trigger_time=${end}, window_end=${end}, is_end=1,
+              trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+          } else {
+            // A missed execution is still one logical window: later ticks update its
+            // latest trigger rather than creating a queue of catch-up rows. We only
+            // mark the previous civil day as ended when this is the first tick of the
+            // following day; older gaps remain visible in the derived calendar.
+            yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at},
+              trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+          }
+          yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
+          return (yield* executionRows(routineId)).find((execution) => execution.id === pending.id)!
         }
-        const [snapshot] = yield* sql`SELECT id, definition, revision, created_at AS createdAt, updated_at AS updatedAt
-          FROM routines WHERE id=${value.routineId}`.pipe(Effect.flatMap(records))
-        if (!snapshot) return yield* fail('not-found')
-        if (!snapshot.definition.enabled || snapshot.revision !== value.expectedRevision) return yield* fail('invalid-state')
-        const taskId = randomUUID()
-        const createdAt = yield* now
-        yield* sql`INSERT INTO routine_triggers (id, routine_id, expected_revision, task_id, snapshot, created_at)
-          VALUES (${value.id}, ${value.routineId}, ${value.expectedRevision}, ${taskId}, ${JSON.stringify(snapshot)}, ${createdAt})`
-        return { ...value, taskId, snapshot, createdAt }
+        const previousEnd = (yield* sql`SELECT id FROM routine_executions WHERE routine_id=${routineId} AND routine_date=${previousDate}
+          AND is_end=1 AND status='succeeded' LIMIT 1`).length > 0
+        const unresolvedEnd = (yield* executionRows(routineId)).find((execution) => execution.routineDate === previousDate && execution.isEnd && execution.status !== 'succeeded')
+        // A failed/interrupted day-end keeps its identity for an explicit retry; the
+        // unique end index forbids creating a second end row for the same date.
+        if (unresolvedEnd) return unresolvedEnd
+        const createdDate = routineDateAt(routine.createdAt, routine.timeZone)
+        const date = !previousEnd && createdDate < today ? previousDate : today
+        const isEnd = date === previousDate && !previousEnd
+        const triggerTime = isEnd ? routineDayEnd(date, routine.timeZone) : at
+        const execution = { id: randomUUID(), routineId, taskId: null, routineDate: date, triggerTime,
+          firstTriggerTime: triggerTime, triggerCount: 1, isEnd, windowStart: null, windowEnd: triggerTime,
+          routineRevision: routine.revision, status: 'pending' as const, startedAt: null, endedAt: null, createdAt: time, updatedAt: time }
+        yield* sql`INSERT INTO routine_executions (id, routine_id, task_id, routine_date, trigger_time, first_trigger_time,
+          trigger_count, is_end, window_start, window_end, routine_revision, status, started_at, ended_at, created_at, updated_at)
+          VALUES (${execution.id}, ${routineId}, NULL, ${date}, ${triggerTime}, ${triggerTime}, 1, ${isEnd ? 1 : 0}, NULL,
+            ${triggerTime}, ${routine.revision}, 'pending', NULL, NULL, ${time}, ${time})`
+        yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
+        return execution
       }))
     }, Effect.mapError(safe))
 
-    /** Looks up both reserved and materialized Task origins, so manual creation cannot claim a reserved ID. */
-    const forTask = Effect.fn('RoutineStore.forTask')((taskId: string) => sql`SELECT id, routine_id AS routineId,
-      expected_revision AS expectedRevision, task_id AS taskId, snapshot, created_at AS createdAt
-      FROM routine_triggers WHERE task_id=${taskId}`.pipe(Effect.flatMap(triggers), Effect.map(rows => rows[0] ?? null)), Effect.mapError(safe))
-    /** Includes accepted occurrences without a Task yet, allowing recovery after application restart. */
-    const history = Effect.fn('RoutineStore.triggers')((routineId: string) => sql`SELECT id, routine_id AS routineId,
-      expected_revision AS expectedRevision, task_id AS taskId, snapshot, created_at AS createdAt
-      FROM routine_triggers WHERE routine_id=${routineId} ORDER BY created_at DESC, id`.pipe(
-      Effect.flatMap(triggers)), Effect.mapError(safe))
-    /** Allocate the first dispatch once; no native startup or Prompt is performed by this intent write. */
-    const prepareExecution = Effect.fn('RoutineStore.prepareExecution')(function*(triggerId: string) {
-      yield* Schema.decodeUnknownEffect(RoutineTrigger.fields.id)(triggerId)
-      return yield* sql.withTransaction(Effect.gen(function*() {
-        const [previous] = yield* sql`SELECT trigger_id AS triggerId, session_id AS sessionId, run_id AS runId,
-          created_at AS createdAt FROM routine_executions WHERE trigger_id=${triggerId}`.pipe(
-          Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(RoutineExecution))))
-        if (previous) return previous
-        const owner = yield* sql`SELECT t.id FROM routine_triggers rt JOIN tasks t ON t.id=rt.task_id
-          WHERE rt.id=${triggerId} AND t.state='active' AND t.worktree_state='ready'`
-        if (!owner.length) return yield* fail('invalid-state')
-        const value = { triggerId, sessionId: randomUUID(), runId: randomUUID(), createdAt: yield* now }
-        yield* sql`INSERT INTO routine_executions (trigger_id, session_id, run_id, created_at)
-          VALUES (${triggerId}, ${value.sessionId}, ${value.runId}, ${value.createdAt})`
-        return value
-      }))
+    const attachTask = Effect.fn('RoutineStore.attachTask')(function*(executionId: string, taskId: string) {
+      const changed = yield* sql`UPDATE routine_executions SET task_id=${taskId}, updated_at=${yield* now}
+        WHERE id=${executionId} AND (task_id IS NULL OR task_id=${taskId}) RETURNING id`
+      if (!changed.length) return yield* fail('invalid-state', 'Execution is already attached to another Task.')
+      const row = (yield* sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
+        first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd, window_start AS windowStart,
+        window_end AS windowEnd, routine_revision AS routineRevision, status, started_at AS startedAt, ended_at AS endedAt,
+        created_at AS createdAt, updated_at AS updatedAt FROM routine_executions WHERE id=${executionId}`.pipe(Effect.flatMap(decodeExecutions))).at(0)
+      if (!row) return yield* fail('not-found')
+      return row
     }, Effect.mapError(safe))
-    /** Record every occurrence once, without freezing configuration or allocating a Task while busy. */
-    const enqueue = Effect.fn('RoutineStore.enqueue')(function*(input: EnqueueRoutine) {
-      const value = yield* Schema.decodeUnknownEffect(EnqueueRoutine)(input, { onExcessProperty: 'error' })
-      return yield* sql.withTransaction(Effect.gen(function*() {
-        const [previous] = yield* sql`SELECT id, routine_id AS routineId, triggered_at AS triggeredAt,
-          received_at AS receivedAt, trigger_id AS triggerId FROM routine_wakeups WHERE id=${value.id}`.pipe(Effect.flatMap(wakeupRows))
-        if (previous) {
-          if (previous.routineId !== value.routineId || previous.triggeredAt !== value.triggeredAt) return yield* fail('invalid-state')
-          return previous
-        }
-        const [routine] = yield* sql`SELECT id, definition, revision, created_at AS createdAt, updated_at AS updatedAt
-          FROM routines WHERE id=${value.routineId}`.pipe(Effect.flatMap(records))
-        if (!routine) return yield* fail('not-found')
-        if (!routine.definition.enabled) return yield* fail('invalid-state')
-        const receivedAt = yield* now
-        yield* sql`INSERT INTO routine_wakeups (id, routine_id, triggered_at, received_at)
-          VALUES (${value.id}, ${value.routineId}, ${value.triggeredAt}, ${receivedAt})`
-        return { ...value, receivedAt, triggerId: null }
-      }))
+
+    const setStatus = Effect.fn('RoutineStore.setStatus')(function*(taskId: string, status: RoutineExecution['status'], startedAt?: number, endedAt?: number) {
+      yield* Schema.decodeUnknownEffect(RoutineExecution.fields.status)(status)
+      const timestamp = yield* now
+      const terminal = ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(status)
+      const changed = yield* sql`UPDATE routine_executions SET status=${status},
+        started_at=COALESCE(${startedAt ?? null}, started_at),
+        ended_at=COALESCE(${endedAt ?? (terminal ? timestamp : null)}, ended_at),
+        updated_at=${timestamp} WHERE task_id=${taskId} RETURNING id`
+      if (!changed.length) return yield* fail('not-found', 'Routine execution was not found for this Task.')
     }, Effect.mapError(safe))
-    /** Individual scheduled times remain queryable after coalescing and application restart. */
-    const wakeups = Effect.fn('RoutineStore.wakeups')((routineId: string) => sql`SELECT id, routine_id AS routineId,
-      triggered_at AS triggeredAt, received_at AS receivedAt, trigger_id AS triggerId FROM routine_wakeups
-      WHERE routine_id=${routineId} ORDER BY triggered_at, id`.pipe(Effect.flatMap(wakeupRows)), Effect.mapError(safe))
-    /** Atomically accepts all currently pending occurrences using the definition at dispatch time.
-     * Reuses an accepted batch lacking its first Run after a crash; never allocates a replacement Prompt.
-     * The Run reservation still rechecks concurrency because manual execution can race after this transaction.
-     */
-    const claimPending = Effect.fn('RoutineStore.claimPending')(function*(routineId: string) {
-      yield* Schema.decodeUnknownEffect(RoutineRecord.fields.id)(routineId)
-      return yield* sql.withTransaction(Effect.gen(function*() {
-        const [routine] = yield* sql`SELECT id, definition, revision, created_at AS createdAt, updated_at AS updatedAt
-          FROM routines WHERE id=${routineId}`.pipe(Effect.flatMap(records))
-        if (!routine) return yield* fail('not-found')
-        if (!routine.definition.enabled) return null
-        const blocked = yield* sql`SELECT r.id FROM routine_triggers rt JOIN runs r ON r.task_id=rt.task_id
-          JOIN tasks t ON t.id=r.task_id WHERE rt.routine_id=${routineId}
-          AND (r.state IN ('preparing', 'running') OR r.sync_state='conflict'
-            OR (r.state='succeeded' AND (r.sync_state NOT IN ('completed', 'not-required') OR t.state<>'completed'))) LIMIT 1`
-        if (blocked.length) return null
-        // New occurrences arriving after an accepted batch belong to the next batch, even if startup is delayed.
-        const [accepted] = yield* sql`SELECT rt.id, rt.routine_id AS routineId, rt.expected_revision AS expectedRevision,
-          rt.task_id AS taskId, rt.snapshot, rt.created_at AS createdAt FROM routine_triggers rt
-          WHERE rt.routine_id=${routineId} AND EXISTS (SELECT 1 FROM routine_wakeups w WHERE w.trigger_id=rt.id)
-          AND NOT EXISTS (SELECT 1 FROM routine_executions e JOIN runs r ON r.id=e.run_id WHERE e.trigger_id=rt.id)
-          ORDER BY rt.created_at, rt.id LIMIT 1`.pipe(Effect.flatMap(triggers))
-        if (accepted) return accepted
-        if (!(yield* sql`SELECT id FROM routine_wakeups WHERE routine_id=${routineId} AND trigger_id IS NULL LIMIT 1`).length) return null
-        const trigger = yield* claim({ id: randomUUID(), routineId, expectedRevision: routine.revision })
-        yield* sql`UPDATE routine_wakeups SET trigger_id=${trigger.id} WHERE routine_id=${routineId} AND trigger_id IS NULL`
-        return trigger
-      }))
-    }, Effect.mapError(safe))
-    return RoutineStore.of({ list, save, claim, forTask, triggers: history, prepareExecution, enqueue, wakeups, claimPending })
+
+    return RoutineStore.of({ list, get, save, schedule, executions, executionForTask, attachTask, setStatus })
   }))
 }

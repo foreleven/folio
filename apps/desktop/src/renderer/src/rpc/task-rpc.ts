@@ -5,12 +5,9 @@ import { ElectronRpcProtocolLive } from './electron-rpc-protocol'
 /** Task queries share the existing Electron transport; mutations never send local filesystem paths. */
 export class TaskRpcClient extends AtomRpc.Service<TaskRpcClient>()('folio/renderer/TaskRpcClient', { group: TaskRpcs, protocol: ElectronRpcProtocolLive }) {
   static readonly saveWorkspaceFiles = TaskRpcClient.mutation('workspace.saveFiles')
-  static readonly setTimeZone = TaskRpcClient.mutation('routines.setTimeZone')
-  static readonly saveSchedule = TaskRpcClient.mutation('routines.saveSchedule')
-  static readonly removeSchedule = TaskRpcClient.mutation('routines.removeSchedule')
-  static readonly startRoutineTask = TaskRpcClient.mutation('routines.startTask')
+  static readonly runRoutine = TaskRpcClient.mutation('routines.run')
+  static readonly prepareRoutine = TaskRpcClient.mutation('routines.prepare')
   static readonly saveRoutine = TaskRpcClient.mutation('routines.save')
-  static readonly createRoutineTask = TaskRpcClient.mutation('routines.createTask')
   static readonly saveTaskWikiFiles = TaskRpcClient.mutation('tasks.saveWikiFiles')
   static readonly saveRunWikiFiles = TaskRpcClient.mutation('tasks.saveRunWikiFiles')
   static readonly confirmRunWikiUnchanged = TaskRpcClient.mutation('tasks.confirmRunWikiUnchanged')

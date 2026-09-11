@@ -1,5 +1,4 @@
-import { DailyRoutineSchedule, SaveDailyRoutineSchedule, VaultTimeZone } from '../routine-schedule'
-import { RoutineExecution, RoutineRecord, RoutineTrigger, RoutineWakeup, SaveRoutine, TriggerRoutine } from '../routine'
+import { RoutineExecution, RoutineRecord, RunRoutine, SaveRoutine } from '../routine'
 import { ProjectionRow } from '../harness-events'
 import { SessionModelSelection } from '../model'
 import { Schema } from 'effect'
@@ -32,7 +31,7 @@ export const CreateTaskInput = Schema.Struct({
 export type CreateTaskInput = typeof CreateTaskInput.Type
 export const TaskDetail = Schema.Struct({
   task: TaskRecord,
-  routine: Schema.optionalKey(Schema.NullOr(RoutineTrigger)),
+  routine: Schema.optionalKey(Schema.NullOr(RoutineExecution)),
   sessions: Schema.Array(SessionRecord),
   runs: Schema.Array(RunRecord)
 })
@@ -64,7 +63,7 @@ export type StartConflictResolutionInput = typeof StartConflictResolutionInput.T
 export const SessionHistory = Schema.Struct({ messages: Schema.Array(ProjectionRow) })
 export type SessionHistory = typeof SessionHistory.Type
 
-export const RoutineRunResult = Schema.Struct({ trigger: RoutineTrigger, task: TaskRecord, execution: RoutineExecution, run: RunRecord })
+export const RoutineRunResult = Schema.Struct({ execution: RoutineExecution, task: TaskRecord, run: RunRecord })
 export type RoutineRunResult = typeof RoutineRunResult.Type
 
 /** Renderer supplies identities and intent only; main owns paths, branches and capability snapshots. */
@@ -72,32 +71,11 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('workspace.changes', { payload: { vaultId: Vault.fields.id }, success: WorkspaceChangesView, error: HarnessStoreError }),
   Rpc.make('workspace.diff', { payload: { vaultId: Vault.fields.id, input: WorkspaceDiffInput }, success: WorkspaceFileDiff, error: HarnessStoreError }),
   Rpc.make('workspace.saveFiles', { payload: { vaultId: Vault.fields.id, input: SaveWorkspaceFiles }, success: GitChangeApplication, error: HarnessStoreError }),
-  Rpc.make('routines.scheduleSettings', {
-    payload: { vaultId: Vault.fields.id },
-    success: Schema.Struct({ timeZone: Schema.NullOr(VaultTimeZone), schedules: Schema.Array(DailyRoutineSchedule) }),
-    error: HarnessStoreError
-  }),
-  Rpc.make('routines.saveSchedule', { payload: { vaultId: Vault.fields.id, input: SaveDailyRoutineSchedule }, success: DailyRoutineSchedule, error: HarnessStoreError }),
-  Rpc.make('routines.removeSchedule', {
-    payload: { vaultId: Vault.fields.id, routineId: RoutineRecord.fields.id, revision: DailyRoutineSchedule.fields.revision },
-    success: Schema.Void,
-    error: HarnessStoreError
-  }),
-  Rpc.make('routines.setTimeZone', {
-    payload: { vaultId: Vault.fields.id, timeZone: VaultTimeZone, expected: Schema.NullOr(VaultTimeZone) },
-    success: Schema.Void,
-    error: HarnessStoreError
-  }),
-  Rpc.make('routines.wakeups', { payload: { vaultId: Vault.fields.id, routineId: RoutineRecord.fields.id }, success: Schema.Array(RoutineWakeup), error: HarnessStoreError }),
-  Rpc.make('routines.triggers', { payload: { vaultId: Vault.fields.id, routineId: RoutineRecord.fields.id }, success: Schema.Array(RoutineTrigger), error: HarnessStoreError }),
   Rpc.make('routines.list', { payload: { vaultId: Vault.fields.id }, success: Schema.Array(RoutineRecord), error: HarnessStoreError }),
+  Rpc.make('routines.executions', { payload: { vaultId: Vault.fields.id, routineId: RoutineRecord.fields.id }, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
   Rpc.make('routines.save', { payload: { vaultId: Vault.fields.id, input: SaveRoutine }, success: RoutineRecord, error: HarnessStoreError }),
-  Rpc.make('routines.startTask', { payload: { vaultId: Vault.fields.id, input: TriggerRoutine }, success: RoutineRunResult, error: HarnessStoreError }),
-  Rpc.make('routines.createTask', {
-    payload: { vaultId: Vault.fields.id, input: TriggerRoutine },
-    success: Schema.Struct({ trigger: RoutineTrigger, task: TaskRecord }),
-    error: HarnessStoreError
-  }),
+  Rpc.make('routines.run', { payload: { vaultId: Vault.fields.id, input: RunRoutine }, success: RoutineRunResult, error: HarnessStoreError }),
+  Rpc.make('routines.prepare', { payload: { vaultId: Vault.fields.id, input: RunRoutine }, success: Schema.Struct({ execution: RoutineExecution, task: TaskRecord }), error: HarnessStoreError }),
   Rpc.make('tasks.list', { payload: { vaultId: Vault.fields.id }, success: Schema.Array(TaskRecord), error: HarnessStoreError }),
   Rpc.make('tasks.create', { payload: CreateTaskInput, success: TaskRecord, error: HarnessStoreError }),
   Rpc.make('tasks.complete', { payload: { vaultId: Vault.fields.id, taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),

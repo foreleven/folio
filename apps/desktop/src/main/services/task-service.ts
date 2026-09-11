@@ -1,10 +1,10 @@
-import { RoutineScheduleStore } from './routine-schedule-store'
 import { RoutineStore } from './routine-store'
-import { EnqueueRoutine, SaveRoutine, TriggerRoutine, type RoutineRecord, type RoutineTrigger, type RoutineExecution, type RoutineWakeup } from '../../shared/routine'
+import { RunRoutine, SaveRoutine, type RoutineRecord, type RoutineExecution } from '../../shared/routine'
 import { HarnessRuns } from './harness-runs'
 import { ModelService } from './model-service'
 import { Context, DateTime, Effect, FileSystem, Layer, LayerMap, Schema, Semaphore } from 'effect'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { HarnessStoreError, type SessionRecord, type TaskRecord, type RunRecord } from '../../shared/harness'
 import { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput,
   type TaskDetail, type SessionHistory, type RoutineRunResult } from '../../shared/rpc/task-rpc'
@@ -53,17 +53,14 @@ class VaultTasks extends Context.Service<
     readonly abortTaskWikiConflict: (taskId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly pendingTaskSynchronizations: (taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
-    readonly tickSchedules: Effect.Effect<void, HarnessStoreError>
+    readonly tickRoutines: Effect.Effect<void, HarnessStoreError>
     readonly list: Effect.Effect<readonly TaskRecord[], HarnessStoreError>
-    readonly routineTriggers: (id: string) => Effect.Effect<readonly RoutineTrigger[], HarnessStoreError>
-    readonly enqueueRoutine: (input: EnqueueRoutine) => Effect.Effect<RoutineWakeup, HarnessStoreError>
-    readonly schedules: RoutineScheduleStore['Service']
-    readonly routineWakeups: (id: string) => Effect.Effect<readonly RoutineWakeup[], HarnessStoreError>
-    readonly dispatchPendingRoutine: (id: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
+    readonly routineExecutions: (id: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
+    readonly dispatchRoutine: (id: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
     readonly routines: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
     readonly saveRoutine: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
-    readonly startRoutineTask: (input: TriggerRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
-    readonly createRoutineTask: (input: TriggerRoutine) => Effect.Effect<{ trigger: RoutineTrigger; task: TaskRecord }, HarnessStoreError>
+    readonly runRoutine: (input: RunRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
+    readonly prepareRoutine: (input: RunRoutine) => Effect.Effect<{ execution: RoutineExecution; task: TaskRecord }, HarnessStoreError>
     readonly create: (input: CreateTaskInput) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly complete: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly reopen: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
@@ -83,7 +80,6 @@ class VaultTasks extends Context.Service<
       const workspace = yield* WorkspaceChanges
       const changes = yield* GitChangeApplications
       const synchronization = yield* TaskGitSynchronization
-      const schedules = yield* RoutineScheduleStore
       const routines = yield* RoutineStore
       const events = yield* HarnessEventStore
       const runs = yield* HarnessRuns
@@ -95,13 +91,11 @@ class VaultTasks extends Context.Service<
       const integrations = yield* IntegrationService
       const gate = yield* Semaphore.make(1)
       /** The caller retains its UUID for retry; a lost reply must not allocate another Task/worktree. */
-      const create = Effect.fn('VaultTasks.create')(function* (input: Omit<CreateTaskInput, 'vaultId'>, origin?: RoutineTrigger) {
-        const reserved = yield* routines.forTask(input.id)
+      const create = Effect.fn('VaultTasks.create')(function* (input: Omit<CreateTaskInput, 'vaultId'>) {
         const integrationIds = [...new Set(input.integrationIds ?? [])].sort()
         const previous = yield* store
           .task(input.id)
           .pipe(Effect.catchTag('HarnessStoreError', (error) => (error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error))))
-        if (reserved && !previous && reserved.id !== origin?.id) return yield* failure('invalid-state')
         if (previous) {
           if (
             previous.goal !== input.goal ||
@@ -125,7 +119,7 @@ class VaultTasks extends Context.Service<
       }, gate.withPermit)
       /** Checks Task ownership before returning its independent execution histories. */
       const get = Effect.fn('VaultTasks.get')(function* (id: string) {
-        return { routine: yield* routines.forTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
+        return { routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
       })
       /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
       const completeUnlocked = Effect.fn('VaultTasks.completeUnlocked')(function* (taskId: string) {
@@ -139,16 +133,16 @@ class VaultTasks extends Context.Service<
         return yield* worktrees.complete(taskId)
       })
       const complete = (taskId: string) => completeUnlocked(taskId).pipe(gate.withPermit)
-      /** Reopening a Routine occurrence is intentionally deferred; its scheduler owns a new Task identity. */
+      /** Routine executions are immutable Task associations; reopening them is explicit and manual. */
       const reopen = Effect.fn('VaultTasks.reopen')(function* (taskId: string) {
-        if (yield* routines.forTask(taskId)) return yield* failure('invalid-state')
+        if (yield* routines.executionForTask(taskId)) return yield* failure('invalid-state')
         if (yield* sessions.hasLiveTask(taskId)) return yield* failure('task-busy')
         yield* worktrees.reopen(taskId)
         return yield* store.task(taskId)
       }, gate.withPermit)
       /** Routine Tasks end only after an explicit filesystem receipt settles every successful Run. */
       const completeRoutineIfSettled = Effect.fn('VaultTasks.completeRoutineIfSettled')(function* (taskId: string) {
-        if (!(yield* routines.forTask(taskId))) return
+        if (!(yield* routines.executionForTask(taskId))) return
         const task = yield* store.task(taskId)
         // Resume the post-Git/pre-receipt crash window even though the Task is no longer active.
         // New Sessions cannot open after this durable checkpoint, and the original completion
@@ -178,15 +172,7 @@ class VaultTasks extends Context.Service<
         Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.'))
       )
       /** Allocates identity before native startup; model choice is never invented by this storage/lifecycle endpoint. */
-      const prepareSession = Effect.fn('VaultTasks.prepareSession')(function* (input: Omit<OpenTaskSessionInput, 'vaultId'>, execution?: RoutineExecution) {
-        if (execution) {
-          const recorded = yield* store.runs(input.taskId)
-          // Another identical caller may have reserved the intended Run since our earlier read.
-          if (recorded.some((run) => run.id === execution.runId)) return
-          if (recorded.length || (yield* store.sessions(input.taskId)).some((session) => session.id !== execution.sessionId)) {
-            return yield* new HarnessStoreError({ reason: 'invalid-state', message: 'This Task already has manual session activity. Continue it from Tasks.' })
-          }
-        }
+      const prepareSession = Effect.fn('VaultTasks.prepareSession')(function* (input: Omit<OpenTaskSessionInput, 'vaultId'>) {
         const task = yield* store.task(input.taskId)
         if (task.configuration.agent !== input.agent) return yield* failure('invalid-state')
         const previous = (yield* store.sessions(input.taskId)).find((session) => session.id === input.sessionId)
@@ -284,46 +270,40 @@ class VaultTasks extends Context.Service<
       /** Save definitions offline; capability health is checked when a Task actually prepares execution. */
       const saveRoutine = Effect.fn('VaultTasks.saveRoutine')(function* (input: SaveRoutine) {
         // Independent Skill selection is not mounted yet; refusing it avoids silently dropping intent.
-        if (input.definition.configuration.skillIds.length) return yield* failure('invalid-state')
+        if (input.skillIds.length) return yield* failure('invalid-state')
         return yield* routines.save(input)
       })
-      /** Materialize one accepted snapshot, without sending a Prompt or inventing a model choice. */
-      const createRoutineTask = Effect.fn('VaultTasks.createRoutineTask')(function* (input: TriggerRoutine) {
-        const trigger = yield* routines.claim(input)
-        const definition = trigger.snapshot.definition
-        if (definition.configuration.skillIds.length) return yield* failure('invalid-state')
-        const task = yield* create(
-          { id: trigger.taskId, goal: definition.prompt, agent: definition.configuration.agent, integrationIds: definition.configuration.integrationIds },
-          trigger
+      /** Creates or coalesces one current execution, then optionally starts its Task Run. */
+      const prepareRoutine = Effect.fn('VaultTasks.prepareRoutine')(function* (input: RunRoutine) {
+        const execution = yield* routines.schedule(input.routineId)
+        const routine = yield* routines.get(input.routineId)
+        // Derive the reservation's Task identity from the execution so concurrent
+        // scheduler ticks converge on one Task instead of orphaning duplicates.
+        const taskId = execution.taskId ?? execution.id
+        const task = yield* create({ id: taskId, goal: routine.prompt, agent: routine.agent, integrationIds: routine.integrationIds })
+        const attached = yield* routines.attachTask(execution.id, task.id)
+        return { execution: attached, task }
+      })
+      const runRoutine = Effect.fn('VaultTasks.runRoutine')(function* (input: RunRoutine) {
+        const { execution, task } = yield* prepareRoutine(input)
+        const routine = yield* routines.get(input.routineId)
+        const sessionId = randomUUID()
+        const runId = randomUUID()
+        yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) }).pipe(gate.withPermit)
+        yield* routines.setStatus(task.id, 'preparing')
+        const run = yield* runs.start(
+          { id: runId, taskId: task.id, sessionId, prompt: routine.prompt, purpose: 'execution', resumesRunId: null },
+          (terminal) => routines.setStatus(task.id, terminal.state).pipe(
+            Effect.andThen(terminal.state === 'succeeded' ? completeRoutineAfterReceipt(task.id) : Effect.void)
+          )
         )
-        return { trigger, task }
+        return { execution, task, run }
       })
-      /** Dispatch the accepted Prompt once; a registered Run is returned as-is, never reopened or replayed. */
-      const startRoutineTask = Effect.fn('VaultTasks.startRoutineTask')(function* (input: TriggerRoutine) {
-        const { trigger, task } = yield* createRoutineTask(input)
-        const execution = yield* routines.prepareExecution(trigger.id)
-        const definition = trigger.snapshot.definition
-        const previous = (yield* store.runs(task.id)).find((run) => run.id === execution.runId)
-        if (previous) {
-          if (previous.sessionId !== execution.sessionId || previous.prompt !== definition.prompt || previous.purpose !== 'execution' || previous.resumesRunId !== null)
-            return yield* failure('invalid-state')
-          return { trigger, task, execution, run: previous }
-        }
-        yield* prepareSession(
-          { taskId: task.id, sessionId: execution.sessionId, agent: definition.configuration.agent, ...(definition.model ? { model: definition.model } : {}) },
-          execution
-        ).pipe(gate.withPermit)
-        const run = yield* runs.start({ id: execution.runId, taskId: task.id, sessionId: execution.sessionId, prompt: definition.prompt, purpose: 'execution', resumesRunId: null })
-        return { trigger, task, execution, run }
-      })
-      /** Scheduler entrypoint: durable coalescing precedes the existing app-owned first-dispatch path. */
-      const dispatchPendingRoutine = Effect.fn('VaultTasks.dispatchPendingRoutine')(function* (id: string) {
-        const accepted = yield* routines.claimPending(id)
-        if (!accepted) return null
-        return yield* startRoutineTask({ id: accepted.id, routineId: accepted.routineId, expectedRevision: accepted.expectedRevision })
+      const dispatchRoutine = Effect.fn('VaultTasks.dispatchRoutine')(function* (id: string) {
+        return yield* runRoutine({ routineId: id })
       })
       // Collect a bounded page first. No batch is dispatched while missed dates remain uncollected.
-      const tickSchedules = Effect.gen(function* () {
+      const tickRoutines = Effect.gen(function* () {
         // A crash may land after the final Run receipt but before worktree release. Reconcile
         // durable Routine state before admitting another batch; one dirty Task cannot stop peers.
         for (const task of yield* store.tasks) {
@@ -331,13 +311,10 @@ class VaultTasks extends Context.Service<
             Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.'))
           )
         }
-        yield* schedules.collectDue
         const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
-        const settings = yield* schedules.settings
-        const due = new Set(settings.schedules.filter((schedule) => schedule.nextAt <= current).map((schedule) => schedule.routineId))
         for (const routine of yield* routines.list) {
-          if (!routine.definition.enabled || due.has(routine.id)) continue
-          yield* dispatchPendingRoutine(routine.id).pipe(Effect.catch(() => Effect.logWarning('Routine dispatch could not complete; its accepted identity is retained.')))
+          if (!routine.enabled || (routine.nextTriggerAt !== null && routine.nextTriggerAt > current)) continue
+          yield* dispatchRoutine(routine.id).pipe(Effect.catch(() => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.')))
         }
       }).pipe(Effect.mapError(safeError))
       /** Returns only this Task's actionable operation after proving the Task belongs to the Vault. */
@@ -355,16 +332,13 @@ class VaultTasks extends Context.Service<
         return settled
       })
       return VaultTasks.of({
-        tickSchedules,
-        schedules,
-        enqueueRoutine: routines.enqueue,
-        routineWakeups: routines.wakeups,
-        dispatchPendingRoutine,
-        startRoutineTask,
-        routineTriggers: routines.triggers,
+        tickRoutines,
+        dispatchRoutine,
+        runRoutine,
+        prepareRoutine,
+        routineExecutions: routines.executions,
         routines: routines.list,
         saveRoutine,
-        createRoutineTask,
         workspace,
         taskWikiConflictContext: (taskId, id) => Effect.gen(function* () {
           yield* store.task(taskId)
@@ -429,19 +403,13 @@ export class TaskService extends Context.Service<
     readonly pendingTaskSynchronizations: (vaultId: string, taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (vaultId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly list: (vaultId: string) => Effect.Effect<readonly TaskRecord[], HarnessStoreError>
-    readonly routineTriggers: (vaultId: string, routineId: string) => Effect.Effect<readonly RoutineTrigger[], HarnessStoreError>
-    readonly enqueueRoutine: (vaultId: string, input: EnqueueRoutine) => Effect.Effect<RoutineWakeup, HarnessStoreError>
-    readonly tickSchedules: (vaultId: string) => Effect.Effect<void, HarnessStoreError>
-    readonly scheduleSettings: (vaultId: string) => RoutineScheduleStore['Service']['settings']
-    readonly saveSchedule: (vaultId: string, input: Parameters<RoutineScheduleStore['Service']['save']>[0]) => ReturnType<RoutineScheduleStore['Service']['save']>
-    readonly removeSchedule: (vaultId: string, routineId: string, revision: number) => Effect.Effect<void, HarnessStoreError>
-    readonly setScheduleTimeZone: (vaultId: string, timeZone: string, expected: string | null) => Effect.Effect<void, HarnessStoreError>
-    readonly routineWakeups: (vaultId: string, routineId: string) => Effect.Effect<readonly RoutineWakeup[], HarnessStoreError>
-    readonly dispatchPendingRoutine: (vaultId: string, routineId: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
+    readonly routineExecutions: (vaultId: string, routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
+    readonly tickRoutines: (vaultId: string) => Effect.Effect<void, HarnessStoreError>
+    readonly dispatchRoutine: (vaultId: string, routineId: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
     readonly listRoutines: (vaultId: string) => Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
     readonly saveRoutine: (vaultId: string, input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
-    readonly startRoutineTask: (vaultId: string, input: TriggerRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
-    readonly createRoutineTask: (vaultId: string, input: TriggerRoutine) => Effect.Effect<{ trigger: RoutineTrigger; task: TaskRecord }, HarnessStoreError>
+    readonly runRoutine: (vaultId: string, input: RunRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
+    readonly prepareRoutine: (vaultId: string, input: RunRoutine) => Effect.Effect<{ execution: RoutineExecution; task: TaskRecord }, HarnessStoreError>
     readonly create: (input: CreateTaskInput) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly complete: (vaultId: string, taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly reopen: (vaultId: string, taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
@@ -503,7 +471,6 @@ export class TaskService extends Context.Service<
                 Layer.provide(TaskGitSynchronization.layer(directory)),
                 Layer.provide(Layer.succeed(IntegrationService)(integrations)),
                 Layer.provide(Layer.succeed(ConfigService)(config)),
-                Layer.provide(RoutineScheduleStore.layer),
                 Layer.provide(Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer, RoutineStore.layer)),
                 Layer.provide(vaultDatabaseLayer(directory)),
                 Layer.fresh
@@ -619,51 +586,18 @@ export class TaskService extends Context.Service<
             vaultId,
             Effect.flatMap(VaultTasks, (service) => service.taskSynchronization(id))
           ),
-        tickSchedules: (id) =>
+        tickRoutines: (id) =>
           inVault(
             id,
-            Effect.flatMap(VaultTasks, (service) => service.tickSchedules)
+            Effect.flatMap(VaultTasks, (service) => service.tickRoutines)
           ),
-        scheduleSettings: (id) =>
+        dispatchRoutine: (id, routineId) =>
           inVault(
             id,
-            Effect.flatMap(VaultTasks, (service) => service.schedules.settings)
+            Effect.flatMap(VaultTasks, (service) => service.dispatchRoutine(routineId))
           ),
-        saveSchedule: (id, input) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.schedules.save(input))
-          ),
-        removeSchedule: (id, routineId, revision) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.schedules.remove(routineId, revision))
-          ),
-        setScheduleTimeZone: (id, timeZone, expected) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.schedules.setTimeZone(timeZone, expected))
-          ),
-        enqueueRoutine: (id, input) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.enqueueRoutine(input))
-          ),
-        routineWakeups: (id, routineId) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.routineWakeups(routineId))
-          ),
-        dispatchPendingRoutine: (id, routineId) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.dispatchPendingRoutine(routineId))
-          ),
-        routineTriggers: (id, routineId) =>
-          inVault(
-            id,
-            Effect.flatMap(VaultTasks, (service) => service.routineTriggers(routineId))
-          ),
+        routineExecutions: (id, routineId) =>
+          inVault(id, Effect.flatMap(VaultTasks, (service) => service.routineExecutions(routineId))),
         listRoutines: (id) =>
           inVault(
             id,
@@ -679,22 +613,22 @@ export class TaskService extends Context.Service<
             ),
             Effect.mapError(safeError)
           ),
-        startRoutineTask: (id, input) =>
-          Schema.decodeUnknownEffect(TriggerRoutine)(input, { onExcessProperty: 'error' }).pipe(
+        runRoutine: (id, input) =>
+          Schema.decodeUnknownEffect(RunRoutine)(input, { onExcessProperty: 'error' }).pipe(
             Effect.flatMap((value) =>
               inVault(
                 id,
-                Effect.flatMap(VaultTasks, (service) => service.startRoutineTask(value))
+                Effect.flatMap(VaultTasks, (service) => service.runRoutine(value))
               )
             ),
             Effect.mapError(safeError)
           ),
-        createRoutineTask: (id, input) =>
-          Schema.decodeUnknownEffect(TriggerRoutine)(input, { onExcessProperty: 'error' }).pipe(
+        prepareRoutine: (id, input) =>
+          Schema.decodeUnknownEffect(RunRoutine)(input, { onExcessProperty: 'error' }).pipe(
             Effect.flatMap((value) =>
               inVault(
                 id,
-                Effect.flatMap(VaultTasks, (service) => service.createRoutineTask(value))
+                Effect.flatMap(VaultTasks, (service) => service.prepareRoutine(value))
               )
             ),
             Effect.mapError(safeError)

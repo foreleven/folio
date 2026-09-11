@@ -166,15 +166,6 @@ export class HarnessStore extends Context.Service<
                 return yield* failure('invalid-state')
               }
             } else if (value.resumesRunId !== null) return yield* failure('invalid-state')
-            // Routine ownership comes from the accepted occurrence, including recovery of an old Task.
-            // The matching SQL triggers also protect writers that bypass this service-level diagnostic.
-            const routineActive = yield* sql`SELECT r.id FROM routine_triggers own
-          JOIN routine_triggers sibling ON sibling.routine_id=own.routine_id
-          JOIN runs r ON r.task_id=sibling.task_id
-          WHERE own.task_id=${value.taskId} AND r.task_id<>${value.taskId}
-            AND (r.state IN ('preparing', 'running') OR r.sync_state='conflict'
-              OR (r.state='succeeded' AND r.sync_state NOT IN ('completed', 'not-required'))) LIMIT 1`
-            if (routineActive.length) return yield* failure('routine-busy')
             yield* sql`INSERT INTO runs (id, task_id, session_id, prompt, purpose, resumes_run_id, baseline_commit, state, sync_state, created_at)
           VALUES (${value.id}, ${value.taskId}, ${value.sessionId}, ${value.prompt}, ${value.purpose}, ${value.resumesRunId},
           ${value.baselineCommit}, 'preparing', ${value.purpose === 'conflict-resolution' ? 'not-required' : 'pending'}, ${yield* now})`
