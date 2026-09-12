@@ -1,33 +1,21 @@
-import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
   main: {
-    resolve: {
-      alias: {
-        '@folio/agent/config/schema': resolve('../../packages/agent/src/config/schema.ts'),
-        '@folio/agent/config/directory': resolve('../../packages/agent/src/config/directory.ts'),
-        '@folio/agent/config/loader': resolve('../../packages/agent/src/config/loader.ts'),
-        '@folio/agent/model': resolve('../../packages/agent/src/model/index.ts')
-      }
-    },
     build: {
       externalizeDeps: {
-        // Compile the workspace's TypeScript, but let Node load the SDK so ws can
-        // catch missing optional native dependencies (bufferutil/utf-8-validate).
+        // These workspace packages expose TypeScript source rather than a
+        // runtime build, so the main bundle must compile them in place.
         exclude: ['@folio/integrations', '@folio/agent'],
-        include: ['@larksuiteoapi/node-sdk', '@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', 'proper-lockfile']
+        // The SDK's ESM build references CommonJS `__dirname`; keep its
+        // CommonJS entry external so Node supplies that global at runtime.
+        include: ['@larksuiteoapi/node-sdk']
       }
     }
   },
   preload: {
-    resolve: {
-      alias: {
-        '@folio/agent/config/schema': resolve('../../packages/agent/src/config/schema.ts')
-      }
-    },
     build: {
       rollupOptions: {
         // Sandboxed Electron preloads execute as CommonJS rather than native ESM.
@@ -38,17 +26,7 @@ export default defineConfig({
   renderer: {
     resolve: {
       // Workspace UI dependencies must share the renderer's React dispatcher.
-      dedupe: ['react', 'react-dom'],
-      alias: {
-        '@folio/agent/config/schema': resolve('../../packages/agent/src/config/schema.ts'),
-        '@renderer': resolve('src/renderer/src')
-      }
-    },
-    optimizeDeps: {
-      // These shim entry points are CommonJS files. Pre-bundle them so the
-      // renderer never asks the browser to resolve named ESM exports from
-      // the raw CommonJS modules.
-      include: ['use-sync-external-store/shim', 'use-sync-external-store/shim/with-selector']
+      dedupe: ['react', 'react-dom']
     },
     plugins: [react(), tailwindcss()]
   }

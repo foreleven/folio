@@ -5,30 +5,28 @@
   "type": "module",
   "description": "Electron-independent Folio agent runtime and ACP v2 server",
   "files": [
+    "src",
     "dist",
     "scripts",
     "M0-SPIKE.md"
   ],
   "exports": {
-    ".": "./dist/index.js",
-    "./model": "./dist/model/index.js",
-    "./config": "./dist/config/index.js",
-    "./config/schema": "./dist/config/schema.js",
-    "./config/directory": "./dist/config/directory.js",
-    "./config/loader": "./dist/config/loader.js",
-    "./testing": "./dist/testing/index.js"
-  },
-  "bin": {
-    "folio-agent": "./dist/cli.js"
+    ".": "./src/index.ts",
+    "./model": "./src/model/index.ts",
+    "./config": "./src/config/index.ts",
+    "./config/schema": "./src/config/schema.ts",
+    "./config/directory": "./src/config/directory.ts",
+    "./config/loader": "./src/config/loader.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:codex-protocol": "npm run build && node scripts/codex-protocol-spike.mjs",
-    "test:codex-skills": "npm run build && node scripts/codex-skills-spike.mjs",
+    "test:codex-protocol": "pnpm build && node scripts/codex-protocol-spike.mjs",
+    "test:codex-skills": "pnpm build && node scripts/codex-skills-spike.mjs",
     "test:live-provider-policy": "node scripts/live-provider-policy-check.mjs",
-    "test:live-provider": "npm run build && node scripts/live-provider-smoke.mjs"
+    "test:live-provider": "pnpm build && node scripts/live-provider-smoke.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

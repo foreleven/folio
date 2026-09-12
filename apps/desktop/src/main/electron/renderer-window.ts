@@ -1,6 +1,12 @@
 import { BrowserWindow, nativeTheme, shell, type BrowserWindowConstructorOptions } from 'electron'
 import { Effect, Schema } from 'effect'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Electron's main bundle is emitted as native ESM, where CommonJS's
+// `__dirname` global does not exist. Resolve the bundle directory once so
+// packaged preload and renderer assets continue to work in both dev and prod.
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 /** Renderer navigation failed while opening an application window. */
 export class RendererLoadError extends Schema.TaggedError<RendererLoadError>()('RendererLoadError', { cause: Schema.Defect() }) {}

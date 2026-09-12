@@ -7,25 +7,29 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "npm run typecheck && electron-vite build",
-    "package": "npm run build && electron-builder",
+    "build": "pnpm typecheck && electron-vite build",
+    "package": "pnpm build && electron-builder",
     "prototype:wiki-boundary": "node scripts/manual-wiki-boundary-prototype.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "postinstall": "install-electron"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
-    "@effect/atom-react": "^4.0.0-rc.112",
-    "@effect/platform-node": "^4.0.0-rc.112",
+    "@effect/atom-react": "4.0.0-rc.112",
+    "@effect/platform-node": "4.0.0-rc.112",
     "@effect/sql-sqlite-node": "4.0.0-rc.112",
-    "@folio/agent": "file:../../packages/agent",
-    "@folio/integrations": "file:../../packages/integrations",
-    "@folio/ui": "file:../../packages/ui",
-    "effect": "^4.0.0-rc.112",
+    "@larksuiteoapi/node-sdk": "1.73.3",
+    "@folio/agent": "workspace:*",
+    "@folio/integrations": "workspace:*",
+    "@folio/ui": "workspace:*",
+    "effect": "4.0.0-rc.112",
+    "jiti": "2.7.0",
     "lucide-react": "^1.42.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "uuid": "^14.0.2"
+    "uuid": "^14.0.2",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -51,8 +55,15 @@
     "files": [
       "out/**/*"
     ],
-    "asarUnpack": ["out/main/assets/**"],
-    "extraResources": [{ "from": "../../packages/integrations/src/lark/assets/skills", "to": "lark-skills" }],
+    "asarUnpack": [
+      "out/main/assets/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../../packages/integrations/src/lark/assets/skills",
+        "to": "lark-skills"
+      }
+    ],
     "mac": {
       "target": [
         "dmg"

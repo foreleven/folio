@@ -6,16 +6,11 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
   "scripts": {
-    "postinstall": "install-electron",
-    "dev": "npm run dev --workspace=@folio/desktop",
-    "build": "npm run build --workspace=@folio/desktop",
-    "package": "npm run package --workspace=@folio/desktop",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev": "pnpm --filter @folio/desktop dev",
+    "build": "pnpm --filter @folio/desktop build",
+    "package": "pnpm --filter @folio/desktop package",
+    "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write ."
@@ -28,5 +23,11 @@
     "globals": "^16.5.0",
     "prettier": "^3.9.6",
     "typescript-eslint": "^8.70.0"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "pnpm": {
+    "overrides": {
+      "@effect/platform-node-shared": "4.0.0-rc.112"
+    }
   }
 }

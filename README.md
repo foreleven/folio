@@ -1,28 +1,34 @@
 # Folio
 
-Electron desktop monorepo powered by npm workspaces.
+Electron desktop monorepo powered by pnpm workspaces.
 
 ## Requirements
 
 - Node.js 24 or newer (required by the Effect SQLite driver's `node:sqlite` APIs)
-- npm 11 or newer
+- pnpm 10.32.1 (`corepack enable` if Corepack is available)
 
 ## Workspaces
 
 - `apps/desktop`: Electron 43 application built with electron-vite 5
 - `packages/ui`: shared React UI components
+- `packages/agent`: agent runtime and ACP server
+- `packages/integrations`: vault integrations
+
+Workspace dependencies use `workspace:*` and export TypeScript source directly.
+Electron Vite compiles these sources during development and production builds;
+no package build or workspace CLI installation is required first.
 
 ## Commands
 
 ```bash
-npm install
-npm run dev
-npm run typecheck
-npm run build
-npm run package
+pnpm install
+pnpm dev
+pnpm typecheck
+pnpm build
+pnpm package
 ```
 
-`npm run package` creates platform installers in `apps/desktop/dist`.
+`pnpm package` creates platform installers in `apps/desktop/dist`.
 
 Reloading a renderer resets its Effect RPC session in the main process and
 interrupts the old document's subscriptions. Connections follow document
@@ -35,7 +41,7 @@ Preferences are stored in `~/.folio/config.json`. Override the directory for one
 process with an environment variable (relative paths resolve from its working directory):
 
 ```bash
-FOLIO_CONFIG_DIR=/tmp/folio-dev npm run dev
+FOLIO_CONFIG_DIR=/tmp/folio-dev pnpm dev
 ```
 
 ```json
@@ -80,7 +86,7 @@ Tailwind CSS v4. Components are owned source files, with neutral light/dark them
 tokens in `src/styles.css`. Add more official components from the repository root:
 
 ```bash
-npx shadcn@latest add @shadcn/input --cwd packages/ui
+pnpm dlx shadcn@latest add @shadcn/input --cwd packages/ui
 ```
 
 Import components from `@folio/ui/components/ui/button` (or the package barrel),
