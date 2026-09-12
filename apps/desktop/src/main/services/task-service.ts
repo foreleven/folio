@@ -6,8 +6,15 @@ import { Context, DateTime, Effect, FileSystem, Layer, LayerMap, Schema, Semapho
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { HarnessStoreError, type SessionRecord, type TaskRecord, type RunRecord } from '../../shared/harness'
-import { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput,
-  type TaskDetail, type SessionHistory, type RoutineRunResult } from '../../shared/rpc/task-rpc'
+import {
+  CreateTaskInput,
+  OpenTaskSessionInput,
+  StartConflictResolutionInput,
+  StartTaskRunInput,
+  type TaskDetail,
+  type SessionHistory,
+  type RoutineRunResult
+} from '../../shared/rpc/task-rpc'
 import { Vault } from '../../shared/vault'
 import { ConfigService } from './config-service'
 import { HarnessStore } from './harness-store'
@@ -55,6 +62,7 @@ class VaultTasks extends Context.Service<
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly tickRoutines: Effect.Effect<void, HarnessStoreError>
     readonly list: Effect.Effect<readonly TaskRecord[], HarnessStoreError>
+    readonly allRoutineExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly routineExecutions: (id: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly dispatchRoutine: (id: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
     readonly routines: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
@@ -168,9 +176,8 @@ class VaultTasks extends Context.Service<
         yield* completeUnlocked(taskId)
       }, gate.withPermit)
       /** Receipt RPCs stay truthful when the independent worktree cleanup needs a later retry. */
-      const completeRoutineAfterReceipt = (taskId: string) => completeRoutineIfSettled(taskId).pipe(
-        Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.'))
-      )
+      const completeRoutineAfterReceipt = (taskId: string) =>
+        completeRoutineIfSettled(taskId).pipe(Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.')))
       /** Allocates identity before native startup; model choice is never invented by this storage/lifecycle endpoint. */
       const prepareSession = Effect.fn('VaultTasks.prepareSession')(function* (input: Omit<OpenTaskSessionInput, 'vaultId'>) {
         const task = yield* store.task(input.taskId)
@@ -191,8 +198,15 @@ class VaultTasks extends Context.Service<
           const modelProfile = input.model
             ? yield* models.resolveSessionModel(input.model).pipe(Effect.mapError((error) => new HarnessStoreError({ reason: 'invalid-state', message: error.message })))
             : null
-          yield* store.createSession({ id: input.sessionId, taskId: input.taskId, agent: input.agent,
-            adapterVersion: paths.agentVersion, purpose: 'task', syncOperationId: null, modelProfile })
+          yield* store.createSession({
+            id: input.sessionId,
+            taskId: input.taskId,
+            agent: input.agent,
+            adapterVersion: paths.agentVersion,
+            purpose: 'task',
+            syncOperationId: null,
+            modelProfile
+          })
         }
       })
       const openSession = Effect.fn('VaultTasks.openSession')(function* (input: OpenTaskSessionInput) {
@@ -210,9 +224,7 @@ class VaultTasks extends Context.Service<
         return { messages }
       })
       /** Creates one operation-bound Session and lets the Agent edit only the isolated coordinator. */
-      const startConflictResolution = Effect.fn('VaultTasks.startConflictResolution')(function* (
-        input: Omit<StartConflictResolutionInput, 'vaultId'>
-      ) {
+      const startConflictResolution = Effect.fn('VaultTasks.startConflictResolution')(function* (input: Omit<StartConflictResolutionInput, 'vaultId'>) {
         const task = yield* store.task(input.taskId)
         const operation = yield* synchronization.get(input.operationId)
         if (operation.taskId !== task.id) return yield* failure('not-found')
@@ -236,13 +248,24 @@ class VaultTasks extends Context.Service<
         const context = yield* synchronization.resolutionContext(task.id, operation.id)
         const target = savedSessions.find((session) => session.id === input.sessionId)
         if (target) {
-          if (target.purpose !== 'conflict-resolution' || target.syncOperationId !== operation.id || target.agent !== source.agent ||
-            JSON.stringify(target.modelProfile ?? null) !== JSON.stringify(source.modelProfile ?? null)) return yield* failure('invalid-state')
+          if (
+            target.purpose !== 'conflict-resolution' ||
+            target.syncOperationId !== operation.id ||
+            target.agent !== source.agent ||
+            JSON.stringify(target.modelProfile ?? null) !== JSON.stringify(source.modelProfile ?? null)
+          )
+            return yield* failure('invalid-state')
         } else {
           const paths = yield* runtime.get.pipe(Effect.mapError(safeError))
-          yield* store.createSession({ id: input.sessionId, taskId: task.id, agent: source.agent,
-            adapterVersion: paths.agentVersion, purpose: 'conflict-resolution', syncOperationId: operation.id,
-            modelProfile: source.modelProfile ?? null })
+          yield* store.createSession({
+            id: input.sessionId,
+            taskId: task.id,
+            agent: source.agent,
+            adapterVersion: paths.agentVersion,
+            purpose: 'conflict-resolution',
+            syncOperationId: operation.id,
+            modelProfile: source.modelProfile ?? null
+          })
         }
         const prompt = [
           'Resolve the current Git conflict for Folio by editing the working files in this directory.',
@@ -252,20 +275,27 @@ class VaultTasks extends Context.Service<
           `Conflicting files:\n${context.files.map((path) => `- ${path}`).join('\n')}`,
           '',
           'Canonical/main-side diff:',
-          '```diff', context.canonicalDiff, '```',
+          '```diff',
+          context.canonicalDiff,
+          '```',
           '',
           'Task-side diff:',
-          '```diff', context.taskDiff, '```',
+          '```diff',
+          context.taskDiff,
+          '```',
           '',
           'Edit only ordinary files under wiki/. Do not run git, change the index, commit, publish, or modify another checkout.',
           'Finish only after every conflict is resolved in the working files. Folio will validate, stage, publish, and align the result.'
         ].join('\n')
-        const intent = { id: input.runId, taskId: task.id, sessionId: input.sessionId,
-          prompt, purpose: 'conflict-resolution' as const, resumesRunId: null }
-        return yield* runs.start(intent, (terminal) => terminal.state === 'succeeded'
-          ? synchronization.acceptAgentResolution(task.id, operation.id, terminal.id).pipe(
-            Effect.tap((settled) => settled.state === 'aligned' ? completeRoutineAfterReceipt(task.id) : Effect.void), Effect.asVoid)
-          : Effect.void)
+        const intent = { id: input.runId, taskId: task.id, sessionId: input.sessionId, prompt, purpose: 'conflict-resolution' as const, resumesRunId: null }
+        return yield* runs.start(intent, (terminal) =>
+          terminal.state === 'succeeded'
+            ? synchronization.acceptAgentResolution(task.id, operation.id, terminal.id).pipe(
+                Effect.tap((settled) => (settled.state === 'aligned' ? completeRoutineAfterReceipt(task.id) : Effect.void)),
+                Effect.asVoid
+              )
+            : Effect.void
+        )
       }, gate.withPermit)
       /** Save definitions offline; capability health is checked when a Task actually prepares execution. */
       const saveRoutine = Effect.fn('VaultTasks.saveRoutine')(function* (input: SaveRoutine) {
@@ -291,11 +321,8 @@ class VaultTasks extends Context.Service<
         const runId = randomUUID()
         yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) }).pipe(gate.withPermit)
         yield* routines.setStatus(task.id, 'preparing')
-        const run = yield* runs.start(
-          { id: runId, taskId: task.id, sessionId, prompt: routine.prompt, purpose: 'execution', resumesRunId: null },
-          (terminal) => routines.setStatus(task.id, terminal.state).pipe(
-            Effect.andThen(terminal.state === 'succeeded' ? completeRoutineAfterReceipt(task.id) : Effect.void)
-          )
+        const run = yield* runs.start({ id: runId, taskId: task.id, sessionId, prompt: routine.prompt, purpose: 'execution', resumesRunId: null }, (terminal) =>
+          routines.setStatus(task.id, terminal.state).pipe(Effect.andThen(terminal.state === 'succeeded' ? completeRoutineAfterReceipt(task.id) : Effect.void))
         )
         return { execution, task, run }
       })
@@ -327,7 +354,7 @@ class VaultTasks extends Context.Service<
         yield* store.task(taskId)
         const operation = yield* synchronization.get(id)
         if (operation.taskId !== taskId) return yield* failure('not-found')
-        const settled = yield* (action === 'resolve' ? synchronization.resolve(id) : synchronization.abort(id))
+        const settled = yield* action === 'resolve' ? synchronization.resolve(id) : synchronization.abort(id)
         if (settled.state === 'aligned') yield* completeRoutineAfterReceipt(taskId)
         return settled
       })
@@ -337,27 +364,24 @@ class VaultTasks extends Context.Service<
         runRoutine,
         prepareRoutine,
         routineExecutions: routines.executions,
+        allRoutineExecutions: routines.allExecutions,
         routines: routines.list,
         saveRoutine,
         workspace,
-        taskWikiConflictContext: (taskId, id) => Effect.gen(function* () {
-          yield* store.task(taskId)
-          const context = yield* synchronization.resolutionContext(taskId, id)
-          return { files: context.files, commonBase: context.commonBase, canonicalDiff: context.canonicalDiff, taskDiff: context.taskDiff }
-        }),
+        taskWikiConflictContext: (taskId, id) =>
+          Effect.gen(function* () {
+            yield* store.task(taskId)
+            const context = yield* synchronization.resolutionContext(taskId, id)
+            return { files: context.files, commonBase: context.commonBase, canonicalDiff: context.canonicalDiff, taskDiff: context.taskDiff }
+          }),
         saveWorkspaceFiles: (input) => changes.save({ ...input, taskId: null }),
         saveTaskWikiFiles: changes.save,
         saveRunWikiFiles: changes.saveRunWiki,
-        confirmRunWikiUnchanged: (input) =>
-          changes.confirmRunWikiUnchanged(input).pipe(Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
+        confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
         synchronizeTaskWiki: (input) =>
-          synchronization.synchronize(input).pipe(
-            Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))
-          ),
+          synchronization.synchronize(input).pipe(Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
         reprepareTaskWiki: (input) =>
-          synchronization.reprepare(input).pipe(
-            Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))
-          ),
+          synchronization.reprepare(input).pipe(Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
         resolveTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'resolve'),
         abortTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'abort'),
         pendingTaskSynchronizations,
@@ -404,6 +428,7 @@ export class TaskService extends Context.Service<
     readonly taskSynchronization: (vaultId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly list: (vaultId: string) => Effect.Effect<readonly TaskRecord[], HarnessStoreError>
     readonly routineExecutions: (vaultId: string, routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
+    readonly allRoutineExecutions: (vaultId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly tickRoutines: (vaultId: string) => Effect.Effect<void, HarnessStoreError>
     readonly dispatchRoutine: (vaultId: string, routineId: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
     readonly listRoutines: (vaultId: string) => Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
@@ -459,9 +484,7 @@ export class TaskService extends Context.Service<
                           ),
                           join(directory, 'agent-history'),
                           taskResources.prepare,
-                          (task, session) => session.purpose === 'task'
-                            ? Effect.succeed(task.worktree)
-                            : synchronization.resolutionDirectory(task.id, session.syncOperationId!)
+                          (task, session) => (session.purpose === 'task' ? Effect.succeed(task.worktree) : synchronization.resolutionDirectory(task.id, session.syncOperationId!))
                         )
                       })
                     )
@@ -501,13 +524,16 @@ export class TaskService extends Context.Service<
             id,
             Effect.flatMap(VaultTasks, (service) => service.workspace.inspectTaskWiki(taskId))
           ),
-      taskWikiDiff: (id, taskId, input) =>
+        taskWikiDiff: (id, taskId, input) =>
           inVault(
             id,
             Effect.flatMap(VaultTasks, (service) => service.workspace.diffTaskWiki(taskId, input))
           ),
         taskWikiConflictContext: (vaultId, taskId, id) =>
-          inVault(vaultId, Effect.flatMap(VaultTasks, (service) => service.taskWikiConflictContext(taskId, id))),
+          inVault(
+            vaultId,
+            Effect.flatMap(VaultTasks, (service) => service.taskWikiConflictContext(taskId, id))
+          ),
         saveWorkspaceFiles: (id, input) =>
           inVault(
             id,
@@ -597,7 +623,15 @@ export class TaskService extends Context.Service<
             Effect.flatMap(VaultTasks, (service) => service.dispatchRoutine(routineId))
           ),
         routineExecutions: (id, routineId) =>
-          inVault(id, Effect.flatMap(VaultTasks, (service) => service.routineExecutions(routineId))),
+          inVault(
+            id,
+            Effect.flatMap(VaultTasks, (service) => service.routineExecutions(routineId))
+          ),
+        allRoutineExecutions: (id) =>
+          inVault(
+            id,
+            Effect.flatMap(VaultTasks, (service) => service.allRoutineExecutions)
+          ),
         listRoutines: (id) =>
           inVault(
             id,
@@ -675,8 +709,12 @@ export class TaskService extends Context.Service<
           ),
         startConflictResolution: (input) =>
           Schema.decodeUnknownEffect(StartConflictResolutionInput)(input, { onExcessProperty: 'error' }).pipe(
-            Effect.flatMap((value) => inVault(value.vaultId,
-              Effect.flatMap(VaultTasks, (service) => service.startConflictResolution(value)))),
+            Effect.flatMap((value) =>
+              inVault(
+                value.vaultId,
+                Effect.flatMap(VaultTasks, (service) => service.startConflictResolution(value))
+              )
+            ),
             Effect.mapError(safeError)
           ),
         inspectRun: (vaultId, taskId, runId) =>

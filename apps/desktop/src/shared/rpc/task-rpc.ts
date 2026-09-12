@@ -72,10 +72,15 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('workspace.diff', { payload: { vaultId: Vault.fields.id, input: WorkspaceDiffInput }, success: WorkspaceFileDiff, error: HarnessStoreError }),
   Rpc.make('workspace.saveFiles', { payload: { vaultId: Vault.fields.id, input: SaveWorkspaceFiles }, success: GitChangeApplication, error: HarnessStoreError }),
   Rpc.make('routines.list', { payload: { vaultId: Vault.fields.id }, success: Schema.Array(RoutineRecord), error: HarnessStoreError }),
+  Rpc.make('routines.allExecutions', { payload: { vaultId: Vault.fields.id }, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
   Rpc.make('routines.executions', { payload: { vaultId: Vault.fields.id, routineId: RoutineRecord.fields.id }, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
   Rpc.make('routines.save', { payload: { vaultId: Vault.fields.id, input: SaveRoutine }, success: RoutineRecord, error: HarnessStoreError }),
   Rpc.make('routines.run', { payload: { vaultId: Vault.fields.id, input: RunRoutine }, success: RoutineRunResult, error: HarnessStoreError }),
-  Rpc.make('routines.prepare', { payload: { vaultId: Vault.fields.id, input: RunRoutine }, success: Schema.Struct({ execution: RoutineExecution, task: TaskRecord }), error: HarnessStoreError }),
+  Rpc.make('routines.prepare', {
+    payload: { vaultId: Vault.fields.id, input: RunRoutine },
+    success: Schema.Struct({ execution: RoutineExecution, task: TaskRecord }),
+    error: HarnessStoreError
+  }),
   Rpc.make('tasks.list', { payload: { vaultId: Vault.fields.id }, success: Schema.Array(TaskRecord), error: HarnessStoreError }),
   Rpc.make('tasks.create', { payload: CreateTaskInput, success: TaskRecord, error: HarnessStoreError }),
   Rpc.make('tasks.complete', { payload: { vaultId: Vault.fields.id, taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),

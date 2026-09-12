@@ -11,6 +11,7 @@ export const TaskRpcHandlersLive = TaskRpcs.toLayer(
       'workspace.diff': ({ vaultId, input }) => service.workspaceDiff(vaultId, input),
       'workspace.saveFiles': ({ vaultId, input }) => service.saveWorkspaceFiles(vaultId, input),
       'routines.list': ({ vaultId }) => service.listRoutines(vaultId),
+      'routines.allExecutions': ({ vaultId }) => service.allRoutineExecutions(vaultId),
       'routines.executions': ({ vaultId, routineId }) => service.routineExecutions(vaultId, routineId),
       'routines.save': ({ vaultId, input }) => service.saveRoutine(vaultId, input),
       'routines.run': ({ vaultId, input }) => service.runRoutine(vaultId, input),
