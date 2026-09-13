@@ -67,6 +67,10 @@
       {
         "from": "../../packages/integrations/src/lark/assets/workflows",
         "to": "lark-workflows"
+      },
+      {
+        "from": "../../packages/integrations/src/gmail/assets",
+        "to": "gmail-assets"
       }
     ],
     "mac": {

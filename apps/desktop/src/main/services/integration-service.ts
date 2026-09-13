@@ -12,6 +12,33 @@ import { IntegrationAction } from '@folio/integrations/protocol'
 
 const failure = () => new IntegrationSettingsError({ message: 'The integration operation failed. Check its status and try again.' })
 
+/**
+ * Turns an operation failure into a short, non-sensitive diagnostic for the
+ * development terminal. Provider errors can carry request config and tokens,
+ * so never log the full unknown value here.
+ */
+const operationErrorDetails = (cause: unknown): { name?: string; message: string; code?: string; status?: number } => {
+  if (cause instanceof Error) {
+    const value = cause as Error & { code?: unknown; response?: { status?: unknown } }
+    return {
+      name: cause.name,
+      message: cause.message.slice(0, 500),
+      ...(typeof value.code === 'string' ? { code: value.code.slice(0, 100) } : {}),
+      ...(typeof value.response?.status === 'number' ? { status: value.response.status } : {})
+    }
+  }
+  if (typeof cause === 'object' && cause !== null) {
+    const value = cause as { message?: unknown; _tag?: unknown; code?: unknown; status?: unknown }
+    return {
+      ...(typeof value._tag === 'string' ? { name: value._tag.slice(0, 100) } : {}),
+      message: (typeof value.message === 'string' ? value.message : 'Unknown integration failure').slice(0, 500),
+      ...(typeof value.code === 'string' ? { code: value.code.slice(0, 100) } : {}),
+      ...(typeof value.status === 'number' ? { status: value.status } : {})
+    }
+  }
+  return { message: String(cause).slice(0, 500) }
+}
+
 /** Runtime-only paths and instructions. Credentials and opaque installation state never enter this result. */
 export interface PreparedIntegrationResources {
   readonly skillPaths: readonly string[]
@@ -262,7 +289,17 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
         )
       }).pipe(
-        Effect.catch(() => Effect.gen(function*() {
+        Effect.catch((cause) => Effect.gen(function*() {
+          // The durable state intentionally exposes only a generic failure to
+          // the renderer. Keep the actionable cause in the terminal instead,
+          // while avoiding the full provider error object (which may contain
+          // OAuth credentials in request config).
+          console.error('[Folio][Integration] operation failed', {
+            integration: id,
+            operation,
+            action: actionId ?? 'none',
+            error: operationErrorDetails(cause)
+          })
           yield* Effect.logError('Integration operation failed').pipe(
             Effect.annotateLogs({ integration: id, operation, action: actionId ?? 'none' })
           )

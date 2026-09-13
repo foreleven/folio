@@ -1,6 +1,7 @@
 import { RoutineSchedulerLive } from './services/routine-scheduler'
 import { NodeServices } from '@effect/platform-node'
 import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
+import { gmail, GmailAssetsDirectory } from '@folio/integrations/gmail'
 import { app } from 'electron'
 import { join } from 'node:path'
 import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack'
@@ -14,6 +15,9 @@ const larkSkillsDirectory = app.isPackaged
 const larkWorkflowsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'lark-workflows')
   : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/workflows')
+const gmailAssetsDirectory = app.isPackaged
+  ? join(process.resourcesPath, 'gmail-assets')
+  : join(app.getAppPath(), '../../packages/integrations/src/gmail/assets')
 import { IntegrationService } from './services/integration-service'
 import type { Integration } from '@folio/integrations/base'
 import type { IntegrationPlatform } from './services/integration-catalog'
@@ -60,6 +64,12 @@ const IntegrationsLive = IntegrationService.layer.pipe(
       Effect.provideService(LarkCliArchive, larkCliArchiveForPlatform),
       Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
       Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
+    )
+  }, {
+    ...gmail,
+    install: () => gmail.install().pipe(Effect.provideService(GmailAssetsDirectory, gmailAssetsDirectory)),
+    onActionCallback: (id, payload) => gmail.onActionCallback(id, payload).pipe(
+      Effect.provideService(GmailAssetsDirectory, gmailAssetsDirectory)
     )
   }])),
   Layer.provide(IntegrationBrowser.layer),

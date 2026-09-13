@@ -33,6 +33,10 @@ export function IntegrationsSettings(): React.JSX.Element {
     } finally {
       inFlight.current.delete(id)
       setPending([...inFlight.current])
+      // The RPC acknowledges scheduling while the main-process job continues
+      // independently. Refresh here so a reconnecting/missed watch stream
+      // cannot leave this settings window on an obsolete snapshot.
+      refresh()
     }
   }
   if (result._tag === 'Failure')
@@ -66,9 +70,7 @@ export function IntegrationsSettings(): React.JSX.Element {
             onInspect={() => {
               void submit(integration.id, () => inspect({ payload: { id: integration.id } })).catch(() => undefined)
             }}
-            onAction={(actionId, payload) =>
-              submit(integration.id, () => action({ payload: { id: integration.id, actionId, payload } }))
-            }
+            onAction={(actionId, payload) => submit(integration.id, () => action({ payload: { id: integration.id, actionId, payload } }))}
           />
         ))}
       </div>

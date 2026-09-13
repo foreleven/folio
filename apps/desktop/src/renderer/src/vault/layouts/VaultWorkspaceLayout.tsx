@@ -80,7 +80,7 @@ export function VaultWorkspaceLayout({
           </Sidebar>
           <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
             <div className="min-h-0 flex-1 overflow-y-auto" role="region" aria-labelledby="workspace-page-title">
-              <div className="mx-auto w-full max-w-190 px-6 py-6 max-[600px]:px-4">
+              <div className={`w-full px-6 py-6 max-[600px]:px-4 ${section === 'routines' ? '' : 'mx-auto max-w-190'}`}>
                 <h2 id="workspace-page-title" className="sr-only">
                   {active.label}
                 </h2>

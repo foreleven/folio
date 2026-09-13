@@ -2,6 +2,7 @@ import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Badge } from '@folio/ui/components/ui/badge'
 import { Button } from '@folio/ui/components/ui/button'
 import { Card, CardContent } from '@folio/ui/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@folio/ui/components/ui/dialog'
 import {
   ArrowLeftIcon,
   ArrowUpRightIcon,
@@ -9,6 +10,7 @@ import {
   CheckCircle2Icon,
   CircleAlertIcon,
   Clock3Icon,
+  Maximize2Icon,
   PlayIcon,
   RefreshCwIcon,
   TimerIcon,
@@ -375,6 +377,7 @@ function RoutineDetail({
   const prepare = useAtomSet(TaskRpcClient.prepareRoutine, { mode: 'promise' })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [promptOpen, setPromptOpen] = useState(false)
   const dates = useMemo(() => {
     const datesWithRows = executions.map((row) => row.routineDate)
     return [...new Set([...datesWithRows, ...deriveGapDates(executions)])].sort().reverse()
@@ -481,7 +484,19 @@ function RoutineDetail({
             <DetailItem label={chinese ? '下一次执行' : 'Next run'} value={formatNextTrigger(record, chinese)} />
           </div>
           <div className="border-b p-4">
-            <p className="mb-2 text-support font-medium">{chinese ? '任务说明' : 'Prompt'}</p>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-support font-medium">{chinese ? '任务说明' : 'Prompt'}</p>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                aria-label={chinese ? '查看全部 Prompt' : 'View full prompt'}
+                title={chinese ? '查看全部 Prompt' : 'View full prompt'}
+                onClick={() => setPromptOpen(true)}
+              >
+                <Maximize2Icon aria-hidden="true" />
+              </Button>
+            </div>
             <p className="line-clamp-5 whitespace-pre-wrap break-words text-support text-muted-foreground">{record.prompt}</p>
           </div>
           <div className="p-2">
@@ -556,6 +571,17 @@ function RoutineDetail({
           )}
         </main>
       </div>
+      <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
+        <DialogContent className="h-[70vh] max-h-[calc(100dvh-2rem)] min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{chinese ? '完整任务说明' : 'Full prompt'}</DialogTitle>
+            <DialogDescription>{record.name}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto rounded-md border bg-muted/20 p-3">
+            <p className="whitespace-pre-wrap break-words text-support">{record.prompt}</p>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   )
 }

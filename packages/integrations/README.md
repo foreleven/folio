@@ -1,9 +1,10 @@
 # Folio integrations
 
 An `Integration` owns a provider connection. Its resources describe ingestion
-capabilities; Lark registers `im` and `email`. Their `onIngest` hooks declare the
-corresponding installed Skills, shared rules, and managed CLI directory. They do
-not fetch data or start an Agent; the harness mounts these resources for the Task.
+capabilities; Lark registers `im` and `email`, while Google Gmail registers
+`email`. Their `onIngest` hooks declare the corresponding installed Skills,
+shared rules, and workflow assets. They do not start an Agent; the harness
+mounts these resources for the Task.
 
 ## Ownership
 
@@ -13,7 +14,8 @@ not fetch data or start an Agent; the harness mounts these resources for the Tas
   progress, and prevents late callbacks from replacing completed attempts.
 - The desktop hosts the catalog, SQLite snapshots, HTTPS navigation, and scoped
   jobs. Its renderer consumes the protocol without branching on provider IDs,
-  business states, or action IDs. Only the composition root imports Lark.
+  business states, or action IDs. Provider-specific composition stays in the
+  main-process catalog.
 
 ```text
 src/base/
@@ -26,6 +28,10 @@ src/lark/
   connection.ts           # Credential verification, renewal, backoff and coordination
   auth.ts                 # SDK/HTTP authorization transport
   state.ts                # Schemas, consolidated private state and legacy migration
+src/gmail/
+  integration.ts          # Gmail connection, resource mount, and workflow
+  oauth.ts                # Google OAuth desktop flow and token refresh
+  state.ts                # Private credential state
 ```
 
 ## Protocol
@@ -144,9 +150,8 @@ incomplete existing skills directory is not overwritten. Electron injects packag
 asset paths at the composition boundary.
 
 SDK 1.73.3 handles application registration, app token exchange, and user identity
-verification. Device OAuth uses the official HTTP endpoints because the SDK does
-not expose that flow. SDK logging is suppressed to avoid raw credential-bearing
-transport diagnostics. `LarkApplication` optionally supplies existing application
+verification. SDK logging is suppressed to avoid raw credential-bearing transport
+diagnostics. `LarkApplication` optionally supplies existing application
 credentials; otherwise Lark reads its private consolidated state.
 
 ```text
@@ -188,3 +193,73 @@ They are skipped in default tests. Installation requires an interactive terminal
 and explicit browser approval. `FOLIO_CONFIG_DIR` selects a separate private state
 directory. Historical live results are recorded in `VERIFICATION.md`; they do not
 constitute live verification of subsequent refactors.
+
+## Google Gmail behavior
+
+The Gmail integration requests the read-only Gmail scope and keeps the OAuth
+client credentials and refresh token in `~/.folio/integrations/gmail/private.json`.
+The OAuth client pair is written before starting authorization, so a failed
+attempt can be retried without pasting the values again; it is cleared after a
+verified token pair is saved.
+The connection action starts Google's OAuth authorization-code flow for Desktop
+clients. Folio listens on a temporary loopback (`127.0.0.1`) callback, shows the
+verified Google URL as an external action, and exchanges the returned code for
+offline credentials. Access tokens are refreshed before a Task is prepared.
+
+The `email` resource mounts a small Skill and `extract-window.mjs`. A default
+Vault Routine is created after the resource is installed and runs once per day.
+It exports the exact Routine window to `raws/gmail/messages/`, then asks the
+Agent to classify urgent replies, tasks/deadlines, newsletters, waiting items,
+and archive candidates. Email content is treated as untrusted input and the
+workflow never sends, deletes, or relabels Gmail messages. OAuth token refresh
+and profile verification use Google's official `googleapis`/`google-auth-library`
+clients; the tiny mounted extractor intentionally remains a standalone REST
+script and only receives the short-lived access token through its process
+environment.
+
+### Gmail OAuth client configuration
+
+An OAuth client ID is not a global Google constant: it identifies the Google
+Cloud project that owns the app's OAuth consent screen. Each user should create
+or select a project in Google Cloud Console, enable the Gmail API, configure the
+OAuth consent screen, and create a **Desktop app** OAuth client. Folio uses the
+Desktop client's loopback authorization-code flow. The ID ends in
+`.apps.googleusercontent.com` and must be entered together with its client
+secret in the Gmail connection form. Folio does not bundle either value; the
+secret stays in the private state and is used only for the code exchange and
+future token refreshes.
+
+The setup links in the connection card are:
+
+- Enable Gmail API: `https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com`
+- Configure consent screen and add Test users: `https://console.cloud.google.com/apis/credentials/consent`
+- Create/select OAuth client: `https://console.cloud.google.com/auth/clients`
+
+The connection itself is the OAuth authorization: Folio opens Google's verified
+consent URL and waits for Google to redirect the browser to Folio's temporary
+local callback. There is no account-level “direct OAuth” endpoint that removes
+the client registration; Google requires an OAuth client for every supported
+flow. Desktop clients are the correct type for a local application and do not
+require a fixed public redirect URI. OAuth Playground credentials are tied to
+Google's test application and are not a suitable shared production alternative.
+
+Because `gmail.readonly` is a restricted Gmail scope, add your account as an OAuth
+consent-screen test user while developing; public distribution may require
+Google's app verification.
+
+The Gmail connection action links directly to
+`https://console.cloud.google.com/auth/clients` so each user can create or
+select their own OAuth client. Submitted values are never copied into public
+integration snapshots; the provider keeps them in its private state.
+
+OAuth authorization-code, token, refresh, and profile requests use the official
+Google SDK/Gaxios transport. Folio explicitly checks `HTTPS_PROXY` (then
+lowercase/`HTTP_PROXY` variants) for every request and passes the selected proxy
+to Gaxios; `NO_PROXY` remains respected. The mounted extractor is invoked with
+Node's `--use-env-proxy` flag so its native `fetch` follows the same settings.
+If Google is unreachable without a proxy, set one before launching the desktop
+app (GUI launches may not inherit the shell's environment). When an OAuth call fails, the development terminal prints
+`[Folio][Gmail OAuth]` with the endpoint, HTTP status, Google error code and
+description, followed by `[Folio][Integration] operation failed` for failures
+that escape the provider. These diagnostics are deliberately omitted from the
+renderer and never include client secrets or tokens.
