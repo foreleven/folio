@@ -27,13 +27,13 @@ export const hasSkills = Effect.fn('Lark.hasSkills')(function*(directory: string
 
 /** Copies bundled skills after confirmation; stages complete trees before publication. */
 export const installSkills = Effect.fn('Lark.installSkills')(function*(directory: string) {
+  const fs = yield* FileSystem.FileSystem
+  const source = yield* LarkSkillsDirectory
   if (yield* hasSkills(directory)) {
     yield* Effect.logDebug('Reusing installed Lark skills')
     return
   }
   yield* Effect.logInfo('Lark skills installation started').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
-  const fs = yield* FileSystem.FileSystem
-  const source = yield* LarkSkillsDirectory
   const destination = join(directory, 'skills')
   if (yield* fs.exists(destination)) {
     return yield* new IntegrationError({ message: 'Incomplete skills directory. Move it aside before retrying installation.' })

@@ -5,7 +5,7 @@ export class IntegrationSettingsError extends Schema.TaggedError<IntegrationSett
   message: Schema.String
 }) {}
 
-export const IntegrationResource = Schema.Struct({ id: Schema.String, name: IntegrationText })
+export const IntegrationResource = Schema.Struct({ id: Schema.String, type: Schema.optionalKey(Schema.Literals(['im', 'email', 'meeting'])), name: IntegrationText })
 export const IntegrationRecord = Schema.Struct({
   id: Schema.String, state: Schema.String, data: Schema.Unknown,
   actions: Schema.Array(IntegrationAction), resources: Schema.Array(IntegrationResource),

@@ -15,7 +15,7 @@ const routineId = '11111111-1111-4111-8111-111111111111'
 
 const setup = Effect.gen(function* () {
   const store = yield* RoutineStore
-  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', prompt: 'Process today', agent: 'codex', model: null, skillIds: [], integrationIds: [], intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', prompt: 'Process today', agent: 'codex', model: null, skillIds: [], integrationIds: ['lark'], resourceIds: ['lark/im'], intervalMinutes: 30, timeZone: 'UTC', enabled: true })
 })
 
 describe('RoutineStore execution coalescing', () => {
@@ -23,6 +23,7 @@ describe('RoutineStore execution coalescing', () => {
     await Effect.runPromise(Effect.gen(function* () {
       yield* setup
       const store = yield* RoutineStore
+      expect((yield* store.get(routineId)).resourceIds).toEqual(['lark/im'])
       const first = yield* store.schedule(routineId, Date.parse('2026-09-11T10:00:00.000Z'))
       const second = yield* store.schedule(routineId, Date.parse('2026-09-11T10:30:00.000Z'))
       expect(second.id).toBe(first.id)

@@ -26,6 +26,7 @@ const DbRoutine = Schema.Struct({
   thinkingLevel: Schema.NullOr(SessionModelSelection.fields.thinkingLevel),
   skillIds: Schema.fromJsonString(Schema.Array(Schema.NonEmptyString)),
   integrationIds: Schema.fromJsonString(Schema.Array(Schema.NonEmptyString)),
+  resourceIds: Schema.fromJsonString(Schema.Array(Schema.NonEmptyString)),
   intervalMinutes: RoutineRecord.fields.intervalMinutes,
   timeZone: RoutineRecord.fields.timeZone,
   enabled: Schema.Union([Schema.Boolean, Schema.Number]),
@@ -86,7 +87,7 @@ export class RoutineStore extends Context.Service<
       const decodeExecutions = (input: unknown) => Schema.decodeUnknownEffect(Schema.Array(DbExecution))(input).pipe(Effect.map((rows) => rows.map(decodeExecution)))
 
       const readRoutines = sql`SELECT id, name, prompt, agent, model_provider_id AS modelProviderId, model_id AS modelId,
-      thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds,
+      thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds, resource_ids AS resourceIds,
       interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
       next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt, created_at AS createdAt, updated_at AS updatedAt
       FROM routines ORDER BY created_at DESC, id`.pipe(
@@ -112,7 +113,7 @@ export class RoutineStore extends Context.Service<
       const list = readRoutines
       const get = Effect.fn('RoutineStore.get')(function* (id: string) {
         const row = (yield* sql`SELECT id, name, prompt, agent, model_provider_id AS modelProviderId, model_id AS modelId,
-        thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds,
+        thinking_level AS thinkingLevel, skill_ids AS skillIds, integration_ids AS integrationIds, resource_ids AS resourceIds,
         interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
         next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt, created_at AS createdAt, updated_at AS updatedAt
         FROM routines WHERE id=${id}`.pipe(Effect.flatMap(decodeRoutines))).at(0)
@@ -124,6 +125,7 @@ export class RoutineStore extends Context.Service<
         if ((value.agent === 'pi') !== (value.model !== null)) return yield* fail('invalid-state', 'Pi requires a model selection and Codex uses local configuration.')
         const skillIds = [...new Set(value.skillIds)].sort()
         const integrationIds = [...new Set(value.integrationIds)].sort()
+        const resourceIds = [...new Set(value.resourceIds ?? [])].sort()
         return yield* sql.withTransaction(
           Effect.gen(function* () {
             const previous = yield* get(value.id).pipe(Effect.catchTag('HarnessStoreError', (error) => (error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error))))
@@ -131,7 +133,7 @@ export class RoutineStore extends Context.Service<
             if (
               previous &&
               previous.revision === revision &&
-              JSON.stringify({ ...value, skillIds, integrationIds }) ===
+              JSON.stringify({ ...value, skillIds, integrationIds, resourceIds }) ===
                 JSON.stringify({
                   id: previous.id,
                   expectedRevision: previous.revision - 1,
@@ -141,6 +143,7 @@ export class RoutineStore extends Context.Service<
                   model: previous.model,
                   skillIds: previous.skillIds,
                   integrationIds: previous.integrationIds,
+                  resourceIds: previous.resourceIds,
                   intervalMinutes: previous.intervalMinutes,
                   timeZone: previous.timeZone,
                   enabled: previous.enabled
@@ -155,14 +158,14 @@ export class RoutineStore extends Context.Service<
             if (previous) {
               yield* sql`UPDATE routines SET name=${value.name}, prompt=${value.prompt}, agent=${value.agent},
             model_provider_id=${modelProviderId}, model_id=${modelId}, thinking_level=${thinkingLevel},
-            skill_ids=${JSON.stringify(skillIds)}, integration_ids=${JSON.stringify(integrationIds)},
+            skill_ids=${JSON.stringify(skillIds)}, integration_ids=${JSON.stringify(integrationIds)}, resource_ids=${JSON.stringify(resourceIds)},
             interval_minutes=${value.intervalMinutes}, time_zone=${value.timeZone}, enabled=${value.enabled ? 1 : 0},
             revision=${revision}, updated_at=${time} WHERE id=${value.id} AND revision=${value.expectedRevision}`
             } else {
               yield* sql`INSERT INTO routines (id, name, prompt, agent, model_provider_id, model_id, thinking_level,
-            skill_ids, integration_ids, interval_minutes, time_zone, enabled, revision, next_trigger_at, last_trigger_at, created_at, updated_at)
+            skill_ids, integration_ids, resource_ids, interval_minutes, time_zone, enabled, revision, next_trigger_at, last_trigger_at, created_at, updated_at)
             VALUES (${value.id}, ${value.name}, ${value.prompt}, ${value.agent}, ${modelProviderId}, ${modelId}, ${thinkingLevel},
-              ${JSON.stringify(skillIds)}, ${JSON.stringify(integrationIds)}, ${value.intervalMinutes}, ${value.timeZone}, ${value.enabled ? 1 : 0}, 1, NULL, NULL, ${time}, ${time})`
+              ${JSON.stringify(skillIds)}, ${JSON.stringify(integrationIds)}, ${JSON.stringify(resourceIds)}, ${value.intervalMinutes}, ${value.timeZone}, ${value.enabled ? 1 : 0}, 1, NULL, NULL, ${time}, ${time})`
             }
             return yield* get(value.id)
           })
@@ -186,6 +189,10 @@ export class RoutineStore extends Context.Service<
           Effect.gen(function* () {
             const routine = yield* get(routineId)
             if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
+            // Each execution is a bounded ingestion window. The first run covers one
+            // configured interval; later runs begin at the previous trigger. A
+            // pending execution keeps its original start while its end is coalesced.
+            const defaultWindowStart = Math.min(at, Math.max(routine.createdAt, routine.lastTriggerAt ?? at - routine.intervalMinutes * 60_000))
             const today = routineDateAt(at, routine.timeZone)
             const previousDate = previousRoutineDate(today, routine.timeZone)
             const candidates = yield* executionRows(routineId)
@@ -195,18 +202,18 @@ export class RoutineStore extends Context.Service<
             if (pending) {
               if (pending.routineDate === today && !pending.isEnd) {
                 yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at}, trigger_count=trigger_count+1,
-              status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+              window_start=COALESCE(window_start, ${defaultWindowStart}), status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
               } else if (pending.routineDate === previousDate && !pending.isEnd) {
                 const end = routineDayEnd(previousDate, routine.timeZone)
                 yield* sql`UPDATE routine_executions SET trigger_time=${end}, window_end=${end}, is_end=1,
-              trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
               } else {
                 // A missed execution is still one logical window: later ticks update its
                 // latest trigger rather than creating a queue of catch-up rows. We only
                 // mark the previous civil day as ended when this is the first tick of the
                 // following day; older gaps remain visible in the derived calendar.
                 yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at},
-              trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
               }
               yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
               return (yield* executionRows(routineId)).find((execution) => execution.id === pending.id)!
@@ -233,7 +240,7 @@ export class RoutineStore extends Context.Service<
               firstTriggerTime: triggerTime,
               triggerCount: 1,
               isEnd,
-              windowStart: null,
+              windowStart: defaultWindowStart,
               windowEnd: triggerTime,
               routineRevision: routine.revision,
               status: 'pending' as const,
@@ -244,7 +251,7 @@ export class RoutineStore extends Context.Service<
             }
             yield* sql`INSERT INTO routine_executions (id, routine_id, task_id, routine_date, trigger_time, first_trigger_time,
           trigger_count, is_end, window_start, window_end, routine_revision, status, started_at, ended_at, created_at, updated_at)
-          VALUES (${execution.id}, ${routineId}, NULL, ${date}, ${triggerTime}, ${triggerTime}, 1, ${isEnd ? 1 : 0}, NULL,
+          VALUES (${execution.id}, ${routineId}, NULL, ${date}, ${triggerTime}, ${triggerTime}, 1, ${isEnd ? 1 : 0}, ${defaultWindowStart},
             ${triggerTime}, ${routine.revision}, 'pending', NULL, NULL, ${time}, ${time})`
             yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
             return execution

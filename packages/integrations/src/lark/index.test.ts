@@ -71,7 +71,7 @@ function harness(options: {
 } = {}) {
   const commands: ChildProcess.StandardCommand[] = []
   const states: Array<{ state: string; data: unknown }> = []
-  const resources = new Map<string, IntegrationResource>()
+  const resources = new Map<string, Pick<IntegrationResource, 'id' | 'type' | 'name'>>()
   const processLayer = Layer.effect(ChildProcessSpawner.ChildProcessSpawner, Effect.gen(function*() {
     const actual = yield* ChildProcessSpawner.ChildProcessSpawner
     const defaultAuthStatus = () => ({
@@ -206,9 +206,40 @@ describe('Lark integration lifecycle', () => {
     for (const resource of lark.resources) await Effect.runPromise(resource.onIngest(context))
     expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md', '/managed/lark/skills/lark-mail/SKILL.md'])
     expect(context.executableDirectories).toEqual(['/managed/lark/cli'])
-    expect(context.instructions).toEqual([])
+    expect(context.instructions).toEqual([expect.stringContaining('raws/lark-im/_workflow.md')])
     expect(context.env).toEqual({})
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('copies the IM extractor and workflow instructions into the Task workspace', async () => {
+    const directory = join(root, 'managed-lark')
+    const script = join(directory, 'workflows', 'lark-im', 'extract-window.mjs')
+    await mkdir(dirname(script), { recursive: true })
+    await writeFile(script, '#!/usr/bin/env node\nprocess.exit(0)\n')
+    const context = {
+      integrationDirectory: directory, workspaceDirectory: join(root, 'task'), instructions: [], skills: [],
+      executableDirectories: [], workspaceFiles: [] as Array<{ path: string; content: string }>, env: {}
+    }
+    await Effect.runPromise(lark.resources[0]!.onIngest(context))
+    expect(context.workspaceFiles).toEqual([
+      { path: 'raws/lark-im/_workflow.md', content: expect.stringContaining('extract-window.mjs') },
+      { path: 'raws/lark-im/extract-window.mjs', content: '#!/usr/bin/env node\nprocess.exit(0)\n' }
+    ])
+  })
+
+  it('passes the saved user token only through the ingest environment', async () => {
+    const h = harness()
+    await seed(h.directory)
+    try {
+      await h.runtime.runPromise(lark.install().pipe(Effect.provideService(IntegrationContext, h.context)))
+      const context = {
+        integrationDirectory: h.directory, workspaceDirectory: join(root, 'task'), instructions: [], skills: [],
+        executableDirectories: [], workspaceFiles: [] as Array<{ path: string; content: string }>, env: {}
+      }
+      await Effect.runPromise(lark.resources[0]!.onIngest(context))
+      expect(context.env).toEqual({ LARK_USER_ACCESS_TOKEN: 'saved-token' })
+      expect(context.workspaceFiles.map(file => file.path)).toEqual(['raws/lark-im/_workflow.md', 'raws/lark-im/extract-window.mjs'])
+    } finally { await h.stop(); await h.runtime.dispose() }
   })
 
   it('rejects an authorization URL outside Lark domains before publishing an external action', async () => {
@@ -313,6 +344,7 @@ describe('Lark integration lifecycle', () => {
       expect(registerApp).not.toHaveBeenCalled()
       expect((await h.checked()).state).toBe('app_required')
       expect(await readFile(join(h.directory, 'skills/lark-mail/SKILL.md'), 'utf8')).toContain('name: lark-mail')
+      expect(await readFile(join(h.directory, 'workflows/lark-im/extract-window.mjs'), 'utf8')).toContain('chat-messages-list')
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
       expect(h.states.map((item) => item.state)).toEqual(expect.arrayContaining(['waiting_for_app', 'waiting_for_user', 'ready']))
       expect(await h.checked()).toEqual({ state: 'ready', actions: [] })
@@ -365,6 +397,7 @@ describe('Lark integration lifecycle', () => {
       expect(h.commands.filter((cmd) => cmd.command === '/usr/bin/tar')).toHaveLength(1)
       expect(h.commands.filter((cmd) => cmd.args[0] === 'clone')).toHaveLength(0)
       expect([...h.resources.keys()]).toEqual(['im', 'email'])
+      expect([...h.resources.values()].map((resource) => resource.type)).toEqual(['im', 'email'])
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 

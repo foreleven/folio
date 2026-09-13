@@ -178,7 +178,7 @@ function make(service: LarkServiceApi) {
           !belongsToApp(saved, app) || !hasPermissions(saved)) {
         return yield* new IntegrationError({ message: 'Lark authentication is incomplete.' })
       }
-      const status = yield* readCliAuthStatus(directory)
+      const status = yield* readCliAuthStatus(directory, saved.accessToken)
       const cliUser = status.identities.user
       const cliScope = cliUser?.scope?.split(/\s+/) ?? []
       if (!status.verified || status.brand !== app.brand || status.identity !== 'user' ||

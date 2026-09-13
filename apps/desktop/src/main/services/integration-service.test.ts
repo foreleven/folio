@@ -25,7 +25,7 @@ function fixture(background = false, form = false) {
   const checkStarted = Effect.runSync(Deferred.make<void>())
   const checkResume = Effect.runSync(Deferred.make<void>())
   const state = { installs: 0, healthChecks: 0, inspections: 0, actions: 0, failInstall: false, failHealthCheck: false, failInspect: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
-  const resource: IntegrationResource = { id: 'im', name: 'Messages', onIngest: () => Effect.void }
+  const resource: IntegrationResource = { id: 'im', type: 'im', name: 'Messages', onIngest: () => Effect.void }
   const integration: Integration = {
     id: 'notes', name: 'Notes', description: 'Test provider', states: { ready: { kind: 'ready', label: 'Ready' } }, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
     setup: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
@@ -179,7 +179,7 @@ describe('desktop integration lifecycle', () => {
       expect(rows()).toHaveLength(1)
       const result = await f.settled('login_required')
       expect(result.record?.actions.map((action) => action.id)).toEqual(['authorize'])
-      expect(result.record?.resources).toEqual([{ id: 'im', name: 'Messages' }])
+      expect(result.record?.resources).toEqual([{ id: 'im', type: 'im', name: 'Messages' }])
       expect(f.state.inspections).toBeGreaterThan(0)
     } finally { await f.runtime.dispose() }
   })

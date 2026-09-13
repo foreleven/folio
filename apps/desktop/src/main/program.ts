@@ -1,13 +1,19 @@
 import { RoutineSchedulerLive } from './services/routine-scheduler'
 import { NodeServices } from '@effect/platform-node'
-import { lark, LarkCliArchive, LarkSkillsDirectory } from '@folio/integrations/lark'
+import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
 import { app } from 'electron'
 import { join } from 'node:path'
 import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack'
+import larkCliLinuxArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-linux-amd64.tar.gz?asset&asarUnpack'
+
+const larkCliArchiveForPlatform = process.platform === 'linux' && process.arch === 'x64' ? larkCliLinuxArchive : larkCliArchive
 
 const larkSkillsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'lark-skills')
   : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/skills')
+const larkWorkflowsDirectory = app.isPackaged
+  ? join(process.resourcesPath, 'lark-workflows')
+  : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/workflows')
 import { IntegrationService } from './services/integration-service'
 import type { Integration } from '@folio/integrations/base'
 import type { IntegrationPlatform } from './services/integration-catalog'
@@ -41,13 +47,19 @@ const IntegrationsLive = IntegrationService.layer.pipe(
   Layer.provide(Layer.succeed(IntegrationCatalog)([{
     ...lark,
     // electron-vite resolves this asset outside app.asar; the provider stays Electron-independent.
+    setup: () => lark.setup!().pipe(
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
+      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
+    ),
     install: () => lark.install().pipe(
-      Effect.provideService(LarkCliArchive, larkCliArchive),
-      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
+      Effect.provideService(LarkCliArchive, larkCliArchiveForPlatform),
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
+      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
     ),
     onActionCallback: (id, payload) => lark.onActionCallback(id, payload).pipe(
-      Effect.provideService(LarkCliArchive, larkCliArchive),
-      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
+      Effect.provideService(LarkCliArchive, larkCliArchiveForPlatform),
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
+      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
     )
   }])),
   Layer.provide(IntegrationBrowser.layer),

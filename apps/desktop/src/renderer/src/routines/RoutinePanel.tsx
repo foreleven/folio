@@ -415,6 +415,7 @@ function RoutineDetail({
             model: record.model,
             skillIds: record.skillIds,
             integrationIds: record.integrationIds,
+            resourceIds: record.resourceIds ?? [],
             intervalMinutes: record.intervalMinutes,
             timeZone: record.timeZone,
             enabled: !record.enabled

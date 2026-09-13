@@ -2,8 +2,9 @@ import { RoutineStore } from './routine-store'
 import { RunRoutine, SaveRoutine, type RoutineRecord, type RoutineExecution } from '../../shared/routine'
 import { HarnessRuns } from './harness-runs'
 import { ModelService } from './model-service'
-import { Context, DateTime, Effect, FileSystem, Layer, LayerMap, Schema, Semaphore } from 'effect'
-import { join } from 'node:path'
+import { Context, DateTime, Effect, FileSystem, Layer, LayerMap, Schema, Semaphore, Stream } from 'effect'
+import { dirname, join } from 'node:path'
+import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { HarnessStoreError, type SessionRecord, type TaskRecord, type RunRecord } from '../../shared/harness'
 import {
@@ -43,6 +44,64 @@ const failure = (reason: HarnessStoreError['reason']) =>
           : 'Could not access Vault tasks.'
   })
 const safeError = (cause: unknown) => (cause instanceof HarnessStoreError ? cause : failure('storage'))
+const DEFAULT_LARK_IM_ROUTINE_ID = '00000000-0000-4000-8000-000000000001'
+
+/**
+ * Moves provider-generated Lark IM raws out of an isolated Routine checkout and
+ * into the Vault workspace. Raw capture is deliberately outside Git synchronization;
+ * removing the copied Task files lets the normal worktree release checkpoint remain
+ * strict while the source material stays available to the user.
+ */
+async function persistRoutineLarkRaws(taskWorktree: string): Promise<void> {
+  if (await realpath(taskWorktree) !== taskWorktree) throw new Error('Routine worktree is redirected')
+  const source = join(taskWorktree, 'raws', 'lark-im')
+  // This file is only an onIngest prompt carrier. It must never make a
+  // Routine checkout dirty, including runs that selected another resource and
+  // therefore did not create a Lark IM raw directory.
+  const instructions = join(taskWorktree, 'raws', '.folio-integration-instructions.md')
+  const sourceExists = await lstat(source).then(() => true).catch(error => error?.code === 'ENOENT' ? false : Promise.reject(error))
+  if (!sourceExists) {
+    await rm(instructions, { force: true })
+    return
+  }
+  const vaultRoot = dirname(dirname(taskWorktree))
+  const workspace = join(vaultRoot, 'workspace')
+  if (await realpath(workspace) !== workspace) throw new Error('Vault workspace is redirected')
+  const destination = join(workspace, 'raws', 'lark-im')
+
+  const copyTree = async (from: string, to: string): Promise<void> => {
+    const info = await lstat(from)
+    if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) throw new Error('Routine raw contains an unsupported file')
+    if (info.isDirectory()) {
+      await mkdir(to, { recursive: true, mode: 0o700 })
+      if (await realpath(to) !== to) throw new Error('Vault raw directory is redirected')
+      for (const name of (await readdir(from)).sort()) await copyTree(join(from, name), join(to, name))
+      return
+    }
+    const parent = dirname(to)
+    await mkdir(parent, { recursive: true, mode: 0o700 })
+    if (await realpath(parent) !== parent) throw new Error('Vault raw parent is redirected')
+    await lstat(to).then(existing => { if (existing.isSymbolicLink() || existing.isDirectory()) throw new Error('Vault raw destination is unsafe') }).catch(error => {
+      if (error?.code !== 'ENOENT') throw error
+    })
+    await writeFile(to, await readFile(from), { mode: 0o600 })
+  }
+
+  await copyTree(source, destination)
+  await rm(source, { recursive: true, force: true })
+  await rm(instructions, { force: true })
+}
+
+/** Removes the host-owned prompt carrier before any ordinary Task checkout release. */
+async function clearIntegrationInstructions(taskWorktree: string): Promise<void> {
+  const path = join(taskWorktree, 'raws', '.folio-integration-instructions.md')
+  await lstat(path).then(info => {
+    if (info.isSymbolicLink() || info.isDirectory()) throw new Error('Integration instruction file is unsafe')
+  }).catch(error => {
+    if (error?.code !== 'ENOENT') throw error
+  })
+  await rm(path, { force: true })
+}
 
 /** Owns a single Vault's shared creation gate and database, independently of requesting windows. */
 class VaultTasks extends Context.Service<
@@ -66,6 +125,7 @@ class VaultTasks extends Context.Service<
     readonly routineExecutions: (id: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly dispatchRoutine: (id: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>
     readonly routines: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
+    readonly ensureDefaultRoutine: Effect.Effect<void, HarnessStoreError>
     readonly saveRoutine: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
     readonly runRoutine: (input: RunRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
     readonly prepareRoutine: (input: RunRoutine) => Effect.Effect<{ execution: RoutineExecution; task: TaskRecord }, HarnessStoreError>
@@ -101,6 +161,11 @@ class VaultTasks extends Context.Service<
       /** The caller retains its UUID for retry; a lost reply must not allocate another Task/worktree. */
       const create = Effect.fn('VaultTasks.create')(function* (input: Omit<CreateTaskInput, 'vaultId'>) {
         const integrationIds = [...new Set(input.integrationIds ?? [])].sort()
+        const resourceIds = [...new Set(input.resourceIds ?? [])].sort()
+        if (resourceIds.some(reference => {
+          const separator = reference.indexOf('/')
+          return separator <= 0 || !integrationIds.includes(reference.slice(0, separator))
+        })) return yield* failure('invalid-state')
         const previous = yield* store
           .task(input.id)
           .pipe(Effect.catchTag('HarnessStoreError', (error) => (error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error))))
@@ -109,7 +174,8 @@ class VaultTasks extends Context.Service<
             previous.goal !== input.goal ||
             previous.configuration.agent !== input.agent ||
             previous.configuration.skillIds.length ||
-            JSON.stringify(previous.configuration.integrationIds) !== JSON.stringify(integrationIds)
+            JSON.stringify(previous.configuration.integrationIds) !== JSON.stringify(integrationIds) ||
+            JSON.stringify(previous.configuration.resourceIds ?? []) !== JSON.stringify(resourceIds)
           )
             return yield* failure('invalid-state')
           // A successful request retry is read-only once the Task has left creation. In
@@ -120,8 +186,16 @@ class VaultTasks extends Context.Service<
             const available = yield* integrations.list.pipe(Effect.mapError(safeError))
             if (integrationIds.some((id) => !available.some((view) => view.id === id && !view.busy && view.record && view.states[view.record.state]?.kind === 'ready')))
               return yield* failure('invalid-state')
+            if (resourceIds.some(reference => {
+              const separator = reference.indexOf('/')
+              const integrationId = separator > 0 ? reference.slice(0, separator) : ''
+              const resourceId = separator > 0 ? reference.slice(separator + 1) : ''
+              const view = available.find(candidate => candidate.id === integrationId)
+              return !view || !view.resources.some(resource => resource.id === resourceId)
+                || !view.record?.resources.some(resource => resource.id === resourceId)
+            })) return yield* failure('invalid-state')
           }
-          yield* worktrees.create({ id: input.id, goal: input.goal, configuration: { agent: input.agent, skillIds: [], integrationIds } })
+          yield* worktrees.create({ id: input.id, goal: input.goal, configuration: { agent: input.agent, skillIds: [], integrationIds, resourceIds } })
         }
         return yield* store.task(input.id)
       }, gate.withPermit)
@@ -138,6 +212,7 @@ class VaultTasks extends Context.Service<
         if (task.state === 'active' && history.some((run) => run.state === 'succeeded' && run.syncState !== 'completed' && run.syncState !== 'not-required'))
           return yield* failure('invalid-state')
         yield* Effect.forEach(yield* store.sessions(taskId), (session) => sessions.close(taskId, session.id), { concurrency: 'unbounded' })
+        yield* Effect.tryPromise(() => clearIntegrationInstructions(task.worktree)).pipe(Effect.mapError(() => failure('storage')))
         return yield* worktrees.complete(taskId)
       })
       const complete = (taskId: string) => completeUnlocked(taskId).pipe(gate.withPermit)
@@ -156,11 +231,19 @@ class VaultTasks extends Context.Service<
         // New Sessions cannot open after this durable checkpoint, and the original completion
         // path already reaped every Folio-owned Session before writing it.
         if (task.state === 'completed' && task.worktreeState === 'releasing') {
+          yield* Effect.tryPromise(() => persistRoutineLarkRaws(task.worktree)).pipe(Effect.mapError(() => failure('storage')))
           yield* worktrees.complete(taskId)
           return
         }
         if (task.state !== 'active') return
-        const history = yield* store.runs(taskId)
+        let history = yield* store.runs(taskId)
+        // Routine prompts are source-ingestion prompts. Automatically close the
+        // wiki receipt when no wiki files changed; an actual wiki edit still
+        // follows the existing explicit save/synchronization path.
+        for (const run of history.filter(candidate => candidate.state === 'succeeded' && candidate.syncState === 'pending')) {
+          yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit }).pipe(Effect.catch(() => Effect.void))
+        }
+        history = yield* store.runs(taskId)
         const succeeded = history.filter((run) => run.state === 'succeeded')
         const latest = history[history.length - 1]
         if (
@@ -173,6 +256,7 @@ class VaultTasks extends Context.Service<
         // A user may reopen a settled Task to inspect a retained dirty/error state. Scheduler
         // retries must not repeatedly tear that Session down; explicit completion still may.
         if (yield* sessions.hasLiveTask(taskId)) return
+        yield* Effect.tryPromise(() => persistRoutineLarkRaws(task.worktree)).pipe(Effect.mapError(() => failure('storage')))
         yield* completeUnlocked(taskId)
       }, gate.withPermit)
       /** Receipt RPCs stay truthful when the independent worktree cleanup needs a later retry. */
@@ -301,8 +385,41 @@ class VaultTasks extends Context.Service<
       const saveRoutine = Effect.fn('VaultTasks.saveRoutine')(function* (input: SaveRoutine) {
         // Independent Skill selection is not mounted yet; refusing it avoids silently dropping intent.
         if (input.skillIds.length) return yield* failure('invalid-state')
+        // Resource references are persisted with the Routine and must point at a
+        // registered provider resource. This keeps an apparently valid Routine
+        // from failing only after its first scheduled execution.
+        for (const reference of input.resourceIds ?? []) {
+          const separator = reference.indexOf('/')
+          const integrationId = separator > 0 ? reference.slice(0, separator) : ''
+          const resourceId = separator > 0 ? reference.slice(separator + 1) : ''
+          const view = (yield* integrations.list.pipe(Effect.mapError(safeError))).find(item => item.id === integrationId)
+          if (!view || !input.integrationIds.includes(integrationId)
+            || !view.resources.some(resource => resource.id === resourceId)
+            || !view.record?.resources.some(resource => resource.id === resourceId))
+            return yield* failure('invalid-state')
+        }
         return yield* routines.save(input)
       })
+      /** Installs the first-party Lark IM Routine for this Vault. */
+      const ensureDefaultRoutines = Effect.fn('VaultTasks.ensureDefaultRoutines')(function* () {
+        const lark = (yield* integrations.list.pipe(Effect.mapError(safeError))).find(view => view.id === 'lark')
+        if (!lark?.record || lark.record.error !== null || lark.record.state === 'checking' || lark.record.state === 'installing') return
+        const im = lark?.record?.resources.some(resource => resource.type === 'im' || resource.id === 'im')
+        // Resource registration is the installation boundary. Create the Routine
+        // as soon as the provider has registered `im`, even if user authorization
+        // is still pending; execution will remain retryable until the pre-ingest
+        // health check reports ready.
+        if (!lark || !im) return
+        const current = yield* routines.list
+        if (current.some(routine => routine.id === DEFAULT_LARK_IM_ROUTINE_ID || (routine.resourceIds ?? []).includes('lark/im'))) return
+        yield* routines.save({
+          // Stable identity makes concurrent installation/watch/page initialization idempotent.
+          id: DEFAULT_LARK_IM_ROUTINE_ID, expectedRevision: null, name: 'Lark IM review',
+          prompt: 'Review the current Routine window of Lark IM. Read raws/lark-im/_workflow.md first, then run the extraction workflow it describes and review raws/lark-im/_updated.md and the updated conversation files. Summarize actionable items and decisions.',
+          agent: 'codex', model: null, skillIds: [], integrationIds: ['lark'], resourceIds: ['lark/im'],
+          intervalMinutes: 60, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', enabled: true
+        }).pipe(Effect.catchTag('HarnessStoreError', error => error.reason === 'invalid-state' ? Effect.void : Effect.fail(error)))
+      }, gate.withPermit)
       /** Creates or coalesces one current execution, then optionally starts its Task Run. */
       const prepareRoutine = Effect.fn('VaultTasks.prepareRoutine')(function* (input: RunRoutine) {
         const execution = yield* routines.schedule(input.routineId)
@@ -310,7 +427,7 @@ class VaultTasks extends Context.Service<
         // Derive the reservation's Task identity from the execution so concurrent
         // scheduler ticks converge on one Task instead of orphaning duplicates.
         const taskId = execution.taskId ?? execution.id
-        const task = yield* create({ id: taskId, goal: routine.prompt, agent: routine.agent, integrationIds: routine.integrationIds })
+        const task = yield* create({ id: taskId, goal: routine.prompt, agent: routine.agent, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds })
         const attached = yield* routines.attachTask(execution.id, task.id)
         return { execution: attached, task }
       })
@@ -319,9 +436,12 @@ class VaultTasks extends Context.Service<
         const routine = yield* routines.get(input.routineId)
         const sessionId = randomUUID()
         const runId = randomUUID()
+        const windowStart = execution.windowStart ?? Math.min(execution.triggerTime, execution.firstTriggerTime - routine.intervalMinutes * 60_000)
+        const windowEnd = execution.windowEnd ?? execution.triggerTime
+        const prompt = `${routine.prompt}\n\nRoutine execution window (use these exact ISO timestamps for extraction):\n- start: ${new Date(windowStart).toISOString()}\n- end: ${new Date(windowEnd).toISOString()}`
         yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) }).pipe(gate.withPermit)
         yield* routines.setStatus(task.id, 'preparing')
-        const run = yield* runs.start({ id: runId, taskId: task.id, sessionId, prompt: routine.prompt, purpose: 'execution', resumesRunId: null }, (terminal) =>
+        const run = yield* runs.start({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null }, (terminal) =>
           routines.setStatus(task.id, terminal.state).pipe(Effect.andThen(terminal.state === 'succeeded' ? completeRoutineAfterReceipt(task.id) : Effect.void))
         )
         return { execution, task, run }
@@ -331,6 +451,7 @@ class VaultTasks extends Context.Service<
       })
       // Collect a bounded page first. No batch is dispatched while missed dates remain uncollected.
       const tickRoutines = Effect.gen(function* () {
+        yield* ensureDefaultRoutines()
         // A crash may land after the final Run receipt but before worktree release. Reconcile
         // durable Routine state before admitting another batch; one dirty Task cannot stop peers.
         for (const task of yield* store.tasks) {
@@ -365,7 +486,8 @@ class VaultTasks extends Context.Service<
         prepareRoutine,
         routineExecutions: routines.executions,
         allRoutineExecutions: routines.allExecutions,
-        routines: routines.list,
+        routines: ensureDefaultRoutines().pipe(Effect.andThen(routines.list)),
+        ensureDefaultRoutine: ensureDefaultRoutines(),
         saveRoutine,
         workspace,
         taskWikiConflictContext: (taskId, id) =>
@@ -508,6 +630,31 @@ export class TaskService extends Context.Service<
         if (!(yield* config.get).vaults.some((vault) => vault.id === id)) return yield* failure('not-found')
         return yield* action.pipe(Effect.provide(resources.get(id)))
       }, Effect.mapError(safeError))
+      const ensureInstalledDefaults = Effect.gen(function* () {
+        const registry = yield* config.get
+        yield* Effect.forEach(registry.vaults, vault =>
+          inVault(vault.id, Effect.flatMap(VaultTasks, service => service.ensureDefaultRoutine)).pipe(
+            Effect.catch(() => Effect.void)
+          ),
+          { concurrency: 4, discard: true }
+        )
+      })
+      // Installation is global but Routine state is per Vault. Subscribe at the
+      // application scope so a successful Lark install creates defaults immediately
+      // for all already-registered Vaults. Lazy paths below cover newly added Vaults.
+      yield* integrations.watch.pipe(
+        Stream.filter(snapshot => snapshot.some(view => view.id === 'lark'
+          // Resource registration happens before the provider's install marker is
+          // durable. Wait for the host's post-install reconciliation and avoid
+          // creating a default Routine for a failed/partial installation.
+          && view.record?.error === null
+          && view.record.state !== 'checking'
+          && view.record.state !== 'installing'
+          && view.record.resources.some(resource => resource.type === 'im' || resource.id === 'im'))),
+        Stream.runForEach(() => ensureInstalledDefaults),
+        Effect.catch(() => Effect.logWarning('Default integration Routines could not be initialized.')),
+        Effect.forkScoped
+      )
       return TaskService.of({
         workspaceChanges: (id) =>
           inVault(

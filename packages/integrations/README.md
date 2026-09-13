@@ -94,14 +94,19 @@ cannot submit an unavailable action.
 No `reconcile` hook or scheduler is added. A future `IntegrationContext.scheduler`
 can replace provider-owned timing; currently Lark controls its own sleeps and retries.
 
+Resources may additionally declare the shared `type` category (`im`, `email`, or
+`meeting`). The host uses that category for default Routine suggestions while
+retaining the provider-owned resource ID as the stable capability reference.
+
 Hooks obtain `IntegrationContext` with `yield* IntegrationContext`:
 
 - `directory`: installation-private storage location.
 - `writeState(state, data, actions?)`: atomically commits public state and currently
   available actions before returning. Omitted actions clear the previous list.
   Do not put credentials or SDK diagnostics in public data.
-- `registerResource(resource)`: upserts by integration ID + resource ID. Resource
-  registration means installed capability, not current authorization.
+- `registerResource(resource)`: upserts by integration ID + resource ID and keeps
+  its shared `type` metadata. Resource registration means installed capability, not
+  current authorization.
 
 Other platform services remain in the Effect environment. Hosts must preserve
 those requirements when supplying the per-installation context. Static resource
@@ -131,7 +136,8 @@ without `verified` are previously verified records. Neither unknown responses no
 a different user identity can publish a newly rotated pair as ready.
 
 Lark uses the Folio-managed `lark-cli`; it never executes a global PATH copy.
-Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64). Bundled
+Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64 or Linux
+x64). Bundled
 skills are `lark-shared`, `lark-im`, and `lark-mail` from `larksuite/cli` commit
 `f065bf5b645af381f9b7475ce721451e6ca36a23`, with complete trees and license. An
 incomplete existing skills directory is not overwritten. Electron injects packaged

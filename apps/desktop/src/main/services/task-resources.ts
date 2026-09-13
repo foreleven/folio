@@ -2,7 +2,7 @@ import { Context, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { HarnessStoreError, type TaskRecord } from '../../shared/harness'
 import { ConfigService } from './config-service'
@@ -13,13 +13,13 @@ const RelativePath = Schema.NonEmptyString.check(Schema.makeFilter(path => !isAb
 const TaskId = Schema.NonEmptyString.check(Schema.makeFilter(id => /^[a-zA-Z0-9_-]{1,128}$/.test(id)))
 const Manifest = Schema.Struct({
   version: Schema.Literal(1), taskId: Schema.NonEmptyString,
-  integrationIds: Schema.Array(Schema.NonEmptyString),
+  integrationIds: Schema.Array(Schema.NonEmptyString), resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
   skillPaths: Schema.Array(RelativePath), executableDirectories: Schema.Array(RelativePath),
   entries: Schema.Array(Schema.Struct({ path: RelativePath, directory: Schema.Boolean,
     executable: Schema.Boolean, sha256: Schema.String }))
 })
 type Manifest = typeof Manifest.Type
-type Mounts = Pick<PreparedIntegrationResources, 'skillPaths' | 'executableDirectories'>
+type Mounts = Pick<PreparedIntegrationResources, 'skillPaths' | 'executableDirectories' | 'environment'>
 const failure = () => new HarnessStoreError({ reason: 'storage', message: 'Task resources could not be verified. The saved snapshot has been retained.' })
 
 /** Streams large native tools instead of retaining complete executables in the main-process heap. */
@@ -67,9 +67,9 @@ async function verify(directory: string, manifest: Manifest): Promise<Mounts> {
 }
 
 /**
- * Pins credential-free Integration asset trees outside Git on first Session startup. SQLite owns
- * the manifest; published copies are never refreshed from an upgraded installation. Integrity
- * checks detect subsequent edits, but full access means this is not an OS security boundary.
+ * Pins credential-free Integration asset trees outside Git on first Session startup. Ephemeral
+ * provider environment values are returned separately and never enter the SQLite manifest.
+ * Integrity checks detect subsequent edits, but full access means this is not an OS security boundary.
  */
 export class TaskResources extends Context.Service<TaskResources, {
   readonly prepare: (task: TaskRecord) => Effect.Effect<Mounts, HarnessStoreError>
@@ -87,8 +87,29 @@ export class TaskResources extends Context.Service<TaskResources, {
         if (!task.configuration.integrationIds.length) return { skillPaths: [], executableDirectories: [] }
         yield* Schema.decodeUnknownEffect(TaskId)(task.id)
         // Provider checks may perform bounded network I/O; cancellation is safe before any snapshot writes.
-        const mounted = yield* integrations.prepare(task.configuration.integrationIds, task.worktree).pipe(Effect.interruptible)
-        if (mounted.instructions.length) return yield* failure()
+        const mounted = yield* integrations.prepare(task.configuration.integrationIds, task.worktree, task.configuration.resourceIds ?? []).pipe(Effect.interruptible)
+        const workspaceFiles = [
+          ...(mounted.workspaceFiles ?? []),
+          ...(mounted.instructions.length
+            ? [{ path: 'raws/.folio-integration-instructions.md', content: `${mounted.instructions.join('\n\n')}\n` }]
+            : [])
+        ]
+        const writeWorkspaceFiles = async (): Promise<void> => {
+          if (!workspaceFiles.length) return
+          if (await realpath(task.worktree) !== task.worktree) throw failure()
+          for (const file of workspaceFiles) {
+            const path = file.path.replaceAll('\\', '/')
+            if (!path.startsWith('raws/') || path.includes('..') || path.startsWith('/') || path.split('/').some(part => !part || part === '.')) throw failure()
+            const target = resolve(task.worktree, path)
+            const parentDirectory = dirname(target)
+            await mkdir(parentDirectory, { recursive: true, mode: 0o700 })
+            if (await realpath(parentDirectory) !== parentDirectory) throw failure()
+            await lstat(target).then(info => { if (info.isSymbolicLink()) throw failure() }).catch(error => {
+              if (error?.code !== 'ENOENT') throw error
+            })
+            await writeFile(target, file.content, { mode: 0o600 })
+          }
+        }
         const destination = join(parent, task.id)
         const read = sql<{ manifest: string; state: string }>`SELECT manifest, state FROM task_resource_snapshots WHERE task_id=${task.id}`
         const existing = (yield* read)[0]
@@ -100,11 +121,14 @@ export class TaskResources extends Context.Service<TaskResources, {
         let manifest: Manifest | undefined
         if (existing) {
           manifest = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Manifest))(existing.manifest)
-          if (manifest.taskId !== task.id || JSON.stringify(manifest.integrationIds) !== JSON.stringify(task.configuration.integrationIds)) return yield* failure()
+          if (manifest.taskId !== task.id
+            || JSON.stringify(manifest.integrationIds) !== JSON.stringify(task.configuration.integrationIds)
+            || JSON.stringify(manifest.resourceIds ?? []) !== JSON.stringify(task.configuration.resourceIds ?? [])) return yield* failure()
           if (present) {
             const result = yield* Effect.tryPromise(() => verify(destination, manifest!))
             yield* sql`UPDATE task_resource_snapshots SET state='ready' WHERE task_id=${task.id}`
-            return result
+            yield* Effect.tryPromise(() => writeWorkspaceFiles()).pipe(Effect.mapError(() => failure()))
+            return { ...result, ...(mounted.environment ? { environment: mounted.environment } : {}) }
           }
           if (existing.state === 'ready') return yield* failure()
         }
@@ -116,7 +140,7 @@ export class TaskResources extends Context.Service<TaskResources, {
           const roots = [...skillPaths.map(dirname), ...executableDirectories]
           // The declared Skill file must live below an asset directory, never directly at the installation root.
           if (!roots.length || roots.some(path => path.split(sep).length < 2)) throw failure()
-          const candidate: Manifest = { version: 1, taskId: task.id, integrationIds: task.configuration.integrationIds,
+          const candidate: Manifest = { version: 1, taskId: task.id, integrationIds: task.configuration.integrationIds, resourceIds: task.configuration.resourceIds ?? [],
             skillPaths, executableDirectories, entries: await inventory(source, roots) }
           if (manifest && JSON.stringify(candidate) !== JSON.stringify(manifest)) throw failure()
           await mkdir(parent, { recursive: true, mode: 0o700 })
@@ -146,14 +170,15 @@ export class TaskResources extends Context.Service<TaskResources, {
           if ((yield* read)[0]?.manifest !== encoded) return yield* failure()
           yield* Effect.tryPromise(async () => {
             try { await rename(prepared.staging, destination) }
-            catch (error) {
+            catch (_error) {
               // A complete nonempty winner cannot be replaced by rename; accept only its exact recorded bytes.
               await verify(destination, prepared.manifest)
             }
           })
           const result = yield* Effect.tryPromise(() => verify(destination, prepared.manifest))
           yield* sql`UPDATE task_resource_snapshots SET state='ready' WHERE task_id=${task.id}`
-          return result
+          yield* Effect.tryPromise(() => writeWorkspaceFiles()).pipe(Effect.mapError(() => failure()))
+          return { ...result, ...(mounted.environment ? { environment: mounted.environment } : {}) }
         }).pipe(Effect.ensuring(Effect.promise(() => rm(prepared.staging, { recursive: true, force: true }))))
       }, Effect.uninterruptible, Effect.mapError(failure))
       return TaskResources.of({ prepare })

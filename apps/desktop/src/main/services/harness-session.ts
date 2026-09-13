@@ -39,6 +39,7 @@ export const openHarnessSession = Effect.fn('HarnessSession.open')(function*(opt
       sessionStorageDirectory: options.sessionStorageDirectory,
       skillPaths: options.skillPaths,
       executableDirectories: options.executableDirectories,
+      environment: options.environment,
       modelProfile: session.modelProfile ?? undefined,
       runtimeDirectory: join(options.sessionStorageDirectory ?? options.agentDirectory, 'runtime', session.id),
       agent: session.agent, cwd,

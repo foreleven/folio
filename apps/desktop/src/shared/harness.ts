@@ -7,7 +7,8 @@ const Id = Schema.NonEmptyString
 export const TaskConfiguration = Schema.Struct({
   agent: AgentKind,
   skillIds: Schema.Array(Id),
-  integrationIds: Schema.Array(Id)
+  integrationIds: Schema.Array(Id),
+  resourceIds: Schema.optionalKey(Schema.Array(Id))
 })
 export const NewTask = Schema.Struct({
   id: Id, goal: Schema.NonEmptyString, configuration: TaskConfiguration,

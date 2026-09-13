@@ -37,7 +37,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
   readonly close: (taskId: string, sessionId: string) => Effect.Effect<void, HarnessStoreError>
 }>()('folio/services/HarnessSessions') {
   static layer(options: RuntimeOptions | Effect.Effect<RuntimeOptions, HarnessStoreError>, historyDirectory?: string,
-    prepareResources?: (task: TaskRecord) => Effect.Effect<Pick<RuntimeOptions, 'skillPaths' | 'executableDirectories'>, HarnessStoreError>,
+    prepareResources?: (task: TaskRecord) => Effect.Effect<Pick<RuntimeOptions, 'skillPaths' | 'executableDirectories' | 'environment'>, HarnessStoreError>,
     resolveDirectory?: (task: TaskRecord, session: SessionRecord) => Effect.Effect<string, HarnessStoreError>) {
     return Layer.effect(HarnessSessions, Effect.gen(function*() {
       const owner = yield* Scope.Scope

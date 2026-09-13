@@ -26,7 +26,8 @@ export const CreateTaskInput = Schema.Struct({
   id: TaskId,
   goal: Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim().length > 0)),
   agent: AgentKind,
-  integrationIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString))
+  integrationIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
+  resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString))
 })
 export type CreateTaskInput = typeof CreateTaskInput.Type
 export const TaskDetail = Schema.Struct({

@@ -5,8 +5,17 @@ import { fileURLToPath } from 'node:url'
 import { IntegrationError } from '../base/index.ts'
 
 /** Source-tree default; Electron injects the unpacked application resource path. */
+const bundledArchive = (): string | undefined => {
+  const suffix = process.platform === 'darwin' && process.arch === 'arm64'
+    ? 'darwin-arm64'
+    : process.platform === 'linux' && process.arch === 'x64'
+      ? 'linux-amd64'
+      : undefined
+  return suffix ? fileURLToPath(new URL(`./assets/lark-cli-1.0.94-${suffix}.tar.gz`, import.meta.url)) : undefined
+}
+
 export const LarkCliArchive = Context.Reference<string>('@folio/integrations/lark/CliArchive', {
-  defaultValue: () => fileURLToPath(new URL('./assets/lark-cli-1.0.94-darwin-arm64.tar.gz', import.meta.url))
+  defaultValue: () => bundledArchive() ?? ''
 })
 
 /** Verifies executability before publishing an installation as usable. */
@@ -43,7 +52,8 @@ export const ensureCli = Effect.fn('Lark.ensureCli')(function*(directory: string
     yield* Effect.logDebug('Reusing installed Lark CLI')
     return found
   }
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+  const supported = (process.platform === 'darwin' && process.arch === 'arm64') || (process.platform === 'linux' && process.arch === 'x64')
+  if (!supported) {
     yield* Effect.logWarning('No bundled Lark CLI matches this platform').pipe(
       Effect.annotateLogs({ platform: process.platform, architecture: process.arch })
     )
@@ -102,13 +112,13 @@ export const LarkCliAuthStatus = Schema.Struct({
 export type LarkCliAuthStatus = typeof LarkCliAuthStatus.Type
 
 /** Runs the structured CLI verification command and validates its output without logging identity data. */
-export const readCliAuthStatus = Effect.fn('Lark.readCliAuthStatus')(function*(directory: string) {
+export const readCliAuthStatus = Effect.fn('Lark.readCliAuthStatus')(function*(directory: string, userToken?: string) {
   const executable = yield* findCli(directory)
   if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const command = ChildProcess.make(executable, ['auth', 'status', '--json', '--verify'], {
-    stdin: 'ignore', stdout: 'pipe', stderr: 'ignore'
-  })
+    stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', extendEnv: true
+  }).pipe(userToken ? ChildProcess.setEnv({ [LARK_USER_ACCESS_TOKEN_ENV]: userToken }) : (effect) => effect)
   const output = yield* Effect.scoped(Effect.gen(function*() {
     const handle = yield* spawner.spawn(command)
     const [stdout, code] = yield* Effect.all([
@@ -128,7 +138,7 @@ export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args
   const executable = yield* findCli(directory)
   if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-  const command = ChildProcess.make(executable, [...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' }).pipe(
+  const command = ChildProcess.make(executable, [...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', extendEnv: true }).pipe(
     ChildProcess.setEnv({ [LARK_USER_ACCESS_TOKEN_ENV]: userToken })
   )
   const output = yield* spawner.string(command).pipe(

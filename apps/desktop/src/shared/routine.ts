@@ -10,6 +10,7 @@ const RoutineDate = Schema.String.check(Schema.makeFilter((value) => /^\d{4}-\d{
 export const RoutineRecord = Schema.Struct({
   id: Id, name: Text, prompt: Text, agent: AgentKind, model: Schema.NullOr(SessionModelSelection),
   skillIds: Schema.Array(Schema.NonEmptyString), integrationIds: Schema.Array(Schema.NonEmptyString),
+  resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
   intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)), timeZone: Schema.NonEmptyString,
   enabled: Schema.Boolean, revision: Schema.Int.check(Schema.isGreaterThan(0)),
   nextTriggerAt: Schema.NullOr(Schema.Number), lastTriggerAt: Schema.NullOr(Schema.Number),
@@ -21,6 +22,7 @@ export const SaveRoutine = Schema.Struct({
   id: Id, expectedRevision: Schema.NullOr(RoutineRecord.fields.revision), name: Text, prompt: Text, agent: AgentKind,
   model: Schema.NullOr(SessionModelSelection), skillIds: Schema.Array(Schema.NonEmptyString),
   integrationIds: Schema.Array(Schema.NonEmptyString), intervalMinutes: RoutineRecord.fields.intervalMinutes,
+  resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
   timeZone: RoutineRecord.fields.timeZone, enabled: Schema.Boolean
 })
 export type SaveRoutine = typeof SaveRoutine.Type

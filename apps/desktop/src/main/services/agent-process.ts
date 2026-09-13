@@ -14,6 +14,7 @@ const Options = Schema.Struct({
   modelProfile: Schema.optional(ModelProfile),
   skillPaths: Schema.optional(Schema.Array(AbsolutePath)),
   executableDirectories: Schema.optional(Schema.Array(AbsolutePath.check(Schema.makeFilter(path => !path.includes(delimiter))))),
+  environment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   runtimeDirectory: Schema.optionalKey(AbsolutePath),
   sessionStorageDirectory: Schema.optional(AbsolutePath),
   codexExecutable: Schema.optional(AbsolutePath)
@@ -122,6 +123,8 @@ export const openAgentProcess = Effect.fn('AgentProcess.open')(function*(input: 
   const child = yield* spawner.spawn(ChildProcess.make(options.nodeExecutable, [options.entrypoint, '--agent', options.agent], {
     cwd: options.cwd, forceKillAfter: '2 seconds',
     env: {
+      // Provider credentials are ephemeral and validated before reaching this process.
+      ...(options.environment ?? {}),
       ELECTRON_RUN_AS_NODE: '1',
       FOLIO_CONFIG_DIR: options.configDirectory, FOLIO_AGENT_DIR: options.agentDirectory,
       FOLIO_SESSION_STORAGE_DIR: options.sessionStorageDirectory ?? options.agentDirectory,

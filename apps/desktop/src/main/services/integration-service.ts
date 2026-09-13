@@ -17,6 +17,9 @@ export interface PreparedIntegrationResources {
   readonly skillPaths: readonly string[]
   readonly executableDirectories: readonly string[]
   readonly instructions: readonly string[]
+  readonly workspaceFiles?: readonly { readonly path: string; readonly content: string }[]
+  /** Ephemeral provider environment; never included in a Task resource snapshot. */
+  readonly environment?: Readonly<Record<string, string>>
 }
 
 /** Owns process-lifetime jobs, SQLite state, and a push stream shared by all settings windows. */
@@ -26,7 +29,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
   readonly install: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly inspect: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly action: (id: string, actionId: string, payload?: unknown) => Effect.Effect<void, IntegrationSettingsError>
-  readonly prepare: (ids: readonly string[], workspaceDirectory: string) => Effect.Effect<PreparedIntegrationResources, IntegrationSettingsError>
+  readonly prepare: (ids: readonly string[], workspaceDirectory: string, resourceIds?: readonly string[]) => Effect.Effect<PreparedIntegrationResources, IntegrationSettingsError>
 }>()('folio/services/IntegrationService') {
   static readonly layer = Layer.effect(IntegrationService, Effect.gen(function*() {
     const catalog = yield* IntegrationCatalog
@@ -64,7 +67,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       return catalog.map((integration) => ({
         id: integration.id, name: integration.name, actions: integration.actions, states: integration.states,
         description: integration.description, logo: integration.logo, homepage: integration.homepage,
-        resources: integration.resources.map(({ id, name }) => ({ id, name })),
+        resources: integration.resources.map(({ id, type, name }) => ({ id, ...(type ? { type } : {}), name })),
         record: rows.find((row) => row.id === integration.id) ?? null,
         busy: running.has(integration.id)
       }))
@@ -98,7 +101,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       )).pipe(
         Effect.mapError(() => new IntegrationError({ message: 'Could not persist integration state.' }))
       ),
-      registerResource: ({ id: resourceId, name }) => commit(store.register(id, { id: resourceId, name }).pipe(
+      registerResource: ({ id: resourceId, type, name }) => commit(store.register(id, { id: resourceId, ...(type ? { type } : {}), name }).pipe(
         Effect.tap(() => Effect.logDebug('Integration resource registered').pipe(
           Effect.annotateLogs({ integration: id, resource: resourceId })
         ))
@@ -109,12 +112,19 @@ export class IntegrationService extends Context.Service<IntegrationService, {
      * This prepares a Session only: no installation, authorization action, Prompt, or ingestion.
      * The command gate excludes a new installation/action while preparing; existing jobs fail fast.
      */
-    const prepare = Effect.fn('IntegrationService.prepare')(function*(ids: readonly string[], workspaceDirectory: string) {
+    const prepare = Effect.fn('IntegrationService.prepare')(function*(ids: readonly string[], workspaceDirectory: string, resourceIds: readonly string[] = []) {
       if (!isAbsolute(workspaceDirectory)) return yield* failure()
+      const requestedResources = new Set(resourceIds)
+      if ([...requestedResources].some(resource => {
+        const separator = resource.indexOf('/')
+        return separator <= 0 || !new Set(ids).has(resource.slice(0, separator))
+      })) return yield* failure()
       const rows = yield* store.list
       const skillPaths = new Set<string>()
       const executableDirectories = new Set<string>()
       const instructions = new Set<string>()
+      const workspaceFiles = new Map<string, string>()
+      const environment = new Map<string, string>()
       for (const id of new Set(ids)) {
         const integration = catalog.find(item => item.id === id)
         const installed = rows.find(row => row.id === id)
@@ -125,15 +135,17 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         yield* withContext(id, integration.check())
         const context: IngestContext = {
           integrationDirectory: join(config.directory, 'integrations', id), workspaceDirectory,
-          skills: [], executableDirectories: [], instructions: [], env: {}
+          skills: [], executableDirectories: [], instructions: [], workspaceFiles: [], env: {}
         }
-        for (const resource of installed.resources) {
+        const selected = resourceIds.length ? installed.resources.filter(resource => requestedResources.has(`${id}/${resource.id}`)) : installed.resources
+        if (resourceIds.length && selected.length === 0) return yield* failure()
+        for (const resource of selected) {
           const implementation = integration.resources.find(item => item.id === resource.id)
           if (!implementation) return yield* failure()
           yield* implementation.onIngest(context)
         }
-        // Environment credentials need a separate ephemeral channel; never quietly serialize them.
-        if (Object.keys(context.env).length) return yield* failure()
+        // Environment credentials use a separate ephemeral channel; they are never
+        // included in the asset manifest or persisted integration snapshot.
         for (const path of context.skills) {
           if (!isAbsolute(path) || basename(path) !== 'SKILL.md' || (yield* fs.stat(path)).type !== 'File') return yield* failure()
           skillPaths.add(path)
@@ -143,8 +155,20 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           executableDirectories.add(path)
         }
         for (const instruction of context.instructions) instructions.add(instruction)
+        for (const file of context.workspaceFiles ?? []) workspaceFiles.set(file.path, file.content)
+        for (const [key, value] of Object.entries(context.env)) {
+          if (!/^[A-Z][A-Z0-9_]*$/.test(key)
+            || ['PATH', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)
+            || key.startsWith('FOLIO_')) return yield* failure()
+          const previous = environment.get(key)
+          if (previous !== undefined && previous !== value) return yield* failure()
+          environment.set(key, value)
+        }
       }
-      return { skillPaths: [...skillPaths], executableDirectories: [...executableDirectories], instructions: [...instructions] }
+      const files = [...workspaceFiles].map(([path, content]) => ({ path, content }))
+      const env = Object.fromEntries(environment)
+      return { skillPaths: [...skillPaths], executableDirectories: [...executableDirectories], instructions: [...instructions],
+        ...(files.length ? { workspaceFiles: files } : {}), ...(Object.keys(env).length ? { environment: env } : {}) }
     }, commands.withPermit, Effect.mapError(failure))
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {

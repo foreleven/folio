@@ -56,12 +56,17 @@
       "out/**/*"
     ],
     "asarUnpack": [
-      "out/main/assets/**"
+      "out/main/assets/**",
+      "out/main/chunks/**"
     ],
     "extraResources": [
       {
         "from": "../../packages/integrations/src/lark/assets/skills",
         "to": "lark-skills"
+      },
+      {
+        "from": "../../packages/integrations/src/lark/assets/workflows",
+        "to": "lark-workflows"
       }
     ],
     "mac": {

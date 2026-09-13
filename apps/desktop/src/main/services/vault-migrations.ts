@@ -416,6 +416,10 @@ export const migrateVault = SqliteMigrator.run({
       yield* sql`CREATE UNIQUE INDEX routine_one_end_execution ON routine_executions(routine_id, routine_date) WHERE is_end=1`
       yield* sql`CREATE INDEX routine_executions_by_date ON routine_executions(routine_id, routine_date, trigger_time)`
       yield* sql`CREATE INDEX routine_executions_by_task ON routine_executions(task_id) WHERE task_id IS NOT NULL`
+    }),
+    '0020_routine_resources': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`ALTER TABLE routines ADD COLUMN resource_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(resource_ids))`
     })
   })
 })

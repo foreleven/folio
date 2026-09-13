@@ -23,6 +23,11 @@ export interface CheckResult {
   readonly state: string
   readonly actions: readonly IntegrationAction[]
 }
+/** Common data-source categories let hosts offer sensible default Routines without
+ * interpreting provider-specific resource IDs. Providers may omit this for a
+ * capability that is not one of the shared categories. */
+export const IntegrationResourceType = Schema.Literals(['im', 'email', 'meeting'])
+export type IntegrationResourceTypeValue = typeof IntegrationResourceType.Type
 /** Per-installation host capabilities, supplied independently for each effect execution. */
 export class IntegrationContext extends Context.Service<IntegrationContext, {
   /** Integration-owned storage, e.g. ~/.folio/integrations/lark. */
@@ -30,13 +35,15 @@ export class IntegrationContext extends Context.Service<IntegrationContext, {
   /** Host persists opaque state/data and available actions atomically; omitted actions clear prior actions. */
   readonly writeState: (state: string, data: unknown, actions?: readonly IntegrationAction[]) => Effect.Effect<void, IntegrationError>
   /** Host upserts by integration ID + resource ID; repeated installation must be safe. */
-  readonly registerResource: (resource: IntegrationResource) => Effect.Effect<void, IntegrationError>
+  readonly registerResource: (resource: Pick<IntegrationResource, 'id' | 'type' | 'name'>) => Effect.Effect<void, IntegrationError>
 }>()('@folio/integrations/base/IntegrationContext') {}
 export interface IngestContext {
   /** Host-resolved installation root; never supplied as an arbitrary renderer path. */
   readonly integrationDirectory: string
   readonly workspaceDirectory: string
   readonly instructions: string[]
+  /** Credential-free files the provider wants available in the Task workspace. */
+  readonly workspaceFiles?: Array<{ readonly path: string; readonly content: string }>
   readonly skills: string[]
   /** Prepend these directories after the bundled Node runtime when launching the Agent. */
   readonly executableDirectories: string[]
@@ -44,6 +51,7 @@ export interface IngestContext {
 }
 export interface IntegrationResource {
   readonly id: string
+  readonly type?: IntegrationResourceTypeValue
   readonly name: IntegrationText
   readonly description?: IntegrationText
   /** Declares resources for the Agent; does not fetch data, start a Run, or modify the workspace. */

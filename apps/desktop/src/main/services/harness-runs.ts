@@ -1,7 +1,7 @@
 import { RecordedUpdate } from '../../shared/harness-events'
 import { randomUUID } from 'node:crypto'
 import { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Semaphore } from 'effect'
+import { Context, Deferred, Effect, Exit, FileSystem, Fiber, Layer, Schema, Scope, Semaphore } from 'effect'
 import { HarnessStoreError, type RunIntent, type RunOutcome, type RunRecord } from '../../shared/harness'
 import { HarnessStore } from './harness-store'
 import { HarnessSessions } from './harness-sessions'
@@ -10,6 +10,7 @@ import { TaskWorktrees } from './task-worktrees'
 import { makeVaultGit } from './vault-git'
 import { SqlClient } from 'effect/unstable/sql'
 import { isRegisteredGitCommit } from './git-change-applications'
+import { join } from 'node:path'
 
 interface Entry {
   readonly input: RunIntent
@@ -48,6 +49,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     const sessions = yield* HarnessSessions
     const events = yield* HarnessEventStore
     const worktrees = yield* TaskWorktrees
+    const fs = yield* FileSystem.FileSystem
     const git = yield* makeVaultGit
     const sql = yield* SqlClient.SqlClient
     const gate = yield* Semaphore.make(1)
@@ -84,6 +86,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         const savedSession = (yield* store.sessions(input.taskId)).find((session) => session.id === input.sessionId)
         if (!savedSession) return yield* failure('not-found')
         let baseline: string
+        let taskWorktree: string | undefined
         if (input.purpose === 'conflict-resolution') {
           if (savedSession.purpose !== 'conflict-resolution' || !savedSession.syncOperationId) return yield* failure('invalid-state')
           const target = (yield* sql<{ mainBase: string; canonicalCommits: string }>`SELECT main_base AS mainBase,
@@ -95,6 +98,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         } else {
           if (savedSession.purpose !== 'task') return yield* failure('invalid-state')
           const checkout = yield* worktrees.ensure(input.taskId)
+          taskWorktree = checkout.path
           // Only completed save receipts extend the registered baseline; a prepared object is insufficient.
           baseline = (yield* git(checkout.path, ['rev-parse', 'HEAD'])).trim()
           if (!(yield* isRegisteredGitCommit(checkout.branch, baseline, checkout.baselineCommit).pipe(
@@ -102,7 +106,17 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         }
         opened = true
         const session = yield* sessions.open(input.taskId, input.sessionId)
-        const pendingPrompt = session.prompt({ ...input, baselineCommit: baseline }, async () => {
+        // Provider onIngest hooks can add a short-lived instruction file after
+        // resource preparation. Prefix it at the ACP boundary so the Agent gets
+        // the hook's prompt even when the caller supplied an unrelated message;
+        // the persisted Run intent remains the caller's original text.
+        const providerInstructions = taskWorktree
+          ? yield* fs.readFileString(join(taskWorktree, 'raws', '.folio-integration-instructions.md')).pipe(
+              Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(''))
+            )
+          : ''
+        const agentPrompt = providerInstructions.trim() ? `${providerInstructions.trim()}\n\n${input.prompt}` : input.prompt
+        const pendingPrompt = session.prompt({ ...input, prompt: agentPrompt, baselineCommit: baseline }, async () => {
           await Effect.runPromise(read(input.taskId, input.id).pipe(Effect.flatMap(value => Deferred.succeed(ready, value))))
         })
         prompt = pendingPrompt
