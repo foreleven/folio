@@ -420,6 +420,41 @@ export const migrateVault = SqliteMigrator.run({
     '0020_routine_resources': Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
       yield* sql`ALTER TABLE routines ADD COLUMN resource_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(resource_ids))`
+    }),
+    '0021_execution_queue': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      // Admission precedes resource preparation. Runs retain their stricter Git/ACP constraints.
+      yield* sql`CREATE TABLE execution_requests (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        task_id TEXT NOT NULL REFERENCES tasks(id), session_id TEXT NOT NULL,
+        prompt TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('execution', 'recovery', 'conflict-resolution')),
+        resumes_run_id TEXT, source TEXT NOT NULL CHECK(source IN ('manual', 'routine', 'recovery', 'conflict-resolution')),
+        state TEXT NOT NULL CHECK(state IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+        owner TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
+        created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
+        FOREIGN KEY(session_id, task_id) REFERENCES sessions(id, task_id),
+        FOREIGN KEY(resumes_run_id, task_id) REFERENCES runs(id, task_id),
+        CHECK((purpose='recovery') = (resumes_run_id IS NOT NULL)),
+        CHECK((state IN ('queued', 'preparing', 'running')) = (ended_at IS NULL)),
+        CHECK(state NOT IN ('preparing', 'running') OR (owner IS NOT NULL AND started_at IS NOT NULL)),
+        CHECK(state<>'queued' OR (owner IS NULL AND started_at IS NULL))
+      )`
+      yield* sql`CREATE UNIQUE INDEX execution_one_worker_per_task ON execution_requests(task_id)
+        WHERE state IN ('preparing', 'running')`
+      yield* sql`CREATE INDEX execution_queue_order ON execution_requests(state, sequence)`
+      yield* sql`CREATE INDEX execution_task_history ON execution_requests(task_id, sequence)`
+    }),
+    '0022_execution_event_cursor': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`CREATE TABLE execution_event_cursor (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL)`
+      yield* sql`INSERT INTO execution_event_cursor VALUES (1, 0)`
+    }),
+    '0023_execution_processes': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`CREATE TABLE execution_processes (
+        request_id TEXT PRIMARY KEY REFERENCES execution_requests(id), pid INTEGER NOT NULL CHECK(pid>0),
+        stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
+      )`
     })
   })
 })
