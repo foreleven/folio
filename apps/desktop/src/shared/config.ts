@@ -8,6 +8,7 @@ export const Language = Schema.Literals(['system', 'zh-CN', 'en'])
 
 /** Missing fields use defaults so older config files remain readable. */
 export const GlobalConfig = Schema.Struct({
+  executionConcurrency: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(32))),
   theme: Theme.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
@@ -23,6 +24,7 @@ export type GlobalConfig = typeof GlobalConfig.Type
 
 /** Updates only supplied fields; explicit undefined and invalid values fail validation. */
 export const GlobalConfigPatch = Schema.Struct({
+  executionConcurrency: GlobalConfig.fields.executionConcurrency,
   theme: Schema.optionalKey(Theme),
   language: Schema.optionalKey(Language)
 })
