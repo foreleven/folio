@@ -196,6 +196,16 @@ export class RoutineStore extends Context.Service<
             const today = routineDateAt(at, routine.timeZone)
             const previousDate = previousRoutineDate(today, routine.timeZone)
             const candidates = yield* executionRows(routineId)
+            // An admitted prompt is immutable. Coalescing its time window would make the UI
+            // describe different work from the queued request and could enqueue a second Task.
+            for (const candidate of candidates) {
+              if (!candidate.taskId) continue
+              if ((yield* sql`SELECT id FROM execution_requests WHERE task_id=${candidate.taskId}
+                AND state IN ('queued', 'preparing', 'running') LIMIT 1`).length) {
+                yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
+                return candidate
+              }
+            }
             const pending =
               candidates.find((execution) => execution.status === 'pending') ?? candidates.find((execution) => ['failed', 'interrupted', 'cancelled'].includes(execution.status))
             const time = yield* now

@@ -1,3 +1,4 @@
+import { ExecutionEventSink } from './execution-event-sink'
 import type { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
 import { SessionArchive, SessionLeaseError, nativeAgent } from '@folio/agent'
 import { join } from 'node:path'
@@ -44,6 +45,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
       const store = yield* HarnessStore
       const dependencies = Context.make(HarnessStore, store).pipe(
         Context.add(HarnessEventStore, yield* HarnessEventStore),
+        Context.add(ExecutionEventSink, yield* ExecutionEventSink),
         Context.add(ChildProcessSpawner.ChildProcessSpawner, yield* ChildProcessSpawner.ChildProcessSpawner)
       )
       const gate = yield* Semaphore.make(1)

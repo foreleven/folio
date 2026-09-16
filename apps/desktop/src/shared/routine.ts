@@ -40,7 +40,7 @@ export const RoutineExecution = Schema.Struct({
 })
 export type RoutineExecution = typeof RoutineExecution.Type
 
-export const RunRoutine = Schema.Struct({ routineId: Id })
+export const RunRoutine = Schema.Struct({ routineId: Id, requestId: Schema.optionalKey(Id) })
 export type RunRoutine = typeof RunRoutine.Type
 
 /** Converts an instant into a civil date in the Routine's named timezone. */

@@ -1,3 +1,4 @@
+import { ExecutionEventSink } from './execution-event-sink'
 import {
   client, methods, PROTOCOL_VERSION, SessionUpdate,
   type ClientConnection, type Stream, type UpdateSessionNotification
@@ -7,7 +8,6 @@ import { randomUUID } from 'node:crypto'
 import { RecordedUpdate } from '../../shared/harness-events'
 import { NewRun } from '../../shared/harness'
 import { HarnessStore } from './harness-store'
-import { HarnessEventStore } from './harness-event-store'
 import { auditAcpStream } from './acp-audit-stream'
 
 /** Public transport failures do not expose protocol payloads or native diagnostics. */
@@ -42,7 +42,7 @@ export interface HarnessAcpClientOptions {
  */
 export const openHarnessAcpClient = Effect.fn('HarnessAcpClient.open')(function*(options: HarnessAcpClientOptions) {
   const store = yield* HarnessStore
-  const events = yield* HarnessEventStore
+  const events = yield* ExecutionEventSink
   const task = yield* store.task(options.taskId)
   const saved = (yield* store.sessions(task.id)).find(session => session.id === options.sessionId)
   if (!saved) return yield* failure('protocol')
@@ -83,6 +83,7 @@ export const openHarnessAcpClient = Effect.fn('HarnessAcpClient.open')(function*
       const input = Schema.decodeUnknownSync(RecordedUpdate)({ sessionId: saved!.id, runId, connectionId, notification }, { onExcessProperty: 'preserve' })
       const result = await Effect.runPromise(events.appendUpdate(input))
       if (!result.duplicate) {
+        if (options.onUpdate) await Effect.runPromise(events.flush)
         await options.onUpdate?.(notification)
         if (run && run.id === runId && SessionUpdate.isStateUpdate(notification.update) && notification.update.state === 'idle') {
           run.idle.resolve(notification)
@@ -150,7 +151,7 @@ export const openHarnessAcpClient = Effect.fn('HarnessAcpClient.open')(function*
       const binding = Schema.decodeUnknownSync(Schema.Struct({ acpSessionId: Schema.NonEmptyString, nativeSessionId: Schema.NullOr(Schema.NonEmptyString) }))({
         acpSessionId, nativeSessionId: created._meta?.['folio/nativeSessionId'] ?? null
       })
-      await Effect.runPromise(store.bindSession(saved.id, binding))
+      await Effect.runPromise(events.bindSession(saved.id, binding))
     }
     ready = true
     for (const notification of buffered) receive(notification, null)
@@ -171,7 +172,7 @@ export const openHarnessAcpClient = Effect.fn('HarnessAcpClient.open')(function*
       const run = { id: input.id, dispatched: false, idle: signal<UpdateSessionNotification>() }
       active = run
       try {
-        await Effect.runPromise(store.reserveRun(input))
+        await Effect.runPromise(events.reserveRun(input))
       } catch (error) { active = undefined; throw error }
       try {
         if (terminal || closing) throw terminal ?? failure('closed')
@@ -180,7 +181,7 @@ export const openHarnessAcpClient = Effect.fn('HarnessAcpClient.open')(function*
         run.dispatched = true
         const acknowledged = request(connection.agent.request(methods.agent.session.prompt, {
           sessionId: acpSessionId!, prompt: [{ type: 'text', text: input.prompt }]
-        })).then(() => Effect.runPromise(store.markRunning(input.id)))
+        })).then(() => Effect.runPromise(events.markRunning(input.id)))
         // Observe request failure immediately, even when the adapter reports idle before acknowledging.
         const [, idle] = await Promise.all([acknowledged, Promise.race([run.idle.promise, failed.promise.then(error => { throw error })])])
         return idle

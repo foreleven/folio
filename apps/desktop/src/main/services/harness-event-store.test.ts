@@ -137,11 +137,11 @@ describe('Vault ACP events and projection', () => {
         { sessionUpdate: '_future', opaque: { retained: [1, 2, 3] } }
       ]
       for (const [index, update] of updates.entries()) yield* store.appendUpdate(event(index + 1, update))
-      expect(yield* store.messages('folio')).toMatchObject([{ data: { content: [{ type: 'text', text: 'final' }], metadata: { label: 'kept' }, ended: false } }])
+      expect((yield* store.messages('folio')).filter(row => row.kind === 'message')).toMatchObject([{ data: { content: [{ type: 'text', text: 'final' }], metadata: { label: 'kept' }, ended: false } }])
       expect((yield* store.messages('folio')).filter(row => row.kind === 'tool_call')).toMatchObject([{ data: { title: 'Command', rawInput: { command: 'echo hello' }, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'full output' } }] } }])
       yield* store.appendUpdate(event(8, { sessionUpdate: 'agent_message', messageId: 'message', content: null, _meta: null }))
       yield* store.appendUpdate(event(9, { sessionUpdate: 'tool_call_update', toolCallId: 'tool', content: null, title: null }))
-      expect(yield* store.messages('folio')).toMatchObject([{ data: { content: [], metadata: null } }])
+      expect((yield* store.messages('folio')).filter(row => row.kind === 'message')).toMatchObject([{ data: { content: [], metadata: null } }])
       expect((yield* store.messages('folio')).filter(row => row.kind === 'tool_call')).toMatchObject([{ data: { content: null, title: null, status: 'completed' } }])
       const sql = yield* SqlClient.SqlClient
       const raw = yield* sql`SELECT data AS payload FROM messages WHERE kind='acp_update' AND source_sequence=7`

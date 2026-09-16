@@ -1,3 +1,5 @@
+import { protocolTestSink } from './testing/execution-event-sink'
+import { ExecutionEventSink } from './execution-event-sink'
 import { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Layer } from 'effect'
@@ -32,7 +34,7 @@ function sessionOptions() {
 }
 /** Ledger/services persist across separate process and connection scopes. */
 function layer() {
-  return Layer.mergeAll(TaskWorktrees.layer(root).pipe(Layer.provideMerge(HarnessStore.layer)), HarnessEventStore.layer).pipe(Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
+  return protocolTestSink.pipe(Layer.provideMerge(Layer.mergeAll(TaskWorktrees.layer(root).pipe(Layer.provideMerge(HarnessStore.layer)), HarnessEventStore.layer)), Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
 const setup = Effect.gen(function*() {
   const store = yield* HarnessStore
@@ -75,10 +77,11 @@ describe.skipIf(process.platform === 'win32')('harness ACP client over productio
     await Effect.runPromise(Effect.gen(function*() {
       yield* setup
       const events = yield* HarnessEventStore
+      const sink = yield* ExecutionEventSink
       let entered = false
       let finalized = false
       const session = yield* openHarnessSession({ ...sessionOptions(), requestTimeoutMs: 3000 }).pipe(
-        Effect.provideService(HarnessEventStore, { ...events, appendProtocol: frame =>
+        Effect.provideService(ExecutionEventSink, { ...sink, appendProtocol: frame =>
           frame.direction === 'outbound' && frame.associations.some(item => item.method === 'session/prompt')
             ? Effect.sync(() => { entered = true }).pipe(Effect.andThen(Effect.never),
               Effect.ensuring(Effect.sleep(50).pipe(Effect.andThen(Effect.sync(() => { finalized = true })))))

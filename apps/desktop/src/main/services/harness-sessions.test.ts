@@ -1,3 +1,4 @@
+import { protocolTestSink } from './testing/execution-event-sink'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Fiber, Layer, ManagedRuntime } from 'effect'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -29,6 +30,7 @@ function runtime(entrypoint = resolve('../../packages/agent/dist/cli.js')) {
   return ManagedRuntime.make(HarnessSessions.layer({ nodeExecutable: process.execPath, entrypoint,
     configDirectory: root, agentDirectory: join(root, 'agent'), sessionStorageDirectory: join(root, 'vault-history'), codexExecutable: join(root, 'codex')
   }).pipe(
+    Layer.provide(protocolTestSink),
     Layer.provideMerge(TaskWorktrees.layer(root)),
     Layer.provideMerge(Layer.merge(HarnessStore.layer, HarnessEventStore.layer)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer)

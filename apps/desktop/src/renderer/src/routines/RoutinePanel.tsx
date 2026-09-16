@@ -17,7 +17,7 @@ import {
   WorkflowIcon,
   ZapIcon
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { RoutineExecution, RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
@@ -374,6 +374,7 @@ function RoutineDetail({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [promptOpen, setPromptOpen] = useState(false)
+  const runRequest = useRef<{ routineId: string; requestId: string } | null>(null)
   const dates = useMemo(() => {
     const datesWithRows = executions.map((row) => row.routineDate)
     return [...new Set([...datesWithRows, ...deriveGapDates(executions)])].sort().reverse()
@@ -387,8 +388,13 @@ function RoutineDetail({
     setBusy(true)
     setMessage('')
     try {
-      await (kind === 'run' ? run : prepare)({ payload: { input: { routineId: record.id } } })
-      setMessage(chinese ? '已登记执行；后续触发会合并到同一执行记录。' : 'Execution recorded. Later triggers will coalesce into the same window.')
+      if (kind === 'run') {
+        if (runRequest.current?.routineId !== record.id) runRequest.current = { routineId: record.id, requestId: crypto.randomUUID() }
+        await run({ payload: { input: runRequest.current } })
+        runRequest.current = null
+      } else await prepare({ payload: { input: { routineId: record.id } } })
+      setMessage(kind === 'run' ? (chinese ? '执行请求已提交，等待调度。' : 'Execution queued. Waiting for scheduling.')
+        : (chinese ? '任务已准备，可提交执行。' : 'Task prepared. Ready to submit.'))
       refresh()
     } catch {
       setMessage(chinese ? '执行未确认，请重试。' : 'Execution was not confirmed. Retry.')

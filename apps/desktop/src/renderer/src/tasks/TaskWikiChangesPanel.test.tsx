@@ -228,9 +228,12 @@ it('shows conflict evidence and retries the fixed-Agent resolution Run with stab
   mocks.operations = [{ id: 'conflict-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  render(<TaskWikiChangesPanel taskId="task" />)
+  const panel = render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getAllByText('wiki/one.md').length).toBeGreaterThan(1)
   expect(screen.getByText('Resolved note')).toBeTruthy()
+  expect((screen.getByRole('button', { name: 'Start conflict-resolution Run' }) as HTMLButtonElement).disabled).toBe(true)
+  mocks.detail.runs[0]!.state = 'interrupted'
+  panel.rerender(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   const request = mocks.startConflict.mock.calls[0]![0]

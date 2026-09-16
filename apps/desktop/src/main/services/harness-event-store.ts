@@ -126,11 +126,11 @@ export class HarnessEventStore extends Context.Service<HarnessEventStore, {
     /** Read decoded transport observations without replaying them into UI projections. */
     const protocol = Effect.fn('HarnessEventStore.protocol')((sessionId: string) => sql`SELECT first_sequence AS sequence,
       session_id AS sessionId, json_extract(data, '$.connectionId') AS connectionId,
-      json_extract(data, '$.direction') AS direction, json_extract(data, '$.payload') AS payload,
+      json_extract(data, '$.direction') AS direction, json_quote(json_extract(data, '$.payload')) AS payload,
       json_extract(data, '$.associations') AS associations, json_extract(data, '$.protocolVersion') AS protocolVersion,
       received_at AS receivedAt FROM messages WHERE session_id=${sessionId} AND kind='protocol' ORDER BY first_sequence`.pipe(
       Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({
-        ...ProtocolFrame.fields, payload: Schema.Json, associations: Schema.Array(ProtocolAssociation)
+        ...ProtocolFrame.fields, payload: Schema.fromJsonString(Schema.Json), associations: Schema.fromJsonString(Schema.Array(ProtocolAssociation))
       })))), Effect.mapError(safeError))
     )
     /** Persists only bounded malformed-wire metadata; raw bytes never enter the Vault. */

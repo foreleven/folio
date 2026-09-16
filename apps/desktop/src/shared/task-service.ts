@@ -1,3 +1,4 @@
+import type { ExecutionRequest } from './execution'
 import { Context, Effect } from 'effect'
 import type { HarnessStoreError, SessionRecord, TaskRecord, RunRecord } from './harness'
 import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution } from './routine'
@@ -38,6 +39,9 @@ export class TaskService extends Context.Service<
     readonly abortTaskWikiConflict: (taskId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly pendingTaskSynchronizations: (taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
+    readonly claimExecution: (owner: string) => Effect.Effect<ExecutionRequest | null, HarnessStoreError>
+    readonly recoverExecutionState: Effect.Effect<number, HarnessStoreError>
+    readonly executeRequest: (request: ExecutionRequest) => Effect.Effect<void, HarnessStoreError>
     readonly tickRoutines: Effect.Effect<void, HarnessStoreError>
     readonly list: Effect.Effect<readonly TaskRecord[], HarnessStoreError>
     readonly allRoutineExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
@@ -53,10 +57,10 @@ export class TaskService extends Context.Service<
     readonly reopen: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly get: (id: string) => Effect.Effect<TaskDetail, HarnessStoreError>
     readonly history: (taskId: string, sessionId: string) => Effect.Effect<SessionHistory, HarnessStoreError>
-    readonly startRun: (input: StartTaskRunInput) => Effect.Effect<RunRecord, HarnessStoreError>
-    readonly startConflictResolution: (input: StartConflictResolutionInput) => Effect.Effect<RunRecord, HarnessStoreError>
+    readonly startRun: (input: StartTaskRunInput) => Effect.Effect<ExecutionRequest, HarnessStoreError>
+    readonly startConflictResolution: (input: StartConflictResolutionInput) => Effect.Effect<ExecutionRequest | RunRecord, HarnessStoreError>
     readonly inspectRun: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>
-    readonly cancelRun: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>
+    readonly cancelRun: (taskId: string, runId: string) => Effect.Effect<ExecutionRequest | RunRecord, HarnessStoreError>
     readonly openSession: (input: OpenTaskSessionInput) => Effect.Effect<SessionRecord, HarnessStoreError>
     readonly closeSession: (taskId: string, sessionId: string) => Effect.Effect<void, HarnessStoreError>
   }

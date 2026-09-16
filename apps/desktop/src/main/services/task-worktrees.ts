@@ -29,6 +29,7 @@ export class TaskWorktrees extends Context.Service<
   TaskWorktrees,
   {
     readonly create: (input: TaskDraft) => Effect.Effect<TaskCheckout, HarnessStoreError>
+    readonly reserve: (input: TaskDraft) => Effect.Effect<void, HarnessStoreError>
     readonly ensure: (taskId: string) => Effect.Effect<TaskCheckout, HarnessStoreError>
     readonly complete: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     /** Reopens a released manual Task from the current registered main without rewriting history. */
@@ -135,6 +136,13 @@ export class TaskWorktrees extends Context.Service<
           const registered = Effect.fn('TaskWorktrees.registeredForRelease')(function* () {
             return (yield* git(main, ['worktree', 'list', '--porcelain'])).split('\n').some((line) => line === `worktree ${path}`)
           })
+          // A Task cancelled before its first dispatch has no checkout or baseline to release.
+          if (task.worktreeBase === null && (task.worktreeState === 'pending' || task.worktreeState === 'released')) {
+            if ((yield* fs.exists(path)) || (yield* registered())) return yield* invalid()
+            if ((yield* sql`SELECT id FROM execution_requests WHERE task_id=${taskId} AND ended_at IS NULL`).length) return yield* invalid()
+            yield* sql`UPDATE tasks SET state='completed', worktree_state='released' WHERE id=${taskId}`
+            return yield* store.task(taskId)
+          }
           const base = yield* Schema.decodeUnknownEffect(Commit)(task.worktreeBase).pipe(Effect.mapError(invalid))
           const synchronized = yield* sql<{ alignedHead: string }>`SELECT aligned_head AS alignedHead FROM git_sync_operations
             WHERE task_id=${taskId} AND state='aligned' ORDER BY sequence DESC LIMIT 1`
@@ -210,6 +218,10 @@ export class TaskWorktrees extends Context.Service<
           if (yield* fs.exists(path)) return yield* invalid()
           const registered = (yield* git(main, ['worktree', 'list', '--porcelain'])).split('\n').some((line) => line === `worktree ${path}`)
           if (registered) return yield* invalid()
+          if (task.worktreeBase === null) {
+            yield* sql`UPDATE tasks SET state='active', worktree_state='pending' WHERE id=${taskId} AND state='completed'`
+            return yield* ensureLocked(taskId)
+          }
           if (
             (yield* fs.realPath(main)) !== main ||
             (yield* fs.realPath(join(main, '.git'))) !== join(main, '.git') ||
@@ -263,12 +275,12 @@ export class TaskWorktrees extends Context.Service<
         const reopen = (taskId: string) => lock.withLock(reopenLocked(taskId))
 
         /** Persists Task identity before touching Git so failed creation can be retried by the same ID. */
-        const create = Effect.fn('TaskWorktrees.create')(function* (input: TaskDraft) {
+        const reserve = Effect.fn('TaskWorktrees.reserve')(function* (input: TaskDraft) {
           const value = yield* Schema.decodeUnknownEffect(Draft)(input)
           yield* store.createTask({ ...value, branch: `folio/task/${value.id}`, worktree: join(parent, value.id) })
-          return yield* ensure(value.id)
         }, Effect.mapError(storage))
-        return TaskWorktrees.of({ create, ensure, complete, reopen })
+        const create = (input: TaskDraft) => reserve(input).pipe(Effect.andThen(ensure(input.id)))
+        return TaskWorktrees.of({ create, reserve, ensure, complete, reopen })
       }).pipe(Effect.mapError(storage))
     ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
   }

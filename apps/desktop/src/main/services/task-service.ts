@@ -1,9 +1,16 @@
+import { ExecutionEventSink } from './execution-event-sink'
+import { recoverExecutions } from './execution-recovery'
+import agentPackage from '../../../../../packages/agent/package.json'
+import { ExecutionQueue } from './execution-queue'
+import { ExecutionNotifications } from './execution-scheduler'
+import { SqlClient } from 'effect/unstable/sql'
+import type { ExecutionRequest } from '../../shared/execution'
 import { TaskService } from '../../shared/task-service'
 import { RoutineStore } from './routine-store'
 import type { RunRoutine, SaveRoutine } from '../../shared/routine'
 import { HarnessRuns } from './harness-runs'
 import { ModelService } from './model-service'
-import { DateTime, Effect, Layer, Schema, Semaphore } from 'effect'
+import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema, Semaphore } from 'effect'
 import { dirname, join } from 'node:path'
 import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -12,7 +19,6 @@ import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInpu
 import { HarnessStore } from './harness-store'
 import { IntegrationService } from './integration-service'
 import { TaskWorktrees } from './task-worktrees'
-import { AgentRuntime } from './agent-runtime'
 import { HarnessSessions } from './harness-sessions'
 import { HarnessEventStore } from './harness-event-store'
 import { GitChangeApplications } from './git-change-applications'
@@ -118,9 +124,13 @@ export const TaskServiceLive = Layer.effect(
     const store = yield* HarnessStore
     const worktrees = yield* TaskWorktrees
     const sessions = yield* HarnessSessions
-    const runtime = yield* AgentRuntime
+    const queue = yield* ExecutionQueue
+    const sink = yield* ExecutionEventSink
+    const notifications = yield* ExecutionNotifications
+    const sql = yield* SqlClient.SqlClient
     const integrations = yield* IntegrationService
     const gate = yield* Semaphore.make(1)
+    const ownedExecutions = new Set<string>()
     /** The caller retains its UUID for retry; a lost reply must not allocate another Task/worktree. */
     const create = Effect.fn('TaskService.create')(function* (input: CreateTaskInput) {
       const integrationIds = [...new Set(input.integrationIds ?? [])].sort()
@@ -142,38 +152,22 @@ export const TaskServiceLive = Layer.effect(
           JSON.stringify(previous.configuration.resourceIds ?? []) !== JSON.stringify(resourceIds)
         )
           return yield* failure('invalid-state')
-        // A successful request retry is read-only once the Task has left creation. In
-        // particular, completion must not recreate a deliberately released worktree.
-        if (previous.state === 'active' && previous.worktreeState !== 'ready') yield* worktrees.ensure(input.id)
+        // Retrying admission must never create resources or revive a completed Task.
       } else {
-        if (integrationIds.length) {
-          const available = yield* integrations.list.pipe(Effect.mapError(safeError))
-          if (integrationIds.some((id) => !available.some((view) => view.id === id && !view.busy && view.record && view.states[view.record.state]?.kind === 'ready')))
-            return yield* failure('invalid-state')
-          if (
-            resourceIds.some((reference) => {
-              const separator = reference.indexOf('/')
-              const integrationId = separator > 0 ? reference.slice(0, separator) : ''
-              const resourceId = separator > 0 ? reference.slice(separator + 1) : ''
-              const view = available.find((candidate) => candidate.id === integrationId)
-              return !view || !view.resources.some((resource) => resource.id === resourceId) || !view.record?.resources.some((resource) => resource.id === resourceId)
-            })
-          )
-            return yield* failure('invalid-state')
-        }
-        yield* worktrees.create({ id: input.id, goal: input.goal, configuration: { agent: input.agent, skillIds: [], integrationIds, resourceIds } })
+        // Capability health is checked by TaskResources inside the Worker, after admission.
+        yield* worktrees.reserve({ id: input.id, goal: input.goal, configuration: { agent: input.agent, skillIds: [], integrationIds, resourceIds } })
       }
       return yield* store.task(input.id)
-    }, gate.withPermit)
+    })
     /** Checks Task ownership before returning its independent execution histories. */
     const get = Effect.fn('TaskService.get')(function* (id: string) {
-      return { routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
+      return { executions: yield* queue.list(id), routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
     })
     /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
     const completeUnlocked = Effect.fn('TaskService.completeUnlocked')(function* (taskId: string) {
       const task = yield* store.task(taskId)
       const history = yield* store.runs(taskId)
-      if (history.some((run) => run.state === 'preparing' || run.state === 'running'))
+      if ((yield* queue.list(taskId)).some(request => request.endedAt === null) || history.some((run) => run.state === 'preparing' || run.state === 'running'))
         return yield* new HarnessStoreError({ reason: 'task-busy', message: 'Stop the active Run before completing this Task.' })
       if (task.state === 'active' && history.some((run) => run.state === 'succeeded' && run.syncState !== 'completed' && run.syncState !== 'not-required'))
         return yield* failure('invalid-state')
@@ -201,7 +195,7 @@ export const TaskServiceLive = Layer.effect(
         yield* worktrees.complete(taskId)
         return
       }
-      if (task.state !== 'active') return
+      if (task.state !== 'active' || (yield* queue.list(taskId)).some(request => request.endedAt === null)) return
       let history = yield* store.runs(taskId)
       // Routine prompts are source-ingestion prompts. Automatically close the
       // wiki receipt when no wiki files changed; an actual wiki edit still
@@ -243,7 +237,6 @@ export const TaskServiceLive = Layer.effect(
         )
           return yield* failure('invalid-state')
       } else {
-        const paths = yield* runtime.get.pipe(Effect.mapError(safeError))
         if ((input.agent === 'pi') !== (input.model !== undefined)) return yield* failure('invalid-state')
         const modelProfile = input.model
           ? yield* models.resolveSessionModel(input.model).pipe(Effect.mapError((error) => new HarnessStoreError({ reason: 'invalid-state', message: error.message })))
@@ -252,7 +245,7 @@ export const TaskServiceLive = Layer.effect(
           id: input.sessionId,
           taskId: input.taskId,
           agent: input.agent,
-          adapterVersion: paths.agentVersion,
+          adapterVersion: agentPackage.version,
           purpose: 'task',
           syncOperationId: null,
           modelProfile
@@ -261,7 +254,6 @@ export const TaskServiceLive = Layer.effect(
     })
     const openSession = Effect.fn('TaskService.openSession')(function* (input: OpenTaskSessionInput) {
       yield* prepareSession(input)
-      yield* sessions.open(input.taskId, input.sessionId)
       const saved = (yield* store.sessions(input.taskId)).find((session) => session.id === input.sessionId)
       if (!saved) return yield* failure('not-found')
       return saved
@@ -281,6 +273,13 @@ export const TaskServiceLive = Layer.effect(
       const savedSessions = yield* store.sessions(task.id)
       const source = savedSessions.find((session) => session.id === input.sourceSessionId)
       if (!source || source.purpose !== 'task' || source.agent !== task.configuration.agent) return yield* failure('invalid-state')
+      const existingRequest = (yield* queue.list(task.id)).find(request => request.id === input.runId)
+      if (existingRequest) {
+        const target = savedSessions.find(session => session.id === input.sessionId)
+        if (existingRequest.sessionId !== input.sessionId || existingRequest.purpose !== 'conflict-resolution' || target?.syncOperationId !== operation.id) return yield* failure('invalid-state')
+        return existingRequest
+      }
+      if ((yield* queue.list(task.id)).some(request => request.purpose === 'conflict-resolution' && request.endedAt === null)) return yield* failure('task-busy')
       const previousRun = (yield* store.runs(task.id)).find((run) => run.id === input.runId)
       if (previousRun) {
         if (previousRun.sessionId !== input.sessionId || previousRun.purpose !== 'conflict-resolution' || previousRun.resumesRunId !== null) return yield* failure('invalid-state')
@@ -304,12 +303,11 @@ export const TaskServiceLive = Layer.effect(
         )
           return yield* failure('invalid-state')
       } else {
-        const paths = yield* runtime.get.pipe(Effect.mapError(safeError))
         yield* store.createSession({
           id: input.sessionId,
           taskId: task.id,
           agent: source.agent,
-          adapterVersion: paths.agentVersion,
+          adapterVersion: agentPackage.version,
           purpose: 'conflict-resolution',
           syncOperationId: operation.id,
           modelProfile: source.modelProfile ?? null
@@ -336,15 +334,10 @@ export const TaskServiceLive = Layer.effect(
         'Finish only after every conflict is resolved in the working files. Folio will validate, stage, publish, and align the result.'
       ].join('\n')
       const intent = { id: input.runId, taskId: task.id, sessionId: input.sessionId, prompt, purpose: 'conflict-resolution' as const, resumesRunId: null }
-      return yield* runs.start(intent, (terminal) =>
-        terminal.state === 'succeeded'
-          ? synchronization.acceptAgentResolution(task.id, operation.id, terminal.id).pipe(
-              Effect.tap((settled) => (settled.state === 'aligned' ? completeRoutineAfterReceipt(task.id) : Effect.void)),
-              Effect.asVoid
-            )
-          : Effect.void
-      )
-    }, gate.withPermit)
+      const request = yield* queue.submit({ ...intent, source: 'conflict-resolution' })
+      yield* notifications.wake
+      return request
+    }, sql.withTransaction, Effect.mapError(safeError), gate.withPermit)
     /** Save definitions offline; capability health is checked when a Task actually prepares execution. */
     const saveRoutine = Effect.fn('TaskService.saveRoutine')(function* (input: SaveRoutine) {
       // Independent Skill selection is not mounted yet; refusing it avoids silently dropping intent.
@@ -431,20 +424,73 @@ export const TaskServiceLive = Layer.effect(
       return { execution: attached, task }
     })
     const runRoutine = Effect.fn('TaskService.runRoutine')(function* (input: RunRoutine) {
+      if (input.requestId) {
+        const previous = yield* queue.get(input.requestId).pipe(Effect.catchTag('HarnessStoreError', error => error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error)))
+        if (previous) {
+          const execution = yield* routines.executionForTask(previous.taskId)
+          if (!execution || execution.routineId !== input.routineId || previous.source !== 'routine') return yield* failure('invalid-state')
+          return { execution, task: yield* store.task(previous.taskId), run: previous }
+        }
+      }
       const { execution, task } = yield* prepareRoutine(input)
+      const pending = (yield* queue.list(task.id)).find(request => request.endedAt === null)
+      if (pending) return { execution, task, run: pending }
       const routine = yield* routines.get(input.routineId)
       const sessionId = randomUUID()
-      const runId = randomUUID()
+      const runId = input.requestId ?? randomUUID()
       const windowStart = execution.windowStart ?? Math.min(execution.triggerTime, execution.firstTriggerTime - routine.intervalMinutes * 60_000)
       const windowEnd = execution.windowEnd ?? execution.triggerTime
       const prompt = `${routine.prompt}\n\nRoutine execution window (use these exact ISO timestamps for extraction):\n- start: ${new Date(windowStart).toISOString()}\n- end: ${new Date(windowEnd).toISOString()}`
-      yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) }).pipe(gate.withPermit)
-      yield* routines.setStatus(task.id, 'preparing')
-      const run = yield* runs.start({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null }, (terminal) =>
-        routines.setStatus(task.id, terminal.state).pipe(Effect.andThen(terminal.state === 'succeeded' ? completeRoutineAfterReceipt(task.id) : Effect.void))
-      )
+      yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) })
+      const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
       return { execution, task, run }
+    }, sql.withTransaction, Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
+    /** Replayable post-processing is derived from durable requests, never an in-memory callback. */
+    const settleSuccessfulExecution = (request: ExecutionRequest) => Effect.gen(function* () {
+      if (request.purpose === 'conflict-resolution') {
+        const session = (yield* store.sessions(request.taskId)).find(value => value.id === request.sessionId)
+        if (!session?.syncOperationId) return yield* failure('invalid-state')
+        const operation = yield* synchronization.get(session.syncOperationId)
+        if (operation.state === 'conflict' || operation.state === 'resolving') {
+          yield* synchronization.acceptAgentResolution(request.taskId, session.syncOperationId, request.id)
+        }
+      }
+      yield* completeRoutineAfterReceipt(request.taskId)
     })
+    /** A global slot is held until Run cleanup and the durable terminal receipt both complete. */
+    const executeRequest = (request: ExecutionRequest) => Effect.uninterruptibleMask(restore => Effect.gen(function* () {
+      yield* sink.flush
+      const current = yield* queue.get(request.id)
+      if (current.owner !== request.owner || current.state !== 'preparing' || !request.owner) return yield* failure('invalid-state')
+      const result = yield* restore(Effect.gen(function* () {
+        if (current.cancelRequested) return
+        const worker = yield* runs.execute(request).pipe(Effect.forkScoped)
+        yield* Effect.gen(function* () {
+          while (true) {
+            const latest = yield* queue.get(request.id)
+            if (latest.cancelRequested) {
+              // Preserve the user's cancellation outcome in the Run ledger as well. A failure
+              // before Run reservation has no Run to read, but its worker still must be joined.
+              yield* runs.cancel(request.taskId, request.id).pipe(Effect.catch(() => Effect.void))
+              yield* Fiber.interrupt(worker)
+              return
+            }
+            yield* Effect.sleep(100)
+          }
+        }).pipe(Effect.forkScoped)
+        yield* Fiber.join(worker)
+      }).pipe(Effect.scoped, Effect.exit))
+      const latest = yield* queue.get(request.id)
+      const run = (yield* store.runs(request.taskId)).find(value => value.id === request.id)
+      // Missing terminal receipts require archive reconciliation. Ending the request here
+      // would hide an active Run from restart recovery and release its durable reservation.
+      if (run?.state === 'preparing' || run?.state === 'running') return yield* failure('invalid-state')
+      const outcome = run?.state === 'succeeded' ? 'succeeded' : latest.cancelRequested ? 'cancelled'
+        : run ? run.state
+        : Exit.isFailure(result) && Cause.hasInterrupts(result.cause) ? 'interrupted' : 'failed'
+      yield* sink.finishRequest(request, outcome, outcome === 'failed' ? 'Agent preparation or execution failed. Inspect the saved execution before retrying.' : undefined)
+      if (outcome === 'succeeded') yield* settleSuccessfulExecution(request)
+    })).pipe(Effect.ensuring(Effect.sync(() => { ownedExecutions.delete(request.id) })))
     const dispatchRoutine = Effect.fn('TaskService.dispatchRoutine')(function* (id: string) {
       return yield* runRoutine({ routineId: id })
     })
@@ -459,6 +505,9 @@ export const TaskServiceLive = Layer.effect(
       const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
       for (const routine of yield* routines.list) {
         if (!routine.enabled || (routine.nextTriggerAt !== null && routine.nextTriggerAt > current)) continue
+        // A failed/uncertain execution needs an explicit retry; a timer must not replay its
+        // prompt after an Agent may already have produced external effects.
+        if ((yield* routines.executions(routine.id)).some(execution => ['failed', 'interrupted', 'cancelled'].includes(execution.status))) continue
         yield* dispatchRoutine(routine.id).pipe(Effect.catch(() => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.')))
       }
     }).pipe(Effect.mapError(safeError))
@@ -480,7 +529,23 @@ export const TaskServiceLive = Layer.effect(
       tickRoutines,
       dispatchRoutine,
       runRoutine,
-      prepareRoutine,
+      executeRequest,
+      recoverExecutionState: Effect.gen(function* () {
+        yield* recoverExecutions({ owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        return (yield* queue.list()).filter(request => request.state !== 'queued' && request.endedAt === null && !ownedExecutions.has(request.id)).length
+      }).pipe(gate.withPermit, Effect.mapError(safeError), Effect.tap(() => Effect.gen(function* () {
+        for (const request of yield* queue.list()) {
+          if (request.state === 'succeeded') yield* settleSuccessfulExecution(request).pipe(
+            Effect.catch(() => Effect.logWarning('Execution post-processing remains pending for a later recovery sweep.')))
+        }
+      }))),
+      claimExecution: owner => Effect.gen(function* () {
+        yield* recoverExecutions({ owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        const request = yield* queue.claim(owner)
+        if (request) ownedExecutions.add(request.id)
+        return request
+      }).pipe(gate.withPermit, Effect.uninterruptible, Effect.mapError(safeError)),
+      prepareRoutine: (input) => prepareRoutine(input).pipe(sql.withTransaction, Effect.mapError(safeError), gate.withPermit),
       routineExecutions: routines.executions,
       allRoutineExecutions: routines.allExecutions,
       routines: ensureDefaultRoutines().pipe(Effect.andThen(routines.list)),
@@ -507,16 +572,23 @@ export const TaskServiceLive = Layer.effect(
       taskSynchronization: synchronization.get,
       history,
       list: store.tasks,
-      create: (input) => create(input),
+      create: (input) => create(input).pipe(gate.withPermit),
       complete,
       reopen,
       get,
       openSession,
       closeSession: sessions.close,
-      startRun: runs.start,
+      startRun: (input) => queue.submit({ ...input, source: input.purpose === 'recovery' ? 'recovery' : 'manual' }).pipe(gate.withPermit, Effect.tap(() => notifications.wake)),
       startConflictResolution,
       inspectRun: runs.inspect,
-      cancelRun: runs.cancel
+      cancelRun: (taskId, runId) => Effect.gen(function* () {
+        const request = (yield* queue.list(taskId)).find(value => value.id === runId)
+        if (!request) return yield* runs.cancel(taskId, runId)
+        const cancelled = yield* queue.cancel(runId)
+        yield* notifications.wake
+        if (cancelled.state === 'cancelled' && (yield* routines.executionForTask(taskId))) yield* routines.setStatus(taskId, 'cancelled')
+        return cancelled
+      })
     })
   })
 )

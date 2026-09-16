@@ -4,8 +4,9 @@ import { Effect, Exit, Scope } from 'effect'
 import { openAgentProcess, type AgentProcessOptions } from './agent-process'
 import { openHarnessAcpClient, type HarnessAcpClientOptions } from './harness-acp-client'
 import { HarnessStore } from './harness-store'
-import { HarnessEventStore } from './harness-event-store'
+import { ExecutionEventSink } from './execution-event-sink'
 import { HarnessStoreError } from '../../shared/harness'
+import { hasExecutionProcess } from './execution-recovery'
 
 export interface HarnessSessionOptions extends Omit<AgentProcessOptions, 'agent' | 'cwd' | 'modelProfile' | 'runtimeDirectory' | 'onMalformedInput'> {
   readonly taskId: string
@@ -29,10 +30,15 @@ export const openHarnessSession = Effect.fn('HarnessSession.open')(function*(opt
   const cwd = options.cwd ?? (session.purpose === 'task' ? task.worktree : null)
   if (!cwd) return yield* new HarnessStoreError({ reason: 'invalid-state', message: 'This Session execution target was not resolved.' })
   const scope = yield* Scope.make()
-  const events = yield* HarnessEventStore
+  const events = yield* ExecutionEventSink
   const connectionId = randomUUID()
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
   return yield* Effect.gen(function*() {
+    let pid: number | undefined
+    // Registered before the process/client finalizers, so this receipt follows their cleanup.
+    yield* Effect.addFinalizer(() => pid !== undefined && !hasExecutionProcess(pid) ? events.processStopped(session.id).pipe(
+      Effect.catch(() => Effect.logWarning('Process stopped; its durable receipt needs projection retry.'))
+    ) : Effect.void)
     const process = yield* openAgentProcess({
       nodeExecutable: options.nodeExecutable, entrypoint: options.entrypoint, configDirectory: options.configDirectory,
       agentDirectory: options.agentDirectory, codexExecutable: options.codexExecutable,
@@ -47,6 +53,9 @@ export const openHarnessSession = Effect.fn('HarnessSession.open')(function*(opt
         sessionId: session.id, connectionId, direction: 'inbound', diagnostic
       }))
     })
+    pid = process.pid
+    // No ACP handshake/native Session may start before the process identity is durable.
+    yield* events.processStarted(session.id, process.pid)
     const client = yield* openHarnessAcpClient({
       stream: process.stream, taskId: task.id, sessionId: session.id, cwd, onUpdate: options.onUpdate,
       requestTimeoutMs: options.requestTimeoutMs, connectionId

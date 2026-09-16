@@ -4,18 +4,38 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HarnessStoreError } from '../../../shared/harness'
 import { TaskConversation } from './TaskConversation'
 
-const mocks = vi.hoisted(() => ({ start: vi.fn(), inspect: vi.fn(), cancel: vi.fn(), refresh: vi.fn(), runs: [] as unknown[], messages: [] as unknown[] }))
+const mocks = vi.hoisted(() => ({ start: vi.fn(), inspect: vi.fn(), cancel: vi.fn(), refresh: vi.fn(), runs: [] as unknown[], executions: [] as unknown[], messages: [] as unknown[] }))
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
   useAtomSet: (atom: string) => atom === 'start' ? mocks.start : atom === 'inspect' ? mocks.inspect : mocks.cancel,
-  useAtomValue: (atom: string) => ({ _tag: 'Success', value: atom === 'tasks.get' ? { runs: mocks.runs } : { messages: mocks.messages, tools: [] } })
+  useAtomValue: (atom: string) => ({ _tag: 'Success', value: atom === 'tasks.get' ? { runs: mocks.runs, executions: mocks.executions } : { messages: mocks.messages, tools: [] } })
 }))
 vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { startRun: 'start', inspectRun: 'inspect', cancelRun: 'cancel', query: (method: string) => method } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
-afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.messages = [] })
+afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.executions = []; mocks.messages = [] })
 const view = () => render(<TaskConversation taskId="task" sessionId="session" />)
 
 describe('Task conversation', () => {
+  it('renders and cancels a queued request before any Run exists', async () => {
+    mocks.executions = [{ id: 'queued', sessionId: 'session', state: 'queued', prompt: 'Read notes', endedAt: null }]
+    view()
+    expect(screen.getByText(/Queued/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Inspect run' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Cancel queued run' })) })
+    expect(mocks.cancel).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: 'queued' } })
+    expect(mocks.start).not.toHaveBeenCalled()
+  })
+
+  it('shows startup failure and retries with a new request without inventing Run recovery history', async () => {
+    mocks.executions = [{ id: 'failed-start', sessionId: 'session', state: 'failed', prompt: 'Read notes', endedAt: 1, error: 'Runtime unavailable' }]
+    view()
+    expect(screen.getByRole('alert').textContent).toBe('Runtime unavailable')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue from this run' }))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })) })
+    expect(mocks.start.mock.calls[0]![0].payload).toMatchObject({ purpose: 'execution', resumesRunId: null, prompt: 'Read notes' })
+    expect(mocks.start.mock.calls[0]![0].payload.id).not.toBe('failed-start')
+  })
+
   it('explains Routine contention and retains the prompt for an explicit retry', async () => {
     mocks.start.mockRejectedValueOnce(new HarnessStoreError({ reason: 'routine-busy', message: 'Busy' }))
     view()

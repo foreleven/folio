@@ -1,3 +1,6 @@
+import { ExecutionEventLog } from './services/execution-event-log'
+import { GlobalExecutionSchedulerLive } from './services/global-execution-scheduler'
+import { ExecutionNotifications } from './services/execution-scheduler'
 import { RoutineSchedulerLive } from './services/routine-scheduler'
 import { NodeServices } from '@effect/platform-node'
 import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
@@ -108,11 +111,13 @@ export const application = Effect.gen(function*() {
 })
 
 /** Complete main-process layer with one shared Electron application boundary. */
-export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, RoutineSchedulerLive).pipe(
+export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, RoutineSchedulerLive, GlobalExecutionSchedulerLive).pipe(
   Layer.provide(VaultLauncher.layer),
   Layer.provideMerge(MainWindow.layer),
   Layer.provide(VaultService.layer),
   Layer.provide(VaultRuntime.layer),
+  Layer.provide(ExecutionNotifications.layer),
+  Layer.provide(ExecutionEventLog.layer),
   Layer.provide(VaultWindowContexts.layer),
   Layer.provide(IntegrationsLive),
   Layer.provide(ModelService.layer()),

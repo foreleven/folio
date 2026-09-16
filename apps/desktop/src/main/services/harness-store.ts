@@ -74,7 +74,7 @@ export class HarnessStore extends Context.Service<
         yield* sql.withTransaction(
           Effect.gen(function* () {
             const owner = yield* task(value.taskId)
-            if (owner.state !== 'active' || owner.worktreeState !== 'ready') return yield* failure('invalid-state')
+            if (owner.state !== 'active') return yield* failure('invalid-state')
             const active = yield* sql`SELECT id FROM runs WHERE task_id=${value.taskId} AND state IN ('preparing', 'running')`
             if (active.length) return yield* failure('task-busy')
             if (value.purpose === 'task' &&

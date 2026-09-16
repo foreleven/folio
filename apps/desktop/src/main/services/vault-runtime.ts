@@ -1,3 +1,8 @@
+import { ExecutionEventLog } from './execution-event-log'
+import { ExecutionEventSink } from './execution-event-sink'
+import { VaultExecutionEvents } from './vault-execution-events'
+import { ExecutionQueue } from './execution-queue'
+import { ExecutionNotifications } from './execution-scheduler'
 import { Context, Effect, FileSystem, Layer, LayerMap, Stream } from 'effect'
 import { join } from 'node:path'
 import { HarnessStoreError } from '../../shared/harness'
@@ -34,6 +39,8 @@ export class VaultRuntime extends Context.Service<
     VaultRuntime,
     Effect.gen(function* () {
       const config = yield* ConfigService
+      const eventLog = yield* ExecutionEventLog
+      const notifications = yield* ExecutionNotifications
       const fs = yield* FileSystem.FileSystem
       const runtime = yield* AgentRuntime
       const models = yield* ModelService
@@ -75,11 +82,15 @@ export class VaultRuntime extends Context.Service<
                     )
                   )
                 ),
+                Layer.provide(ExecutionEventSink.layer),
+                Layer.provide(VaultExecutionEvents.layer),
+                Layer.provide(Layer.succeed(ExecutionEventLog)(eventLog)),
                 Layer.provide(TaskResources.layer(directory)),
                 Layer.provide(TaskGitSynchronization.layer(directory)),
                 Layer.provide(Layer.succeed(IntegrationService)(integrations)),
                 Layer.provide(Layer.succeed(ConfigService)(config)),
-                Layer.provide(Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer, RoutineStore.layer)),
+                Layer.provide(Layer.succeed(ExecutionNotifications)(notifications)),
+                Layer.provide(Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer, RoutineStore.layer, ExecutionQueue.layer)),
                 Layer.provide(vaultDatabaseLayer(directory)),
                   Layer.provideMerge(Layer.succeed(VaultContext)(context)),
                 Layer.fresh

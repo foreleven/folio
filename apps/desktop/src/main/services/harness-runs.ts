@@ -1,3 +1,5 @@
+import { ExecutionEventSink } from './execution-event-sink'
+import { ExecutionQueue } from './execution-queue'
 import { RecordedUpdate } from '../../shared/harness-events'
 import { randomUUID } from 'node:crypto'
 import { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
@@ -14,7 +16,6 @@ import { join } from 'node:path'
 
 interface Entry {
   readonly input: RunIntent
-  readonly onTerminal?: (run: RunRecord) => Effect.Effect<void, HarnessStoreError>
   readonly ready: Deferred.Deferred<RunRecord, HarnessStoreError>
   lifetime: Fiber.Fiber<void>
   cancelled: boolean
@@ -39,7 +40,7 @@ function matches(left: RunIntent, right: RunIntent): boolean {
  * A tool that deliberately escapes into another process group remains outside this proof.
  */
 export class HarnessRuns extends Context.Service<HarnessRuns, {
-  readonly start: (input: RunIntent, onTerminal?: (run: RunRecord) => Effect.Effect<void, HarnessStoreError>) => Effect.Effect<RunRecord, HarnessStoreError>
+  readonly execute: (input: RunIntent) => Effect.Effect<RunRecord, HarnessStoreError>
   readonly inspect: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>
   readonly cancel: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>
 }>()('folio/services/HarnessRuns') {
@@ -48,6 +49,8 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     const store = yield* HarnessStore
     const sessions = yield* HarnessSessions
     const events = yield* HarnessEventStore
+    const sink = yield* ExecutionEventSink
+    const queue = yield* ExecutionQueue
     const worktrees = yield* TaskWorktrees
     const fs = yield* FileSystem.FileSystem
     const git = yield* makeVaultGit
@@ -64,7 +67,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     })
 
     /** Performs short admission checks; the worker and its cleanup do not hold the Vault gate. */
-    const begin = Effect.fn('HarnessRuns.begin')(function*(input: RunIntent, onTerminal?: Entry['onTerminal']) {
+    const begin = Effect.fn('HarnessRuns.begin')(function*(input: RunIntent) {
       if (shuttingDown) return yield* failure('invalid-state')
       const pending = entries.get(input.id)
       if (pending) {
@@ -79,7 +82,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
       }
       if ([...entries.values()].some(entry => entry.input.taskId === input.taskId)) return yield* failure('task-busy')
       const ready = yield* Deferred.make<RunRecord, HarnessStoreError>()
-      const entry: Entry = { input, onTerminal, ready, cancelled: false, lifetime: undefined! }
+      const entry: Entry = { input, ready, cancelled: false, lifetime: undefined! }
       let prompt: Promise<unknown> | undefined
       let opened = false
       const execute = Effect.gen(function*() {
@@ -122,6 +125,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         prompt = pendingPrompt
         const idle = yield* Effect.tryPromise({ try: () => pendingPrompt, catch: safeError })
         if (!SessionUpdate.isStateUpdate(idle.update) || idle.update.state !== 'idle') return yield* failure('invalid-state')
+        yield* sink.flush
         const tools = (yield* events.messages(input.sessionId)).filter(tool => tool.runId === input.id && tool.kind === 'tool_call')
         // An idle event cannot finish known tools whose terminal status has not been persisted.
         if (tools.some(tool => !['completed', 'failed'].includes(String(tool.data.status)))) return yield* failure('invalid-state')
@@ -141,15 +145,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
           const saved = opened ? (yield* store.runs(input.taskId)).find(run => run.id === input.id) : undefined
           if (saved && (saved.state === 'preparing' || saved.state === 'running')) {
             const outcome = Exit.isSuccess(exit) ? exit.value : entry.cancelled ? 'cancelled' : 'interrupted'
-            yield* store.finishRun(input.id, outcome, Exit.isFailure(exit) ? 'Execution stopped before a confirmed terminal result.' : undefined)
-          }
-          // Post-terminal work runs only after the ACP Session and every Folio-owned Agent
-          // process have exited. Its failure leaves the durable Run outcome and Git scene intact.
-          if (entry.onTerminal) {
-            const terminal = yield* read(input.taskId, input.id)
-            yield* entry.onTerminal(terminal).pipe(
-              Effect.catch(() => Effect.logWarning('Run post-processing could not finish; its durable inputs were retained for retry.'))
-            )
+            yield* sink.finishRun(input.id, outcome, Exit.isFailure(exit) ? 'Execution stopped before a confirmed terminal result.' : undefined)
           }
         })),
         Effect.catch(error => Deferred.fail(ready, safeError(error))),
@@ -181,6 +177,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     /** Explicit crash reconciliation never infers success or dispatches a recovery Prompt. */
     const inspect = Effect.fn('HarnessRuns.inspect')(function*(taskId: string, runId: string) {
       const run = yield* read(taskId, runId)
+      const queued = (yield* queue.list(taskId)).some(request => request.id === runId && request.endedAt === null)
       if (run.state !== 'preparing' && run.state !== 'running') return run
       if (shuttingDown || [...entries.values()].some(entry => entry.input.taskId === taskId)) return yield* failure('task-busy')
       return yield* sessions.withStoppedSession(taskId, run.sessionId, history => Effect.gen(function*() {
@@ -196,9 +193,13 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
             const receipt = yield* Schema.decodeUnknownEffect(RecordedUpdate)({ sessionId: run.sessionId, runId: null, connectionId,
               notification: { sessionId: saved.acpSessionId!, update,
                 _meta: { 'folio/eventSequence': index + 1 } } }).pipe(Effect.mapError(safeError))
-            yield* events.appendUpdate(receipt)
+            yield* (queued ? sink.appendUpdate(receipt) : events.appendUpdate(receipt))
           }
-          yield* store.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
+          if (queued) {
+            yield* sink.flush
+            yield* sink.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
+            yield* sink.flush
+          } else yield* store.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
         }
         return yield* read(taskId, runId)
       }))
@@ -211,7 +212,18 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     }))
     return HarnessRuns.of({
       inspect,
-      start: (input, onTerminal) => begin(input, onTerminal).pipe(Effect.flatMap(Deferred.await)),
+      // The Scheduler owns this wait. Interruption must stop and join the underlying process
+      // before it can release a global slot. There is no separate immediate-start endpoint.
+      execute: (input) => Effect.gen(function* () {
+        const ready = yield* begin(input)
+        const entry = entries.get(input.id)
+        return yield* Effect.gen(function* () {
+          yield* Deferred.await(ready)
+          if (entry) yield* Fiber.join(entry.lifetime)
+          yield* sink.flush
+          return yield* read(input.taskId, input.id)
+        }).pipe(Effect.ensuring(entry ? Fiber.interrupt(entry.lifetime) : Effect.void))
+      }),
       cancel: (taskId, runId) => beginCancel(taskId, runId).pipe(
         Effect.flatMap(fiber => fiber ? Fiber.join(fiber) : Effect.void), Effect.andThen(read(taskId, runId)))
     })

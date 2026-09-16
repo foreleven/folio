@@ -52,7 +52,7 @@ export function TaskSessions({ task }: { task: TaskRecord }): React.JSX.Element 
       await open({ payload: input })
       submitted.current = null
       setConversation(input.sessionId)
-      setMessage(chinese ? '会话已连接，尚未发送指令。' : 'Session connected. No prompt has been sent.')
+      setMessage(chinese ? '会话已创建，提交指令后排队执行。' : 'Session created. Submit a prompt to queue execution.')
     } catch {
       setMessage(chinese ? '无法连接会话。请检查 Provider、Agent 和所选集成；已有会话需先关闭连接，再重试。' : 'Could not connect. Check the Provider, Agent, and selected Integrations; close an existing connection before retrying.')
     } finally { busy.current = false; setPending(false); refresh() }

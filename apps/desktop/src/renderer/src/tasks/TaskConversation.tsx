@@ -35,8 +35,13 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
   const [routineBusy, setRoutineBusy] = useState(false)
   const busy = useRef(false)
   const submitted = useRef<StartTaskRunInput | null>(null)
-  const runs = detail._tag === 'Success' ? detail.value.runs : []
-  const active = runs.find(run => run.state === 'preparing' || run.state === 'running')
+  const savedRuns = detail._tag === 'Success' ? detail.value.runs : []
+  const requests = detail._tag === 'Success' ? detail.value.executions ?? [] : []
+  const runs = [
+    ...savedRuns.filter(run => !requests.some(request => request.id === run.id)),
+    ...requests.map(request => ({ ...request, syncState: savedRuns.find(run => run.id === request.id)?.syncState }))
+  ]
+  const active = runs.find(run => run.state === 'queued' || run.state === 'preparing' || run.state === 'running')
   const awaiting = awaitingId !== null && !runs.some(run => run.id === awaitingId && run.endedAt !== null)
 
   const lastEnded = runs.filter(run => run.sessionId === sessionId && run.endedAt !== null).at(-1)?.id
@@ -109,8 +114,8 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
   }
 
   const labels = chinese
-    ? { preparing: '准备中', running: '运行中', succeeded: '本轮结束', failed: '失败', interrupted: '已中断', cancelled: '已取消' }
-    : { preparing: 'Preparing', running: 'Running', succeeded: 'Turn ended', failed: 'Failed', interrupted: 'Interrupted', cancelled: 'Cancelled' }
+    ? { queued: '排队中', preparing: '准备中', running: '运行中', succeeded: '本轮结束', failed: '失败', interrupted: '已中断', cancelled: '已取消' }
+    : { queued: 'Queued', preparing: 'Preparing', running: 'Running', succeeded: 'Turn ended', failed: 'Failed', interrupted: 'Interrupted', cancelled: 'Cancelled' }
   const syncLabels = chinese
     ? { 'not-required': '无需同步', pending: '待保存同步', syncing: '同步中', conflict: '同步冲突', completed: '已同步', failed: '同步失败' }
     : { 'not-required': 'No wiki changes', pending: 'Needs save/sync', syncing: 'Syncing', conflict: 'Sync conflict', completed: 'Synced', failed: 'Sync failed' }
@@ -131,8 +136,9 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
         <summary>{typeof tool.data.title === 'string' ? tool.data.title : tool.id} · {String(tool.data.status ?? '')}</summary>
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.data, null, 2)}</pre>
       </details>) : null}
+      {run.error ? <p role="alert" className="text-support text-destructive">{run.error}</p> : null}
       {['failed', 'interrupted', 'cancelled'].includes(run.state) ? <Button variant="ghost" size="sm" disabled={pending || !!active}
-        onClick={() => setRecoveryId(run.id)}>{chinese ? '从这一轮继续' : 'Continue from this run'}</Button> : null}
+        onClick={() => { if (savedRuns.some(saved => saved.id === run.id)) setRecoveryId(run.id); else { setRecoveryId(null); setPrompt(run.prompt) } }}>{chinese ? '从这一轮继续' : 'Continue from this run'}</Button> : null}
     </article>)}
     {history._tag === 'Success' && history.value.messages.some(message => message.runId === null)
       ? <details className="text-ui" open><summary>{chinese ? '其他会话记录' : 'Other session history'}</summary>
@@ -147,8 +153,8 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
           onChange={event => setPrompt(event.target.value)} disabled={pending} required />
       </label>
       <div className="flex justify-end gap-2">
-        {active ? <Button type="button" variant="ghost" disabled={pending} onClick={() => void inspectRun(active.id)}>{chinese ? '检查运行状态' : 'Inspect run'}</Button> : null}
-        {active ? <Button type="button" variant="outline" disabled={pending} onClick={() => void stop(active.id)}>{chinese ? '停止运行' : 'Stop run'}</Button> : null}
+        {active && savedRuns.some(run => run.id === active.id) ? <Button type="button" variant="ghost" disabled={pending} onClick={() => void inspectRun(active.id)}>{chinese ? '检查运行状态' : 'Inspect run'}</Button> : null}
+        {active ? <Button type="button" variant="outline" disabled={pending} onClick={() => void stop(active.id)}>{active.state === 'queued' ? (chinese ? '取消排队' : 'Cancel queued run') : (chinese ? '停止运行' : 'Stop run')}</Button> : null}
         <Button type="submit" disabled={pending || !!active || !prompt.trim() || detail._tag !== 'Success'}>{chinese ? '发送' : 'Send'}</Button>
       </div>
       {inspection ? <p role="status" className="text-support">{inspection}</p> : null}

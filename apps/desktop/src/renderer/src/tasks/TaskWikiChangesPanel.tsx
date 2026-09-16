@@ -1,6 +1,7 @@
 import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { useEffect, useRef, useState } from 'react'
+import { v5 as uuidv5 } from 'uuid'
 import type { SaveRunWikiFiles, SaveTaskWikiFiles, WorkspaceDiffInput, WorkspaceChangesView, GitSyncOperation } from '../../../shared/git-change'
 import type { RunRecord } from '../../../shared/harness'
 import { useLocale } from '../preferences'
@@ -60,6 +61,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
   const detail = useAtomValue(detailQuery)
   const refresh = useAtomRefresh(changesQuery)
   const refreshSynchronizations = useAtomRefresh(syncQuery)
+  const refreshDetail = useAtomRefresh(detailQuery)
   const save = useAtomSet(TaskRpcClient.saveTaskWikiFiles, { mode: 'promise' })
   const saveRun = useAtomSet(TaskRpcClient.saveRunWikiFiles, { mode: 'promise' })
   const confirmRun = useAtomSet(TaskRpcClient.confirmRunWikiUnchanged, { mode: 'promise' })
@@ -96,8 +98,16 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
   const sourceSession = taskSessions.find(session => session.purpose === 'task')
   const conflictSession = operation ? taskSessions.find(session => session.purpose === 'conflict-resolution' && session.syncOperationId === operation.id) : undefined
   const conflictRun = conflictSession && detail._tag === 'Success'
-    ? detail.value.runs.find(run => run.sessionId === conflictSession.id && run.purpose === 'conflict-resolution')
+    ? detail.value.runs.filter(run => run.sessionId === conflictSession.id && run.purpose === 'conflict-resolution').at(-1)
     : undefined
+  const conflictRequest = conflictSession && detail._tag === 'Success'
+    ? detail.value.executions?.filter(request => request.sessionId === conflictSession.id).at(-1) : undefined
+  const conflictActive = conflictRequest ? conflictRequest.endedAt === null : conflictRun?.state === 'preparing' || conflictRun?.state === 'running'
+  useEffect(() => {
+    if (!conflictActive) return
+    const timer = setInterval(() => { refreshDetail(); refreshSynchronizations() }, 1000)
+    return () => clearInterval(timer)
+  }, [conflictActive, refreshDetail, refreshSynchronizations])
   // A persisted intent for a superseded operation is not actionable against the current receipt.
   const activeConflictIntent = operation && conflictIntent && conflictIntent.operationId !== operation.id ? null : conflictIntent
   const syncRequest = syncIntent ?? (operation ? { id: operation.id, taskId, expectedSourceHead: operation.sourceHead } : null)
@@ -181,21 +191,23 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
 
   /** Starts the fixed-Agent conflict Run; the complete request is retained across a lost reply. */
   async function startConflictResolution(): Promise<void> {
-    if (syncInFlight.current || (!activeConflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
+    if (syncInFlight.current || conflictActive || (!activeConflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
     const request = activeConflictIntent ?? {
       taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
-      // Derive both identities from the operation so a refresh before sessionStorage is flushed
-      // cannot dispatch a second conflict Run for the same isolated coordinator.
-      sessionId: stableOperationId('conflict-session', operation!.id), runId: stableOperationId('conflict-run', operation!.id)
+      // Durable history determines the next attempt. Lost replies and storage-free refreshes
+      // reconstruct the same UUID; an explicitly retried terminal attempt gets a new UUID.
+      sessionId: conflictSession?.id ?? uuidv5(`folio:conflict-session:${taskId}:${operation!.id}`, uuidv5.URL),
+      runId: uuidv5(`folio:conflict-run:${taskId}:${operation!.id}:${conflictRequest?.id ?? conflictRun?.id ?? 'initial'}`, uuidv5.URL)
     }
+    writeTaskWikiIntent(intentKey, { ...readTaskWikiIntent(intentKey), conflict: request })
     setConflictIntent(request)
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
       const run = await startConflict({ payload: request })
       setConflictIntent(null)
-      setSyncMessage(chinese ? `冲突解决 Run 已启动：${run.id}` : `Conflict-resolution Run started: ${run.id}`)
+      setSyncMessage(chinese ? `冲突解决请求已提交：${run.id}` : `Conflict-resolution request submitted: ${run.id}`)
     } catch { setSyncFailed(true) }
-    finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations() }
+    finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations(); refreshDetail() }
   }
 
   /** Accepts a fully staged coordinator result; Folio performs the Git checks and sync. */
@@ -281,7 +293,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
           : (chinese ? '在当前 main 上重新准备冲突' : 'Reprepare conflict on current main')}
       </Button> : null}
       {(operation?.state === 'conflict' || activeConflictIntent) && !syncIntent ? <>
-        <Button variant="outline" size="sm" disabled={pending || (!sourceSession && !activeConflictIntent)} onClick={() => void startConflictResolution()}>
+        <Button variant="outline" size="sm" disabled={pending || conflictActive || (!sourceSession && !activeConflictIntent)} onClick={() => void startConflictResolution()}>
           {chinese ? '启动冲突解决 Run' : 'Start conflict-resolution Run'}
         </Button>
         {operation?.state === 'conflict' ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => void abortConflictResolution()}>

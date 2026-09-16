@@ -78,16 +78,16 @@ describe('Task Git worktree creation checkpoints', () => {
     }).pipe(Effect.provide(layer())))
   })
 
-  it('blocks Sessions/Runs until resources are ready and refuses resource work during an active Run', async () => {
+  it('allows Session metadata before resources but blocks Runs until ready and refuses resource work during an active Run', async () => {
     await Effect.runPromise(Effect.gen(function*() {
       yield* initialize
       const store = yield* HarnessStore
       yield* store.createTask({ ...draft('task'), branch: 'folio/task/task', worktree: join(root, 'worktrees/task') })
       const session = { id: 'session', taskId: 'task', agent: 'pi' as const, adapterVersion: '1', purpose: 'task' as const, syncOperationId: null }
-      expect(yield* store.createSession(session).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      yield* store.createSession(session)
+      expect(yield* store.sessions('task')).toMatchObject([{ id: 'session', acpSessionId: null }])
       const worktrees = yield* TaskWorktrees
       const checkout = yield* worktrees.ensure('task')
-      yield* store.createSession(session)
       yield* store.bindSession('session', { acpSessionId: 'acp', nativeSessionId: null })
       const sql = yield* SqlClient.SqlClient
       yield* sql`UPDATE tasks SET worktree_state='creating' WHERE id='task'`
