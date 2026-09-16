@@ -15,10 +15,10 @@ function displayContent(content: Schema.Json | undefined): string {
 }
 
 /** Explicit Prompt dispatch and durable history. Query refreshes never restore or resend execution. */
-export function TaskConversation({ vaultId, taskId, sessionId }: { vaultId: string; taskId: string; sessionId: string }): React.JSX.Element {
+export function TaskConversation({ taskId, sessionId }: { taskId: string; sessionId: string }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const detailQuery = TaskRpcClient.query('tasks.get', { vaultId, id: taskId })
-  const historyQuery = TaskRpcClient.query('tasks.sessionHistory', { vaultId, taskId, sessionId })
+  const detailQuery = TaskRpcClient.query('tasks.get', { id: taskId })
+  const historyQuery = TaskRpcClient.query('tasks.sessionHistory', { taskId, sessionId })
   const detail = useAtomValue(detailQuery)
   const history = useAtomValue(historyQuery)
   const refreshDetail = useAtomRefresh(detailQuery)
@@ -57,7 +57,7 @@ export function TaskConversation({ vaultId, taskId, sessionId }: { vaultId: stri
     if (busy.current || active || !prompt.trim()) return
     const previous = submitted.current
     const input: StartTaskRunInput = previous?.prompt === prompt.trim() && previous.resumesRunId === recoveryId ? previous : {
-      vaultId, taskId, sessionId, id: crypto.randomUUID(), prompt: prompt.trim(),
+      taskId, sessionId, id: crypto.randomUUID(), prompt: prompt.trim(),
       purpose: recoveryId ? 'recovery' : 'execution', resumesRunId: recoveryId
     }
     submitted.current = input
@@ -87,7 +87,7 @@ export function TaskConversation({ vaultId, taskId, sessionId }: { vaultId: stri
     setFailed(false)
     setRoutineBusy(false)
     setInspection('')
-    try { await cancel({ payload: { vaultId, taskId, runId } }) }
+    try { await cancel({ payload: { taskId, runId } }) }
     catch { setFailed(true) }
     finally { busy.current = false; setPending(false); refreshDetail(); refreshHistory() }
   }
@@ -101,7 +101,7 @@ export function TaskConversation({ vaultId, taskId, sessionId }: { vaultId: stri
     setRoutineBusy(false)
     setInspection('')
     try {
-      await inspect({ payload: { vaultId, taskId, runId } })
+      await inspect({ payload: { taskId, runId } })
       setInspection(chinese ? '旧执行已停止，记录已保留。可输入新的接续指令。' : 'Previous execution has stopped. Its history is retained; enter a new instruction to continue.')
     } catch {
       setInspection(chinese ? '尚不能确认旧执行已停止。仍存活的进程或不完整的记录会阻止接管。' : 'Could not confirm that execution stopped. A live process or incomplete records prevent takeover.')

@@ -13,7 +13,7 @@ vi.mock('@effect/atom-react', () => ({
 vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { startRun: 'start', inspectRun: 'inspect', cancelRun: 'cancel', query: (method: string) => method } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
 afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.messages = [] })
-const view = () => render(<TaskConversation vaultId="vault" taskId="task" sessionId="session" />)
+const view = () => render(<TaskConversation taskId="task" sessionId="session" />)
 
 describe('Task conversation', () => {
   it('explains Routine contention and retains the prompt for an explicit retry', async () => {
@@ -51,7 +51,7 @@ describe('Task conversation', () => {
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Next instruction' } })
     expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop run' })) })
-    expect(mocks.cancel).toHaveBeenCalledWith({ payload: { vaultId: 'vault', taskId: 'task', runId: 'active' } })
+    expect(mocks.cancel).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: 'active' } })
     expect(mocks.start).not.toHaveBeenCalled()
   })
 
@@ -63,7 +63,7 @@ describe('Task conversation', () => {
     })
     view()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Inspect run' })) })
-    expect(mocks.inspect).toHaveBeenCalledWith({ payload: { vaultId: 'vault', taskId: 'task', runId: 'old' } })
+    expect(mocks.inspect).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: 'old' } })
     expect(mocks.start).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Continue from this run' })).toBeTruthy()
     expect((screen.getByLabelText('Prompt') as HTMLTextAreaElement).value).toBe('')
@@ -71,7 +71,7 @@ describe('Task conversation', () => {
 
   it('requires a new recovery instruction and renders tool/model text without interpreting HTML', async () => {
     mocks.runs = [{ id: 'old', sessionId: 'session', state: 'interrupted', prompt: 'Original instruction', endedAt: 1 }]
-    mocks.messages = [{ id: 'reply', runId: 'old', data: { role: 'assistant', content: [{ type: 'text', text: '<script>unsafe()</script>' }] } }]
+    mocks.messages = [{ id: 'reply', kind: 'message', runId: 'old', data: { role: 'assistant', content: [{ type: 'text', text: '<script>unsafe()</script>' }] } }]
     mocks.start.mockResolvedValueOnce({})
     const rendered = view()
     expect(rendered.container.querySelector('script')).toBeNull()

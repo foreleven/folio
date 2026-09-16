@@ -1,3 +1,4 @@
+import { VaultMiddleware } from './vault-middleware'
 import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/unstable/rpc'
 import { Vault, VaultError } from '../vault'
@@ -9,7 +10,7 @@ export const OpenExistingVault = Rpc.make('vault.openExisting', {
   success: Vault,
   error: VaultError
 })
-export const GetVault = Rpc.make('vault.get', { payload: { id: Schema.String }, success: Schema.NullOr(Vault) })
+export const GetVault = Rpc.make('vault.get', { payload: {}, success: Schema.NullOr(Vault) }).middleware(VaultMiddleware)
 export const RemoveVault = Rpc.make('vault.remove', {
   payload: { id: Vault.fields.id },
   success: Vault,

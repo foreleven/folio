@@ -17,14 +17,14 @@ describe('Task creation', () => {
   it('defaults to pi, rejects duplicate submission and reuses identity after a lost reply', async () => {
     let reject!: (error: Error) => void
     mocks.create.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
-    render(<TaskPanel vaultId="vault" />)
+    render(<TaskPanel />)
     fireEvent.change(screen.getByLabelText('Task goal'), { target: { value: '  Summarize notes  ' } })
     const submit = screen.getByRole('button', { name: 'Create task' })
     fireEvent.click(submit)
     fireEvent.submit(submit.closest('form')!)
     expect(mocks.create).toHaveBeenCalledTimes(1)
     const first = mocks.create.mock.calls[0]![0]
-    expect(first.payload).toMatchObject({ vaultId: 'vault', goal: 'Summarize notes', agent: 'pi' })
+    expect(first.payload).toMatchObject({ goal: 'Summarize notes', agent: 'pi' })
     await act(async () => { reject(new Error('response lost')) })
     expect(screen.getByRole('alert').textContent).toContain('retained')
     mocks.create.mockResolvedValueOnce({})
@@ -37,9 +37,9 @@ describe('Task creation', () => {
   it('retries a persisted unfinished workspace with its original identity and Agent', async () => {
     mocks.tasks = [{ id: 'original', goal: 'Persisted intent', state: 'active', worktreeState: 'creating', configuration: { agent: 'pi', integrationIds: ['notes'] } }]
     mocks.create.mockResolvedValueOnce({})
-    render(<TaskPanel vaultId="vault" />)
+    render(<TaskPanel />)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })) })
-    expect(mocks.create).toHaveBeenCalledWith({ payload: { vaultId: 'vault', id: 'original', goal: 'Persisted intent', agent: 'pi', integrationIds: ['notes'] } })
+    expect(mocks.create).toHaveBeenCalledWith({ payload: { id: 'original', goal: 'Persisted intent', agent: 'pi', integrationIds: ['notes'] } })
   })
 
   it('saves explicit Integration selection and allocates new intent when a failed request selection changes', async () => {
@@ -48,7 +48,7 @@ describe('Task creation', () => {
       { id: 'mail', name: 'Mail', busy: false, record: null, states: {} }
     ]
     mocks.create.mockRejectedValueOnce(new Error('lost reply')).mockResolvedValueOnce({})
-    render(<TaskPanel vaultId="vault" />)
+    render(<TaskPanel />)
     fireEvent.change(screen.getByLabelText('Task goal'), { target: { value: 'Use selected resources' } })
     expect((screen.getByRole('checkbox', { name: /Mail/ }) as HTMLInputElement).disabled).toBe(true)
     fireEvent.click(screen.getByRole('checkbox', { name: 'Notes' }))
@@ -66,10 +66,10 @@ describe('Task creation', () => {
   it('offers reopen for a released Task and keeps the same identity', async () => {
     mocks.tasks = [{ id: 'completed', goal: 'Inspect again', state: 'completed', worktreeState: 'released', configuration: { agent: 'pi', integrationIds: [] } }]
     mocks.create.mockResolvedValueOnce({})
-    render(<TaskPanel vaultId="vault" />)
+    render(<TaskPanel />)
     expect(screen.getAllByText((_, element) => element?.textContent?.includes('Completed') ?? false).length).toBeGreaterThan(0)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reopen' })) })
-    expect(mocks.create).toHaveBeenCalledWith({ payload: { vaultId: 'vault', taskId: 'completed' } })
+    expect(mocks.create).toHaveBeenCalledWith({ payload: { taskId: 'completed' } })
     expect(mocks.refresh).toHaveBeenCalledTimes(1)
   })
 })

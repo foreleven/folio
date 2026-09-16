@@ -28,7 +28,7 @@ afterEach(() => {
 })
 
 it('requires explicit selection, previews without saving, and submits only the selected files', async () => {
-  const view = render(<WorkspaceChangesPanel vaultId="vault" />)
+  const view = render(<WorkspaceChangesPanel />)
   expect((screen.getByRole('button', { name: 'Save selected files' }) as HTMLButtonElement).disabled).toBe(true)
   fireEvent.click(screen.getByRole('button', { name: 'View diff wiki/one.md' }))
   expect(screen.getByText('+hello <script>example</script>')).toBeTruthy()
@@ -38,22 +38,22 @@ it('requires explicit selection, previews without saving, and submits only the s
   mocks.save.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
   const request = mocks.save.mock.calls[0]![0].payload
-  expect(request).toMatchObject({ vaultId: 'vault', input: { expectedParent: 'a'.repeat(40), paths: ['wiki/one.md'] } })
+  expect(request).toMatchObject({ input: { expectedParent: 'a'.repeat(40), paths: ['wiki/one.md'] } })
   expect(request.input.id).toBeTruthy()
   expect(screen.getByText('Saved commit: bbbbbbbb')).toBeTruthy()
-  expect(mocks.query).toHaveBeenCalledWith('workspace.diff', { vaultId: 'vault', input: {
+  expect(mocks.query).toHaveBeenCalledWith('workspace.diff', { input: {
     expectedParent: 'a'.repeat(40), path: 'wiki/one.md', saveId: request.input.id
   } })
 })
 
 it('retains the exact request after failure even when refresh shows a changed baseline', async () => {
-  const view = render(<WorkspaceChangesPanel vaultId="vault" />)
+  const view = render(<WorkspaceChangesPanel />)
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.save.mockRejectedValueOnce(new Error('lost reply'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
   const request = mocks.save.mock.calls[0]![0]
   mocks.view = { ...mocks.view, head: 'b'.repeat(40), registered: false, pending: [{ ...request.payload.input, state: 'applying' }] }
-  view.rerender(<WorkspaceChangesPanel vaultId="vault" />)
+  view.rerender(<WorkspaceChangesPanel />)
   expect(screen.getByRole('alert').textContent).toContain('original request is retained')
   expect((screen.getByLabelText('wiki/two.md') as HTMLInputElement).disabled).toBe(true)
   mocks.save.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
@@ -62,10 +62,10 @@ it('retains the exact request after failure even when refresh shows a changed ba
 })
 
 it('does not silently advance an unsubmitted selection to a newly refreshed baseline', () => {
-  const view = render(<WorkspaceChangesPanel vaultId="vault" />)
+  const view = render(<WorkspaceChangesPanel />)
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.view = { ...mocks.view, head: 'b'.repeat(40) }
-  view.rerender(<WorkspaceChangesPanel vaultId="vault" />)
+  view.rerender(<WorkspaceChangesPanel />)
   expect((screen.getByRole('button', { name: 'Save selected files' }) as HTMLButtonElement).disabled).toBe(true)
   expect(screen.getByText('Files or baseline changed. Clear the selection and choose again.')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }))
@@ -77,21 +77,21 @@ it('does not silently advance an unsubmitted selection to a newly refreshed base
 it('discovers a retained save, previews its snapshot and retries its original identity after reload', async () => {
   const input = { id: 'retained', expectedParent: 'c'.repeat(40), paths: ['wiki/one.md'] as [string] }
   mocks.view = { ...mocks.view, files: [], pending: [{ ...input, state: 'prepared' }] }
-  render(<WorkspaceChangesPanel vaultId="vault" />)
+  render(<WorkspaceChangesPanel />)
   expect(mocks.save).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'wiki/one.md' }))
-  expect(mocks.query).toHaveBeenCalledWith('workspace.diff', { vaultId: 'vault', input: {
+  expect(mocks.query).toHaveBeenCalledWith('workspace.diff', { input: {
     saveId: 'retained', expectedParent: 'c'.repeat(40), path: 'wiki/one.md'
   } })
   mocks.save.mockResolvedValueOnce({ commit: 'd'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry this save' })))
-  expect(mocks.save).toHaveBeenCalledWith({ payload: { vaultId: 'vault', input } })
+  expect(mocks.save).toHaveBeenCalledWith({ payload: { input } })
 })
 
 it('blocks overlapping submission and preserves input until the pending save settles', async () => {
   let finish!: (value: { commit: string }) => void
   mocks.save.mockImplementation(() => new Promise(done => { finish = done }))
-  render(<WorkspaceChangesPanel vaultId="vault" />)
+  render(<WorkspaceChangesPanel />)
   fireEvent.click(screen.getByLabelText('wiki/two.md'))
   const button = screen.getByRole('button', { name: 'Save selected files' })
   fireEvent.click(button); fireEvent.click(button)
@@ -103,16 +103,16 @@ it('blocks overlapping submission and preserves input until the pending save set
 
 it('distinguishes query failure from an empty workspace and shows bounded preview fallbacks', () => {
   mocks.failedQuery = true
-  const view = render(<WorkspaceChangesPanel vaultId="vault" />)
+  const view = render(<WorkspaceChangesPanel />)
   expect(screen.getByText('Could not read changes. Refresh to retry.')).toBeTruthy()
   expect(screen.queryByText('No file changes to save.')).toBeNull()
   mocks.failedQuery = false
   mocks.diff = { kind: 'too-large', text: '' }
-  view.rerender(<WorkspaceChangesPanel vaultId="vault" />)
+  view.rerender(<WorkspaceChangesPanel />)
   fireEvent.click(screen.getByRole('button', { name: 'View diff wiki/one.md' }))
   expect(screen.getByText('This file is too large for an inline preview.')).toBeTruthy()
   mocks.diff = { kind: 'binary', text: '' }
-  view.rerender(<WorkspaceChangesPanel vaultId="vault" />)
+  view.rerender(<WorkspaceChangesPanel />)
   expect(screen.getByText('Binary file changed.')).toBeTruthy()
   expect(mocks.save).not.toHaveBeenCalled()
 })

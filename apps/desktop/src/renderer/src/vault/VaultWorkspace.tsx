@@ -10,10 +10,10 @@ import { TaskPanel } from '../tasks/TaskPanel'
 import { OpenVaultButton } from './OpenVaultButton'
 import { WorkspaceChangesPanel } from './WorkspaceChangesPanel'
 
-/** Resolves this window's vault by stable ID; reloads keep the same window context. */
-export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
+/** Reads the Vault bound to this native window by main; route text does not select its identity. */
+export function VaultWorkspace(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = VaultRpcClient.query('vault.get', { id })
+  const query = VaultRpcClient.query('vault.get', {})
   const result = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   const name = result._tag === 'Success' ? result.value?.name : undefined
@@ -61,11 +61,11 @@ export function VaultWorkspace({ id }: { id: string }): React.JSX.Element {
       {section === 'overview' ? (
         <OverviewContent chinese={chinese} vaultName={vault.name} vaultPath={vault.path} onNavigate={setSection} />
       ) : section === 'changes' ? (
-        <WorkspaceChangesPanel key={`changes:${vault.id}`} vaultId={vault.id} />
+        <WorkspaceChangesPanel key={`changes:${vault.id}`} />
       ) : section === 'routines' ? (
-        <RoutinePanel key={`routines:${vault.id}`} vaultId={vault.id} />
+        <RoutinePanel key={`routines:${vault.id}`} />
       ) : (
-        <TaskPanel key={vault.id} vaultId={vault.id} />
+        <TaskPanel key={vault.id} />
       )}
     </VaultWorkspaceLayout>
   )

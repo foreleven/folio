@@ -8,9 +8,9 @@ import { TaskRpcClient } from '../rpc/task-rpc'
 import { IntegrationRpcClient } from '../rpc/integration-rpc'
 
 /** Creates durable Task workspaces and exposes interrupted creation for explicit retry. Execution is a separate action. */
-export function TaskPanel({ vaultId }: { vaultId: string }): React.JSX.Element {
+export function TaskPanel(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('tasks.list', { vaultId })
+  const query = TaskRpcClient.query('tasks.list', {})
   const tasks = useAtomValue(query)
   const integrations = useAtomValue(IntegrationRpcClient.integrations)
   const refresh = useAtomRefresh(query)
@@ -33,7 +33,7 @@ export function TaskPanel({ vaultId }: { vaultId: string }): React.JSX.Element {
     const previous = submitted.current
     const input = retry ?? (previous?.goal === goal.trim() && previous.agent === agent
       && JSON.stringify(previous.integrationIds ?? []) === JSON.stringify(integrationIds) ? previous
-      : { vaultId, id: crypto.randomUUID(), goal: goal.trim(), agent, integrationIds })
+      : { id: crypto.randomUUID(), goal: goal.trim(), agent, integrationIds })
     submitted.current = input
     inFlight.current = true
     setPending(true)
@@ -50,7 +50,7 @@ export function TaskPanel({ vaultId }: { vaultId: string }): React.JSX.Element {
     if (reopeningTask) return
     setReopeningTask(taskId)
     setReopenFailure(null)
-    try { await reopen({ payload: { vaultId, taskId } }) }
+    try { await reopen({ payload: { taskId } }) }
     catch { setReopenFailure(taskId) }
     finally { setReopeningTask(null); refresh() }
   }
@@ -103,13 +103,13 @@ export function TaskPanel({ vaultId }: { vaultId: string }): React.JSX.Element {
               ? (chinese ? '工作区已就绪' : 'Workspace ready') : (chinese ? '工作区待准备' : 'Workspace pending')}</span>
           {task.state === 'active' && task.worktreeState === 'ready' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
           {task.state === 'active' && task.worktreeState !== 'ready' ? <Button variant="outline" size="sm" disabled={pending}
-            onClick={() => void submit({ vaultId, id: task.id, goal: task.goal, agent: task.configuration.agent,
+            onClick={() => void submit({ id: task.id, goal: task.goal, agent: task.configuration.agent,
               integrationIds: task.configuration.integrationIds })}>{chinese ? '重试' : 'Retry'}</Button> : null}
           {task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
             onClick={() => void reopenTask(task.id)}>{reopeningTask === task.id ? (chinese ? '正在重开…' : 'Reopening…') : (chinese ? '重开' : 'Reopen')}</Button> : null}
         </div>
         {reopenFailure === task.id ? <p role="alert" className="text-support text-destructive">{chinese ? '任务无法重开，原历史已保留。' : 'Could not reopen the task. Its history is retained.'}</p> : null}
-        {selectedTask === task.id ? <TaskSessions key={task.id} vaultId={vaultId} task={task} /> : null}
+        {selectedTask === task.id ? <TaskSessions key={task.id} task={task} /> : null}
       </li>)}</ul>}
   </section>
 }

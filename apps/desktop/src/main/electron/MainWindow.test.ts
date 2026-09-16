@@ -1,6 +1,20 @@
-import { Effect, ManagedRuntime } from 'effect'
+import { VaultRuntime } from '../services/vault-runtime'
+import { VaultContext, makeVaultContext } from '../services/vault-context'
+import { VaultWindowContexts } from '../services/vault-window-contexts'
+import { TaskService } from '../services/task-service'
+import { Context, Effect, Layer, ManagedRuntime } from 'effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MainWindow } from './MainWindow'
+
+const windowLayer = MainWindow.layer.pipe(
+  Layer.provide(
+    Layer.succeed(VaultRuntime)({
+      open: (id) =>
+        Effect.succeed(Context.make(VaultContext, makeVaultContext({ id, name: 'wiki', path: '/wiki' }, '/config')).pipe(Context.add(TaskService, {} as TaskService['Service'])))
+    })
+  ),
+  Layer.provide(VaultWindowContexts.layer)
+)
 
 const electronMocks = vi.hoisted(() => ({
   createBrowserWindow: vi.fn(),
@@ -53,7 +67,7 @@ afterEach(() => {
 describe('MainWindow live service', () => {
   it('owns the development renderer window for its runtime scope', async () => {
     vi.stubEnv('ELECTRON_RENDERER_URL', 'http://localhost:5173')
-    const runtime = ManagedRuntime.make(MainWindow.layer)
+    const runtime = ManagedRuntime.make(windowLayer)
     const mainWindow = await runtime.runPromise(MainWindow)
 
     await runtime.runPromise(mainWindow.open)
@@ -77,7 +91,7 @@ describe('MainWindow live service', () => {
 
   it('keeps DevTools closed for the packaged renderer', async () => {
     vi.stubEnv('ELECTRON_RENDERER_URL', '')
-    const runtime = ManagedRuntime.make(MainWindow.layer)
+    const runtime = ManagedRuntime.make(windowLayer)
     const mainWindow = await runtime.runPromise(MainWindow)
 
     await runtime.runPromise(mainWindow.open)
@@ -91,7 +105,7 @@ describe('MainWindow live service', () => {
     vi.stubEnv('ELECTRON_RENDERER_URL', 'http://localhost:5173')
     const loadError = new Error('renderer unavailable')
     electronMocks.loadURL.mockRejectedValueOnce(loadError)
-    const runtime = ManagedRuntime.make(MainWindow.layer)
+    const runtime = ManagedRuntime.make(windowLayer)
     const mainWindow = await runtime.runPromise(MainWindow)
 
     const error = await runtime.runPromise(Effect.flip(mainWindow.open))

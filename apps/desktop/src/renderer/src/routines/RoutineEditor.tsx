@@ -14,7 +14,7 @@ type Draft = { name: string; prompt: string; agent: 'pi' | 'codex'; model: Routi
 const selectClass = 'h-8 w-full rounded-md border border-input bg-background px-2 text-ui'
 
 /** Flat editor for the current Routine contract; historical executions are never edited here. */
-export function RoutineEditor({ vaultId, initial, onSaved, onCancel }: { vaultId: string; initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void }): React.JSX.Element {
+export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const save = useAtomSet(TaskRpcClient.saveRoutine, { mode: 'promise' })
   const integrations = useAtomValue(IntegrationRpcClient.integrations)
@@ -34,7 +34,7 @@ export function RoutineEditor({ vaultId, initial, onSaved, onCancel }: { vaultId
       const integrationIds = draft.resourceIds.length
         ? [...new Set(draft.resourceIds.map(resource => resource.slice(0, resource.indexOf('/'))).filter(Boolean))].sort()
         : draft.integrationIds
-      await save({ payload: { vaultId, input: { id: initial.id, expectedRevision: initial.record?.revision ?? null, ...draft, integrationIds, name: draft.name.trim(), prompt: draft.prompt.trim(), model: draft.agent === 'pi' ? draft.model : null } } })
+      await save({ payload: { input: { id: initial.id, expectedRevision: initial.record?.revision ?? null, ...draft, integrationIds, name: draft.name.trim(), prompt: draft.prompt.trim(), model: draft.agent === 'pi' ? draft.model : null } } })
       onSaved()
     } catch { setError(chinese ? '保存未确认，请重试。' : 'Save was not confirmed. Please retry.') }
     finally { setPending(false) }

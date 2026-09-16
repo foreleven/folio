@@ -10,9 +10,9 @@ import { modelCatalogAtom, modelsAtom } from '../rpc/model-rpc'
 import { TaskRpcClient } from '../rpc/task-rpc'
 
 /** Explicitly initializes/restores Sessions. No render, selection or retry sends a Prompt. */
-export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRecord }): React.JSX.Element {
+export function TaskSessions({ task }: { task: TaskRecord }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('tasks.get', { vaultId, id: task.id })
+  const query = TaskRpcClient.query('tasks.get', { id: task.id })
   const detail = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   const catalog = useAtomValue(modelCatalogAtom)
@@ -41,9 +41,9 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
       ? { providerId: model.providerId, modelId: model.modelId, thinkingLevel: 'off' as const } : undefined
     const previous = submitted.current
     const input: OpenTaskSessionInput = session
-      ? { vaultId, taskId: task.id, sessionId: session.id, agent: session.agent }
+      ? { taskId: task.id, sessionId: session.id, agent: session.agent }
       : previous && previous.agent === task.configuration.agent && JSON.stringify(previous.model) === JSON.stringify(selection)
-        ? previous : { vaultId, taskId: task.id, sessionId: crypto.randomUUID(), agent: task.configuration.agent, ...(selection ? { model: selection } : {}) }
+        ? previous : { taskId: task.id, sessionId: crypto.randomUUID(), agent: task.configuration.agent, ...(selection ? { model: selection } : {}) }
     submitted.current = input
     busy.current = true
     setPending(true)
@@ -64,7 +64,7 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
     busy.current = true
     setPending(true)
     try {
-      await close({ payload: { vaultId, taskId: task.id, sessionId: session.id } })
+      await close({ payload: { taskId: task.id, sessionId: session.id } })
       setMessage(chinese ? '连接已关闭，会话已保留。' : 'Connection closed. Session retained.')
     } catch { setMessage(chinese ? '无法关闭连接，请重试。' : 'Could not close the connection. Retry.') }
     finally { busy.current = false; setPending(false); refresh() }
@@ -98,8 +98,8 @@ export function TaskSessions({ vaultId, task }: { vaultId: string; task: TaskRec
       </div>
     </li>)}</ul> : <p className="text-support">{detail._tag === 'Failure'
       ? (chinese ? '无法读取会话。' : 'Could not load sessions.') : (chinese ? '正在加载会话…' : 'Loading sessions…')}</p>}
-    {conversation ? <TaskConversation key={conversation} vaultId={vaultId} taskId={task.id} sessionId={conversation} /> : null}
+    {conversation ? <TaskConversation key={conversation} taskId={task.id} sessionId={conversation} /> : null}
     <Button variant="outline" size="sm" onClick={() => setShowChanges(current => !current)}>{showChanges ? (chinese ? '隐藏文件变更' : 'Hide file changes') : (chinese ? '查看文件变更' : 'View file changes')}</Button>
-    {showChanges ? <TaskWikiChangesPanel vaultId={vaultId} taskId={task.id} /> : null}
+    {showChanges ? <TaskWikiChangesPanel taskId={task.id} /> : null}
   </div>
 }

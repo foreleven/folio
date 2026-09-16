@@ -38,7 +38,8 @@ import { ApplicationMenuLive } from './electron/ApplicationMenu'
 import { ApplicationThemeLive } from './electron/ApplicationTheme'
 
 import { VaultService } from './services/vault-service'
-import { TaskService } from './services/task-service'
+import { VaultRuntime } from './services/vault-runtime'
+import { VaultWindowContexts } from './services/vault-window-contexts'
 import { AgentRuntime } from './services/agent-runtime'
 import { VaultLauncher } from './electron/VaultLauncher'
 
@@ -111,7 +112,8 @@ export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, Routine
   Layer.provide(VaultLauncher.layer),
   Layer.provideMerge(MainWindow.layer),
   Layer.provide(VaultService.layer),
-  Layer.provide(TaskService.layer),
+  Layer.provide(VaultRuntime.layer),
+  Layer.provide(VaultWindowContexts.layer),
   Layer.provide(IntegrationsLive),
   Layer.provide(ModelService.layer()),
   Layer.provideMerge(AgentRuntime.layer(join(app.getAppPath(), 'out/main'))),

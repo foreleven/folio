@@ -5,6 +5,6 @@ import { Welcome } from './welcome/Welcome'
 /** Shows welcome until this native window is bound to a vault. */
 export function App(): React.JSX.Element {
   const hash = useWindowHash()
-  if (hash.startsWith('#vault/')) return <VaultWorkspace id={hash.slice('#vault/'.length)} />
+  if (hash.startsWith('#vault/')) return <VaultWorkspace />
   return <Welcome />
 }

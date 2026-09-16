@@ -7,7 +7,7 @@ import { TaskWikiChangesPanel } from './TaskWikiChangesPanel'
 const mocks = vi.hoisted(() => ({ save: vi.fn(), saveRun: vi.fn(), confirmRun: vi.fn(), sync: vi.fn(), reprepare: vi.fn(), startConflict: vi.fn(), resolveConflict: vi.fn(), abortConflict: vi.fn(), refresh: vi.fn(), query: vi.fn((method: string, payload: unknown) => ({ method, payload })),
   context: { files: ['wiki/one.md'], commonBase: 'a'.repeat(40), canonicalDiff: '-main', taskDiff: '+task' },
   detail: { sessions: [] as Array<{ id: string; purpose: string; syncOperationId?: string | null }>, runs: [] as Array<{ id: string; prompt: string; purpose: string; state: string; syncState: string; baselineCommit: string; sessionId?: string }> },
-  history: { messages: [] as Array<{ id: string; runId: string | null; data: { role: string; content: unknown } }>, tools: [] as Array<{ id: string; runId: string | null; data: Record<string, unknown> }> },
+  history: { messages: [] as Array<{ id: string; kind: 'message'; runId: string | null; data: { role: string; content: unknown } }>, tools: [] as Array<{ id: string; runId: string | null; data: Record<string, unknown> }> },
   view: { head: 'a'.repeat(40), registered: true, files: [
     { path: 'wiki/one.md', status: 'modified', selectable: true }, { path: 'wiki/two.md', status: 'added', selectable: true }
   ], pending: [] } as WorkspaceChangesView,
@@ -38,7 +38,7 @@ afterEach(() => {
 })
 
 it('previews and explicitly saves selected Task files, then synchronizes with a new stable ID', async () => {
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect((screen.getByRole('button', { name: 'Save selected files' }) as HTMLButtonElement).disabled).toBe(true)
   fireEvent.click(screen.getByRole('button', { name: 'View diff wiki/one.md' }))
   expect(screen.getByText('+hello <script>unsafe()</script>')).toBeTruthy()
@@ -47,22 +47,22 @@ it('previews and explicitly saves selected Task files, then synchronizes with a 
   mocks.save.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
   const saveRequest = mocks.save.mock.calls[0]![0]
-  expect(saveRequest.payload).toMatchObject({ vaultId: 'vault', input: { taskId: 'task', expectedParent: 'a'.repeat(40), paths: ['wiki/one.md'] } })
+  expect(saveRequest.payload).toMatchObject({ input: { taskId: 'task', expectedParent: 'a'.repeat(40), paths: ['wiki/one.md'] } })
   expect(screen.getByText('Task commit: bbbbbbbb')).toBeTruthy()
   mocks.sync.mockResolvedValueOnce({ state: 'aligned' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sync to main' })))
-  expect(mocks.sync.mock.calls[0]![0].payload).toMatchObject({ vaultId: 'vault', input: { taskId: 'task', expectedSourceHead: 'b'.repeat(40) } })
+  expect(mocks.sync.mock.calls[0]![0].payload).toMatchObject({ input: { taskId: 'task', expectedSourceHead: 'b'.repeat(40) } })
   expect(mocks.sync.mock.calls[0]![0].payload.input.id).toBeTruthy()
 })
 
 it('saves selected wiki files with explicit successful Run provenance', async () => {
   mocks.detail = { sessions: [], runs: [{ id: 'run-a', prompt: 'Collect notes', purpose: 'execution', state: 'succeeded', syncState: 'pending', baselineCommit: 'a'.repeat(40) }] }
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   fireEvent.click(screen.getByLabelText('Run source run-a'))
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.saveRun.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save and attribute to selected Runs' })))
-  expect(mocks.saveRun).toHaveBeenCalledWith({ payload: { vaultId: 'vault', input: {
+  expect(mocks.saveRun).toHaveBeenCalledWith({ payload: { input: {
     taskId: 'task', runIds: ['run-a'], expectedParent: 'a'.repeat(40), paths: ['wiki/one.md'], id: expect.any(String)
   } } })
   expect(mocks.save).not.toHaveBeenCalled()
@@ -70,20 +70,20 @@ it('saves selected wiki files with explicit successful Run provenance', async ()
 
 it('offers a durable no-change receipt for a successful Run', async () => {
   mocks.detail = { sessions: [], runs: [{ id: 'run-empty', prompt: 'Inspect only', purpose: 'execution', state: 'succeeded', syncState: 'pending', baselineCommit: 'a'.repeat(40) }] }
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   mocks.confirmRun.mockResolvedValueOnce({ id: 'run-empty', syncState: 'not-required' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Confirm no wiki changes' })))
-  expect(mocks.confirmRun).toHaveBeenCalledWith({ payload: { vaultId: 'vault', input: { taskId: 'task', runId: 'run-empty', expectedHead: 'a'.repeat(40) } } })
+  expect(mocks.confirmRun).toHaveBeenCalledWith({ payload: { input: { taskId: 'task', runId: 'run-empty', expectedHead: 'a'.repeat(40) } } })
 })
 
 it('retains a failed save identity and does not advance a stale selection after refresh', async () => {
-  const view = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const view = render(<TaskWikiChangesPanel taskId="task" />)
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.save.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
   const request = mocks.save.mock.calls[0]![0]
   mocks.view = { ...mocks.view, head: 'c'.repeat(40), registered: false }
-  view.rerender(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  view.rerender(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('alert').textContent).toContain('original operation is retained')
   mocks.save.mockResolvedValueOnce({ commit: 'd'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry save' })))
@@ -91,7 +91,7 @@ it('retains a failed save identity and does not advance a stale selection after 
 })
 
 it('retains a failed synchronization identity and retries the same operation', async () => {
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.save.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
@@ -106,14 +106,14 @@ it('retains a failed synchronization identity and retries the same operation', a
 })
 
 it('restores a failed save and synchronization intent after the panel is remounted', async () => {
-  const first = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const first = render(<TaskWikiChangesPanel taskId="task" />)
   fireEvent.click(screen.getByLabelText('wiki/one.md'))
   mocks.save.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save selected files' })))
   const saveRequest = mocks.save.mock.calls[0]![0]
   first.unmount()
 
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('button', { name: 'Retry save' })).toBeTruthy()
   mocks.save.mockResolvedValueOnce({ commit: 'b'.repeat(40), state: 'applied' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry save' })))
@@ -123,7 +123,7 @@ it('restores a failed save and synchronization intent after the panel is remount
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sync to main' })))
   const syncRequest = mocks.sync.mock.calls[0]![0]
   cleanup()
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('button', { name: 'Sync to main' })).toBeTruthy()
   mocks.sync.mockResolvedValueOnce({ state: 'aligned' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sync to main' })))
@@ -134,11 +134,11 @@ it('surfaces a retained prepared operation and offers reprepare without silently
   mocks.operations = [{ id: 'old-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: null,
     preparedHead: 'c'.repeat(40), publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'prepared', createdAt: 1 }]
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('button', { name: 'Reprepare after main changed' })).toBeTruthy()
   mocks.reprepare.mockResolvedValueOnce({ id: 'replacement', state: 'prepared' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare after main changed' })))
-  expect(mocks.reprepare).toHaveBeenCalledWith({ payload: { vaultId: 'vault', input: { taskId: 'task', supersededId: 'old-sync', id: expect.any(String) } } })
+  expect(mocks.reprepare).toHaveBeenCalledWith({ payload: { input: { taskId: 'task', supersededId: 'old-sync', id: expect.any(String) } } })
   expect(mocks.save).not.toHaveBeenCalled()
 })
 
@@ -146,7 +146,7 @@ it('retries a failed reprepare with the same operation identity', async () => {
   mocks.operations = [{ id: 'old-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: null,
     preparedHead: 'c'.repeat(40), publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'prepared', createdAt: 1 }]
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   const button = screen.getByRole('button', { name: 'Reprepare after main changed' })
   mocks.reprepare.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(button))
@@ -161,13 +161,13 @@ it('reconstructs the same replacement identity after a refresh without renderer 
   mocks.operations = [{ id: 'old-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: null,
     preparedHead: 'c'.repeat(40), publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'prepared', createdAt: 1 }]
-  const first = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const first = render(<TaskWikiChangesPanel taskId="task" />)
   mocks.reprepare.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare after main changed' })))
   const request = mocks.reprepare.mock.calls[0]![0]
   first.unmount()
   window.sessionStorage.clear()
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   mocks.reprepare.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare after main changed' })))
   expect(mocks.reprepare.mock.calls[1]![0]).toEqual(request)
@@ -177,11 +177,11 @@ it('offers the same explicit reprepare action for a conflict with a staged resol
   mocks.operations = [{ id: 'conflict-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('button', { name: 'Reprepare conflict on current main' })).toBeTruthy()
   mocks.reprepare.mockResolvedValueOnce({ id: 'replacement', state: 'conflict' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare conflict on current main' })))
-  expect(mocks.reprepare).toHaveBeenCalledWith({ payload: { vaultId: 'vault', input: { taskId: 'task', supersededId: 'conflict-sync', id: expect.any(String) } } })
+  expect(mocks.reprepare).toHaveBeenCalledWith({ payload: { input: { taskId: 'task', supersededId: 'conflict-sync', id: expect.any(String) } } })
   expect(mocks.save).not.toHaveBeenCalled()
 })
 
@@ -190,12 +190,12 @@ it('offers conflict resolution again when reprepare returns a new conflict opera
   mocks.operations = [{ id: 'old-conflict', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  const panel = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const panel = render(<TaskWikiChangesPanel taskId="task" />)
   mocks.reprepare.mockResolvedValueOnce({ id: 'replacement-conflict', state: 'conflict' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare conflict on current main' })))
 
   mocks.operations = [{ ...mocks.operations[0]!, id: 'replacement-conflict', supersedesId: 'old-conflict' }]
-  panel.rerender(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  panel.rerender(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getByRole('button', { name: 'Start conflict-resolution Run' })).toBeTruthy()
   mocks.startConflict.mockResolvedValueOnce({ id: 'new-conflict-run' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
@@ -207,14 +207,14 @@ it('drops a stale lost-response conflict request when its operation is replaced'
   mocks.operations = [{ id: 'old-conflict', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  const panel = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const panel = render(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   mocks.reprepare.mockResolvedValueOnce({ id: 'replacement-conflict', state: 'conflict' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reprepare conflict on current main' })))
 
   mocks.operations = [{ ...mocks.operations[0]!, id: 'replacement-conflict', supersedesId: 'old-conflict' }]
-  panel.rerender(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  panel.rerender(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockResolvedValueOnce({ id: 'replacement-run' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   expect(mocks.startConflict.mock.calls[1]![0].payload.operationId).toBe('replacement-conflict')
@@ -224,23 +224,23 @@ it('shows conflict evidence and retries the fixed-Agent resolution Run with stab
   mocks.detail = { sessions: [{ id: 'source-session', purpose: 'task' }, { id: 'conflict-session', purpose: 'conflict-resolution', syncOperationId: 'conflict-sync' }], runs: [
     { id: 'conflict-run', sessionId: 'conflict-session', prompt: 'resolve', purpose: 'conflict-resolution', state: 'running', syncState: 'not-required', baselineCommit: 'a'.repeat(40) }
   ] }
-  mocks.history = { messages: [{ id: 'conflict-message', runId: 'conflict-run', data: { role: 'assistant', content: [{ text: 'Resolved note' }] } }], tools: [] }
+  mocks.history = { messages: [{ id: 'conflict-message', kind: 'message', runId: 'conflict-run', data: { role: 'assistant', content: [{ text: 'Resolved note' }] } }], tools: [] }
   mocks.operations = [{ id: 'conflict-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   expect(screen.getAllByText('wiki/one.md').length).toBeGreaterThan(1)
   expect(screen.getByText('Resolved note')).toBeTruthy()
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   const request = mocks.startConflict.mock.calls[0]![0]
-  expect(request.payload).toMatchObject({ vaultId: 'vault', taskId: 'task', operationId: 'conflict-sync', sourceSessionId: 'source-session' })
+  expect(request.payload).toMatchObject({ taskId: 'task', operationId: 'conflict-sync', sourceSessionId: 'source-session' })
   mocks.startConflict.mockResolvedValueOnce({ id: request.payload.runId })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   expect(mocks.startConflict.mock.calls[1]![0]).toEqual(request)
   mocks.abortConflict.mockResolvedValueOnce({ state: 'aborted' })
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Abort conflict' })))
-  expect(mocks.abortConflict).toHaveBeenCalledWith({ payload: { vaultId: 'vault', taskId: 'task', id: 'conflict-sync' } })
+  expect(mocks.abortConflict).toHaveBeenCalledWith({ payload: { taskId: 'task', id: 'conflict-sync' } })
 })
 
 it('reconstructs the same conflict Run identity after refresh without renderer storage', async () => {
@@ -248,13 +248,13 @@ it('reconstructs the same conflict Run identity after refresh without renderer s
   mocks.operations = [{ id: 'conflict-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  const first = render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  const first = render(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   const request = mocks.startConflict.mock.calls[0]![0]
   first.unmount()
   window.sessionStorage.clear()
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   expect(mocks.startConflict.mock.calls[1]![0]).toEqual(request)
@@ -266,7 +266,7 @@ it('keeps derived retry identities within the protocol limit for long operation 
   mocks.operations = [{ id: operationId, taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]
-  render(<TaskWikiChangesPanel vaultId="vault" taskId="task" />)
+  render(<TaskWikiChangesPanel taskId="task" />)
   mocks.startConflict.mockRejectedValueOnce(new Error('lost response'))
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Start conflict-resolution Run' })))
   const request = mocks.startConflict.mock.calls[0]![0].payload

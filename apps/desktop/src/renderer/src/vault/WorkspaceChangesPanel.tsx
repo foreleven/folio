@@ -6,9 +6,9 @@ import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
 
 /** Keeps file selection and retry identity stable across refreshes; viewing changes never saves them. */
-export function WorkspaceChangesPanel({ vaultId }: { vaultId: string }): React.JSX.Element {
+export function WorkspaceChangesPanel(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('workspace.changes', { vaultId })
+  const query = TaskRpcClient.query('workspace.changes', {})
   const result = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   const save = useAtomSet(TaskRpcClient.saveWorkspaceFiles, { mode: 'promise' })
@@ -32,7 +32,7 @@ export function WorkspaceChangesPanel({ vaultId }: { vaultId: string }): React.J
     if (!request) return
     inFlight.current = true; setPending(true); setFailed(false); setSubmitted(request)
     try {
-      const saved = await save({ payload: { vaultId, input: request } })
+      const saved = await save({ payload: { input: request } })
       setSavedCommit(saved.commit)
       setSelection(null); setSubmitted(null)
       setPreview({ saveId: request.id, expectedParent: request.expectedParent, path: request.paths[0] })
@@ -88,14 +88,14 @@ export function WorkspaceChangesPanel({ vaultId }: { vaultId: string }): React.J
     {selection && selection.paths.length > 0 && !submitted && !validSelection ? <p role="status" className="text-support text-muted-foreground">{chinese ? '文件或基线已变化，请清除选择后重新选择。' : 'Files or baseline changed. Clear the selection and choose again.'}</p> : null}
     {failed ? <p role="alert" className="text-support text-destructive">{chinese ? '保存尚未确认，原操作已保留。请重试；存在冲突时需先检查文件。' : 'Save was not confirmed. The original request is retained. Retry, or inspect the files if there is a conflict.'}</p> : null}
     {savedCommit ? <p role="status" className="text-support text-muted-foreground">{chinese ? '已保存提交：' : 'Saved commit: '}{savedCommit.slice(0, 8)}</p> : null}
-    {preview ? <WorkspaceDiff key={JSON.stringify(preview)} vaultId={vaultId} input={preview} onClose={() => setPreview(null)} /> : null}
+    {preview ? <WorkspaceDiff key={JSON.stringify(preview)} input={preview} onClose={() => setPreview(null)} /> : null}
   </section>
 }
 
 /** A saved preview names its retained operation; refresh cannot switch it to newer working-file content. */
-function WorkspaceDiff({ vaultId, input, onClose }: { vaultId: string; input: WorkspaceDiffInput; onClose: () => void }): React.JSX.Element {
+function WorkspaceDiff({ input, onClose }: { input: WorkspaceDiffInput; onClose: () => void }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('workspace.diff', { vaultId, input })
+  const query = TaskRpcClient.query('workspace.diff', { input })
   const result = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   return <section className="space-y-2 rounded-lg border p-3" aria-label={chinese ? '文件差异' : 'File diff'}>

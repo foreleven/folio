@@ -1,16 +1,8 @@
+import { VaultWindowContexts } from '../services/vault-window-contexts'
 import { ipcMain, type IpcMainEvent, type WebContents, type WebContentsDidStartNavigationEventParams } from 'electron'
 import { Effect, Layer, Option, Queue } from 'effect'
-import {
-  type RpcMessage,
-  RpcSerialization,
-  RpcServer
-} from 'effect/unstable/rpc'
-import {
-  ELECTRON_RPC_REQUEST_CHANNEL,
-  ELECTRON_RPC_RESPONSE_CHANNEL,
-  type ElectronRpcFrame,
-  isElectronRpcFrame
-} from '../../shared/rpc/electron-rpc'
+import { type RpcMessage, RpcSerialization, RpcServer } from 'effect/unstable/rpc'
+import { ELECTRON_RPC_REQUEST_CHANNEL, ELECTRON_RPC_RESPONSE_CHANNEL, type ElectronRpcFrame, isElectronRpcFrame } from '../../shared/rpc/electron-rpc'
 import { isElectronRpcClientMessage } from '../../shared/rpc/electron-rpc-message'
 
 interface ElectronRpcConnection {
@@ -34,7 +26,8 @@ interface IncomingFrame {
 
 /** Effect RPC server Protocol implemented over Electron's duplex IPC channels. */
 const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
+    const vaultWindows = yield* VaultWindowContexts
     const serialization = yield* RpcSerialization.RpcSerialization
     const parser = serialization.makeUnsafe()
     const disconnects = yield* Queue.unbounded<number>()
@@ -51,6 +44,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
           continue
         }
         connections.delete(clientId)
+        vaultWindows.disconnect(clientId)
         connectionIds.delete(`${senderId}:${connection.rendererClientId}`)
         Queue.offerUnsafe(disconnects, clientId)
       }
@@ -106,6 +100,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
       const clientId = nextClientId++
       connectionIds.set(key, clientId)
       connections.set(clientId, { rendererClientId, sender })
+      vaultWindows.connect(clientId, sender.id)
 
       return clientId
     }
@@ -145,9 +140,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
 
     // A single scoped consumer gives control frames deterministic ordering and
     // guarantees that no detached receive fiber survives protocol shutdown.
-    yield* Effect.forkScoped(
-      Effect.forever(Effect.flatMap(Queue.take(incoming), receive))
-    )
+    yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(incoming), receive)))
 
     yield* Effect.acquireRelease(
       Effect.sync(() => ipcMain.on(ELECTRON_RPC_REQUEST_CHANNEL, onRequest)),
@@ -186,6 +179,7 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
             return
           }
           connections.delete(clientId)
+          vaultWindows.disconnect(clientId)
           connectionIds.delete(`${connection.sender.id}:${connection.rendererClientId}`)
         }),
       clientIds: Effect.sync(() => new Set(connections.keys())),
@@ -200,7 +194,4 @@ const makeElectronRpcServerProtocol = RpcServer.Protocol.make((writeRequest) =>
 )
 
 /** Scoped server Protocol layer for Electron's duplex IPC transport. */
-export const ElectronRpcServerProtocolLive = Layer.effect(
-  RpcServer.Protocol,
-  makeElectronRpcServerProtocol
-)
+export const ElectronRpcServerProtocolLive = Layer.effect(RpcServer.Protocol, makeElectronRpcServerProtocol)

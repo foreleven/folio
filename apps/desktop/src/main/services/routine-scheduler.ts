@@ -1,4 +1,5 @@
-import { Effect, Layer } from 'effect'
+import { VaultRuntime } from './vault-runtime'
+import { Context, Effect, Layer } from 'effect'
 import { ConfigService } from './config-service'
 import { TaskService } from './task-service'
 
@@ -7,22 +8,34 @@ import { TaskService } from './task-service'
  * Sleep/resume and clock changes are reconciled through persisted wall-clock cursors each sweep.
  */
 export function routineSchedulerLayer<E, R>(sweep: Effect.Effect<void, E, R>, intervalMs = 15_000) {
-  return Layer.effectDiscard(Effect.gen(function*() {
-    while (true) {
-      yield* sweep.pipe(Effect.catch(() => Effect.logWarning('Routine sweep failed; retrying on the next check.')))
-      yield* Effect.sleep(intervalMs)
-    }
-  }).pipe(Effect.forkScoped))
+  return Layer.effectDiscard(
+    Effect.gen(function* () {
+      while (true) {
+        yield* sweep.pipe(Effect.catch(() => Effect.logWarning('Routine sweep failed; retrying on the next check.')))
+        yield* Effect.sleep(intervalMs)
+      }
+    }).pipe(Effect.forkScoped)
+  )
 }
 
 /** Queries the registered Vault index afresh so unopened and newly added Vaults are included. */
-export const RoutineSchedulerLive = Layer.unwrap(Effect.gen(function*() {
-  const config = yield* ConfigService
-  const tasks = yield* TaskService
-  return routineSchedulerLayer(Effect.gen(function*() {
-    const registry = yield* config.get
-    yield* Effect.forEach(registry.vaults, vault => tasks.tickRoutines(vault.id).pipe(
-      Effect.catch(() => Effect.logWarning('A Vault Routine check failed; other Vaults continue.'))
-    ), { concurrency: 4, discard: true })
-  }))
-}))
+export const RoutineSchedulerLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ConfigService
+    const runtimes = yield* VaultRuntime
+    return routineSchedulerLayer(
+      Effect.gen(function* () {
+        const registry = yield* config.get
+        yield* Effect.forEach(
+          registry.vaults,
+          (vault) =>
+            runtimes.open(vault.id).pipe(
+              Effect.flatMap((context) => Context.get(context, TaskService).tickRoutines),
+              Effect.catch(() => Effect.logWarning('A Vault Routine check failed; other Vaults continue.'))
+            ),
+          { concurrency: 4, discard: true }
+        )
+      })
+    )
+  })
+)

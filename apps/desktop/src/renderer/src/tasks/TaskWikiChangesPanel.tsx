@@ -10,7 +10,7 @@ type TaskWikiIntent = {
   submitted?: SaveTaskWikiFiles | SaveRunWikiFiles
   sync?: { id: string; taskId: string; expectedSourceHead: string }
   reprepare?: { id: string; taskId: string; supersededId: string }
-  conflict?: { vaultId: string; taskId: string; operationId: string; sourceSessionId: string; sessionId: string; runId: string }
+  conflict?: { taskId: string; operationId: string; sourceSessionId: string; sessionId: string; runId: string }
 }
 
 /** Stable renderer intent is retry metadata only; it never contains file contents, secrets or paths outside wiki inputs. */
@@ -48,13 +48,13 @@ function stableOperationId(prefix: string, operationId: string): string {
 }
 
 /** Explicitly saves selected Task wiki files; browsing and diffing never writes Git. */
-export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; taskId: string }): React.JSX.Element {
+export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const intentKey = `folio:task-wiki-intent:${vaultId}:${taskId}`
+  const intentKey = `folio:task-wiki-intent:${taskId}`
   const [persisted] = useState<TaskWikiIntent>(() => readTaskWikiIntent(intentKey))
-  const changesQuery = TaskRpcClient.query('tasks.wikiChanges', { vaultId, taskId })
-  const syncQuery = TaskRpcClient.query('tasks.pendingSynchronizations', { vaultId, taskId })
-  const detailQuery = TaskRpcClient.query('tasks.get', { vaultId, id: taskId })
+  const changesQuery = TaskRpcClient.query('tasks.wikiChanges', { taskId })
+  const syncQuery = TaskRpcClient.query('tasks.pendingSynchronizations', { taskId })
+  const detailQuery = TaskRpcClient.query('tasks.get', { id: taskId })
   const result = useAtomValue(changesQuery)
   const synchronizations = useAtomValue(syncQuery)
   const detail = useAtomValue(detailQuery)
@@ -74,7 +74,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
   const [preview, setPreview] = useState<WorkspaceDiffInput | null>(null)
   const [syncIntent, setSyncIntent] = useState<{ id: string; taskId: string; expectedSourceHead: string } | null>(persisted.sync ?? null)
   const [reprepareIntent, setReprepareIntent] = useState<{ id: string; taskId: string; supersededId: string } | null>(persisted.reprepare ?? null)
-  const [conflictIntent, setConflictIntent] = useState<{ vaultId: string; taskId: string; operationId: string; sourceSessionId: string; sessionId: string; runId: string } | null>(persisted.conflict ?? null)
+  const [conflictIntent, setConflictIntent] = useState<{ taskId: string; operationId: string; sourceSessionId: string; sessionId: string; runId: string } | null>(persisted.conflict ?? null)
   const [pending, setPending] = useState(false)
   const [failed, setFailed] = useState(false)
   const [syncFailed, setSyncFailed] = useState(false)
@@ -124,8 +124,8 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     inFlight.current = true; setPending(true); setFailed(false); setSubmitted(request)
     try {
       const saved = 'runIds' in request
-        ? await saveRun({ payload: { vaultId, input: request } })
-        : await save({ payload: { vaultId, input: request } })
+        ? await saveRun({ payload: { input: request } })
+        : await save({ payload: { input: request } })
       setSavedCommit(saved.commit)
       setSelection(null); setRunSelection([]); setSubmitted(null)
       setSyncIntent({ id: crypto.randomUUID(), taskId, expectedSourceHead: saved.commit })
@@ -139,7 +139,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     if (inFlight.current) return
     inFlight.current = true; setPending(true); setFailed(false)
     try {
-      await confirmRun({ payload: { vaultId, input: { taskId, runId: run.id, expectedHead: run.baselineCommit } } })
+      await confirmRun({ payload: { input: { taskId, runId: run.id, expectedHead: run.baselineCommit } } })
       setSyncMessage(chinese ? `已确认 Run ${run.id.slice(0, 8)} 没有 wiki 变化。` : `Run ${run.id.slice(0, 8)} is confirmed to have no wiki changes.`)
     } catch { setFailed(true) }
     finally { inFlight.current = false; setPending(false); refresh(); refreshSynchronizations(); }
@@ -150,7 +150,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     if (syncInFlight.current || !syncRequest) return
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
-      const settled = await synchronize({ payload: { vaultId, input: syncRequest } })
+      const settled = await synchronize({ payload: { input: syncRequest } })
       setSyncIntent(null)
       setSyncMessage(settled.state === 'aligned'
         ? (chinese ? '已发布并对齐到 main。' : 'Published and aligned with main.')
@@ -171,7 +171,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     setReprepareIntent(request)
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
-      const replacement = await reprepare({ payload: { vaultId, input: request } })
+      const replacement = await reprepare({ payload: { input: request } })
       setReprepareIntent(null)
       setSyncIntent(null)
       setSyncMessage(chinese ? `已按新 main 重新准备：${replacement.id}` : `Reprepared on the current main: ${replacement.id}`)
@@ -183,7 +183,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
   async function startConflictResolution(): Promise<void> {
     if (syncInFlight.current || (!activeConflictIntent && (!operation || operation.state !== 'conflict' || !sourceSession))) return
     const request = activeConflictIntent ?? {
-      vaultId, taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
+      taskId, operationId: operation!.id, sourceSessionId: sourceSession!.id,
       // Derive both identities from the operation so a refresh before sessionStorage is flushed
       // cannot dispatch a second conflict Run for the same isolated coordinator.
       sessionId: stableOperationId('conflict-session', operation!.id), runId: stableOperationId('conflict-run', operation!.id)
@@ -203,7 +203,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     if (syncInFlight.current || !operation || operation.state !== 'resolving') return
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
-      const settled = await resolveConflict({ payload: { vaultId, taskId, id: operation.id } })
+      const settled = await resolveConflict({ payload: { taskId, id: operation.id } })
       setSyncMessage(chinese ? `冲突结果已接纳：${settled.state}` : `Conflict result accepted: ${settled.state}`)
     } catch { setSyncFailed(true) }
     finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations() }
@@ -214,7 +214,7 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     if (syncInFlight.current || !operation || !['conflict', 'resolving'].includes(operation.state)) return
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
-      await abortConflict({ payload: { vaultId, taskId, id: operation.id } })
+      await abortConflict({ payload: { taskId, id: operation.id } })
       setConflictIntent(null)
       setSyncMessage(chinese ? '已放弃隔离冲突现场，原历史仍保留。' : 'The isolated conflict was aborted; original history is retained.')
     } catch { setSyncFailed(true) }
@@ -305,18 +305,18 @@ export function TaskWikiChangesPanel({ vaultId, taskId }: { vaultId: string; tas
     {syncFailed ? <p role="alert" className="text-support text-destructive">{chinese ? '同步尚未确认，操作收据已保留，请刷新后重试。' : 'Synchronization was not confirmed; its receipt is retained. Refresh and retry.'}</p> : null}
     {syncMessage ? <p role="status" className="text-support">{syncMessage}</p> : null}
     {savedCommit ? <p role="status" className="text-support text-muted-foreground">{chinese ? 'Task 提交：' : 'Task commit: '}{savedCommit.slice(0, 8)}</p> : null}
-    {operation && ['conflict', 'resolving'].includes(operation.state) ? <TaskWikiConflictDetails vaultId={vaultId} taskId={taskId} operationId={operation.id}
+    {operation && ['conflict', 'resolving'].includes(operation.state) ? <TaskWikiConflictDetails taskId={taskId} operationId={operation.id}
       conflictSessionId={conflictSession?.id} conflictRunId={conflictRun?.id} /> : null}
-    {preview ? <TaskWikiDiff key={JSON.stringify(preview)} vaultId={vaultId} taskId={taskId} input={preview} onClose={() => setPreview(null)} /> : null}
+    {preview ? <TaskWikiDiff key={JSON.stringify(preview)} taskId={taskId} input={preview} onClose={() => setPreview(null)} /> : null}
   </section>
 }
 
 /** Displays bounded, non-sensitive conflict evidence without exposing the coordinator path. */
-function TaskWikiConflictDetails({ vaultId, taskId, operationId, conflictSessionId, conflictRunId }: {
-  vaultId: string; taskId: string; operationId: string; conflictSessionId?: string; conflictRunId?: string
+function TaskWikiConflictDetails({ taskId, operationId, conflictSessionId, conflictRunId }: {
+  taskId: string; operationId: string; conflictSessionId?: string; conflictRunId?: string
 }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('tasks.wikiConflictContext', { vaultId, taskId, id: operationId })
+  const query = TaskRpcClient.query('tasks.wikiConflictContext', { taskId, id: operationId })
   const result = useAtomValue(query)
   if (result._tag !== 'Success') return <p role="status" className="text-support text-muted-foreground">
     {result._tag === 'Failure' ? (chinese ? '无法读取冲突详情，请刷新重试。' : 'Could not read conflict details. Refresh to retry.') : (chinese ? '正在读取冲突详情…' : 'Loading conflict details…')}
@@ -327,14 +327,14 @@ function TaskWikiConflictDetails({ vaultId, taskId, operationId, conflictSession
     <p className="text-support text-muted-foreground">{chinese ? `共同基线：${result.value.commonBase}` : `Common base: ${result.value.commonBase}`}</p>
     <details><summary>{chinese ? 'main 侧差异' : 'Main-side diff'}</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{result.value.canonicalDiff}</pre></details>
     <details><summary>{chinese ? 'Task 侧差异' : 'Task-side diff'}</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{result.value.taskDiff}</pre></details>
-    {conflictSessionId && conflictRunId ? <TaskWikiConflictRunHistory vaultId={vaultId} taskId={taskId} sessionId={conflictSessionId} runId={conflictRunId} /> : null}
+    {conflictSessionId && conflictRunId ? <TaskWikiConflictRunHistory taskId={taskId} sessionId={conflictSessionId} runId={conflictRunId} /> : null}
   </details>
 }
 
 /** Embeds the conflict Run's durable projection so resolution context stays with its files. */
-function TaskWikiConflictRunHistory({ vaultId, taskId, sessionId, runId }: { vaultId: string; taskId: string; sessionId: string; runId: string }): React.JSX.Element {
+function TaskWikiConflictRunHistory({ taskId, sessionId, runId }: { taskId: string; sessionId: string; runId: string }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('tasks.sessionHistory', { vaultId, taskId, sessionId })
+  const query = TaskRpcClient.query('tasks.sessionHistory', { taskId, sessionId })
   const history = useAtomValue(query)
   if (history._tag !== 'Success') return <p role="status" className="text-support text-muted-foreground">
     {history._tag === 'Failure' ? (chinese ? '无法读取冲突解决消息，请刷新重试。' : 'Could not load conflict-resolution messages.') : (chinese ? '正在读取冲突解决消息…' : 'Loading conflict-resolution messages…')}
@@ -358,9 +358,9 @@ function displayConflictContent(content: unknown): string {
 }
 
 /** Reads a live or retained Task snapshot without interpreting diff text as markup. */
-function TaskWikiDiff({ vaultId, taskId, input, onClose }: { vaultId: string; taskId: string; input: WorkspaceDiffInput; onClose: () => void }): React.JSX.Element {
+function TaskWikiDiff({ taskId, input, onClose }: { taskId: string; input: WorkspaceDiffInput; onClose: () => void }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const query = TaskRpcClient.query('tasks.wikiDiff', { vaultId, taskId, input })
+  const query = TaskRpcClient.query('tasks.wikiDiff', { taskId, input })
   const result = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   return <section className="space-y-2 rounded-lg border p-3" aria-label={chinese ? 'Task 文件差异' : 'Task file diff'}>

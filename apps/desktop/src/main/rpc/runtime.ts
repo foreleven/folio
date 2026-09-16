@@ -1,3 +1,4 @@
+import { VaultMiddlewareLive } from './vault-middleware'
 import { IntegrationRpcs } from '../../shared/rpc/integration-rpc'
 import { TaskRpcs } from '../../shared/rpc/task-rpc'
 import { TaskRpcHandlersLive } from './task-rpc'
@@ -15,13 +16,9 @@ import { SystemService } from '../services/system-service'
 import { ElectronRpcServerProtocolLive } from './electron-rpc-protocol'
 import { SystemRpcHandlersLive } from './system-rpc'
 
-const SystemHandlersLive = SystemRpcHandlersLive.pipe(
-  Layer.provide(SystemService.layer)
-)
+const SystemHandlersLive = SystemRpcHandlersLive.pipe(Layer.provide(SystemService.layer))
 
-const ElectronRpcProtocolLive = ElectronRpcServerProtocolLive.pipe(
-  Layer.provide(RpcSerialization.layerJson)
-)
+const ElectronRpcProtocolLive = ElectronRpcServerProtocolLive.pipe(Layer.provide(RpcSerialization.layerJson))
 
 const RpcDependenciesLive = Layer.mergeAll(
   SystemHandlersLive,
@@ -35,5 +32,6 @@ const RpcDependenciesLive = Layer.mergeAll(
 
 /** Complete main-process Effect RPC server Layer. */
 export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ConfigRpcs, ModelRpcs, VaultRpcs, IntegrationRpcs, TaskRpcs)).pipe(
-  Layer.provide(RpcDependenciesLive)
+  Layer.provide(RpcDependenciesLive),
+  Layer.provide(VaultMiddlewareLive)
 )

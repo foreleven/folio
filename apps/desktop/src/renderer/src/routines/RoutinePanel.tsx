@@ -89,10 +89,10 @@ function latestExecution(rows: readonly RoutineExecution[], routineId: string): 
 }
 
 /** Routine landing page: a compact operational dashboard with one card per automation. */
-export function RoutinePanel({ vaultId }: { vaultId: string }): React.JSX.Element {
+export function RoutinePanel(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
-  const routinesQuery = TaskRpcClient.query('routines.list', { vaultId })
-  const executionsQuery = TaskRpcClient.query('routines.allExecutions', { vaultId })
+  const routinesQuery = TaskRpcClient.query('routines.list', {})
+  const executionsQuery = TaskRpcClient.query('routines.allExecutions', {})
   const routines = useAtomValue(routinesQuery)
   const executions = useAtomValue(executionsQuery)
   const refreshRoutines = useAtomRefresh(routinesQuery)
@@ -111,7 +111,6 @@ export function RoutinePanel({ vaultId }: { vaultId: string }): React.JSX.Elemen
   if (editing)
     return (
       <RoutineEditor
-        vaultId={vaultId}
         initial={editing}
         onSaved={() => {
           setEditing(null)
@@ -124,7 +123,6 @@ export function RoutinePanel({ vaultId }: { vaultId: string }): React.JSX.Elemen
     return (
       <RoutineDetail
         key={selected.id}
-        vaultId={vaultId}
         record={selected}
         executions={allExecutions.filter((row) => row.routineId === selected.id)}
         executionsLoading={executions._tag !== 'Success'}
@@ -355,7 +353,6 @@ function RoutineCard({
 }
 
 function RoutineDetail({
-  vaultId,
   record,
   executions,
   executionsLoading,
@@ -363,7 +360,6 @@ function RoutineDetail({
   onEdit,
   refresh
 }: {
-  vaultId: string
   record: RoutineRecord
   executions: readonly RoutineExecution[]
   executionsLoading: boolean
@@ -391,7 +387,7 @@ function RoutineDetail({
     setBusy(true)
     setMessage('')
     try {
-      await (kind === 'run' ? run : prepare)({ payload: { vaultId, input: { routineId: record.id } } })
+      await (kind === 'run' ? run : prepare)({ payload: { input: { routineId: record.id } } })
       setMessage(chinese ? '已登记执行；后续触发会合并到同一执行记录。' : 'Execution recorded. Later triggers will coalesce into the same window.')
       refresh()
     } catch {
@@ -408,7 +404,6 @@ function RoutineDetail({
     try {
       await save({
         payload: {
-          vaultId,
           input: {
             id: record.id,
             expectedRevision: record.revision,
@@ -442,8 +437,7 @@ function RoutineDetail({
             {chinese ? '返回' : 'Back'}
           </Button>
           <div className="min-w-0">
-            <p className="text-support font-medium text-primary">{chinese ? 'ROUTINE 详情' : 'ROUTINE DETAILS'}</p>
-            <h2 id="routine-detail-title" className="mt-1 truncate text-xl leading-7 font-semibold">
+            <h2 id="routine-detail-title" className="truncate text-xl leading-7 font-semibold">
               {record.name}
             </h2>
           </div>

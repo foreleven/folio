@@ -1,6 +1,8 @@
+import { VaultRuntime } from '../services/vault-runtime'
+import { VaultWindowContexts } from '../services/vault-window-contexts'
 import type { BrowserWindow } from 'electron'
 import { Context, Effect, Layer, Semaphore } from 'effect'
-import { createRendererWindow, loadRenderer, type RendererLoadError } from './renderer-window'
+import { createRendererWindow, loadRenderer, RendererLoadError } from './renderer-window'
 
 import type { Vault } from '../../shared/vault'
 
@@ -24,12 +26,15 @@ export class MainWindow extends Context.Service<
   static readonly layer = Layer.effect(
     MainWindow,
     Effect.gen(function* () {
+      const runtimes = yield* VaultRuntime
+      const contexts = yield* VaultWindowContexts
       const windows = new Map<BrowserWindow, Vault | undefined>()
       const vaultWindows = new Map<string, { window: BrowserWindow; vault: Vault }>()
       const lock = yield* Semaphore.make(1)
 
       /** Removes and destroys one window without double-closing it. */
       const destroyWindow = (window: BrowserWindow): void => {
+        if (!window.isDestroyed()) contexts.unbind(window.webContents.id)
         const vault = windows.get(window)
         if (vault) vaultWindows.delete(vault.id)
         windows.delete(window)
@@ -48,12 +53,16 @@ export class MainWindow extends Context.Service<
 
       /** Creates an owned window and rolls it back on failed or interrupted navigation. */
       const create = Effect.fn('MainWindow.create')(function* (vault?: Vault) {
+        const services = vault ? yield* runtimes.open(vault.id).pipe(Effect.mapError((cause) => new RendererLoadError({ cause }))) : undefined
         const window = createRendererWindow({ title: vault ? `${vault.name} — Folio` : 'Folio' })
+        const senderId = window.webContents.id
         // Maximize only when ready so startup does not reveal an unloaded renderer.
         window.once('ready-to-show', () => window.maximize())
         windows.set(window, vault)
+        if (services) contexts.bind(senderId, services)
         if (vault) vaultWindows.set(vault.id, { window, vault })
         window.once('closed', () => {
+          contexts.unbind(senderId)
           // The window may have started at welcome and acquired a vault later.
           const current = windows.get(window)
           if (current) vaultWindows.delete(current.id)
@@ -80,13 +89,19 @@ export class MainWindow extends Context.Service<
         }
         const source = sourceWindowId === undefined ? undefined : Array.from(windows.keys()).find((window) => window.id === sourceWindowId)
         if (source && !source.isDestroyed() && windows.get(source) === undefined) {
-          // Bind before navigation so the renderer can resolve its context immediately.
+          // Build and bind before navigation so requests already have their Vault services.
+          const services = yield* runtimes.open(vault.id).pipe(Effect.mapError((cause) => new RendererLoadError({ cause })))
+          // Opening storage can yield while the source window closes.
+          if (source.isDestroyed()) return yield* create(vault)
+          const senderId = source.webContents.id
+          contexts.bind(senderId, services)
           windows.set(source, vault)
           vaultWindows.set(vault.id, { window: source, vault })
           yield* loadRenderer(source, `vault/${vault.id}`).pipe(
             Effect.onError(() =>
               Effect.gen(function* () {
                 vaultWindows.delete(vault.id)
+                contexts.unbind(senderId)
                 if (!source.isDestroyed()) {
                   windows.set(source, undefined)
                   yield* loadRenderer(source).pipe(Effect.catch((error) => Effect.logError('Failed to restore welcome page', error)))

@@ -59,7 +59,7 @@ describe('Routine details', () => {
       }
     ]
 
-    render(<RoutinePanel vaultId="vault" />)
+    render(<RoutinePanel />)
     fireEvent.click(screen.getByRole('button', { name: '打开 每日邮件整理 Routine 详情' }))
     fireEvent.click(screen.getByRole('button', { name: '查看全部 Prompt' }))
 
