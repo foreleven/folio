@@ -31,7 +31,7 @@ export const RoutineSchedulerLive = Layer.unwrap(
           (vault) =>
             runtimes.open(vault.id).pipe(
               Effect.flatMap((context) => Context.get(context, TaskService).tickRoutines),
-              Effect.catch(() => Effect.logWarning('A Vault Routine check failed; other Vaults continue.'))
+              Effect.catch(error => Effect.logWarning('A Vault Routine check failed; other Vaults continue.', { vaultId: vault.id }, error))
             ),
           { concurrency: 4, discard: true }
         )

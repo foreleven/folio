@@ -1,9 +1,8 @@
 import { Context, Effect, FileSystem, Layer, Schema } from 'effect'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, sep } from 'node:path'
 import agentPackage from '../../../../../packages/agent/package.json'
 
 export interface AgentRuntimePaths {
-  readonly nodeExecutable: string
   readonly entrypoint: string
   readonly agentVersion: string
   /** Optional local Codex app-server selected by the host environment. */
@@ -14,7 +13,7 @@ export class AgentRuntimeError extends Schema.TaggedError<AgentRuntimeError>()('
   reason: Schema.Literals(['unavailable', 'incompatible']), message: Schema.String
 }) {}
 const failure = (reason: AgentRuntimeError['reason']) => new AgentRuntimeError({ reason,
-  message: reason === 'incompatible' ? 'The Agent runtime does not match this platform.' : 'The bundled Agent runtime is unavailable.' })
+  message: reason === 'incompatible' ? 'The Agent runtime does not match this platform.' : 'The desktop Agent Worker entrypoint is unavailable.' })
 
 /** Resolves the Agent entry built with the app lazily; browsing does not require starting an Agent. */
 export class AgentRuntime extends Context.Service<AgentRuntime, {
@@ -23,18 +22,19 @@ export class AgentRuntime extends Context.Service<AgentRuntime, {
   static layer(directory: string) {
     return Layer.effect(AgentRuntime, Effect.gen(function*() {
       const fs = yield* FileSystem.FileSystem
-      /** Uses the application executable and a fixed build entry, never renderer-supplied paths. */
+      /** Resolves the Worker entry built with the desktop application, never renderer-supplied paths. */
       const get = Effect.gen(function*() {
         if (!isAbsolute(directory)) return yield* failure('unavailable')
-        const root = yield* fs.realPath(directory)
-        const nodeExecutable = process.execPath
-        const entrypoint = join(root, 'agent.js')
+        // ESM Worker resolution uses Node's native package reader, which cannot
+        // reliably read ASAR package scopes. Builder unpacks this runtime and deps.
+        const runtimeDirectory = directory.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`)
+        const root = yield* fs.realPath(runtimeDirectory)
+        const entrypoint = join(root, 'agent-worker.js')
         for (const path of [entrypoint]) {
           if ((yield* fs.realPath(path)) !== path || (yield* fs.stat(path)).type !== 'File') return yield* failure('unavailable')
         }
-        // The process boundary probes Electron in Node mode for SQLite before opening ACP.
         const codexExecutable = process.env.FOLIO_CODEX_EXECUTABLE
-        return { nodeExecutable, entrypoint, agentVersion: agentPackage.version,
+        return { entrypoint, agentVersion: agentPackage.version,
           ...(codexExecutable && isAbsolute(codexExecutable) ? { codexExecutable } : {}) }
       }).pipe(Effect.mapError(error => error instanceof AgentRuntimeError ? error : failure('unavailable')))
       return AgentRuntime.of({ get })

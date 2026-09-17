@@ -16,8 +16,10 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
   Pick<HarnessStore['Service'], 'bindSession' | 'reserveRun' | 'markRunning' | 'finishRun'> &
   Pick<HarnessEventStore['Service'], 'appendUpdate' | 'appendProtocol' | 'appendProtocolDiagnostic'> & {
     readonly flush: Effect.Effect<void, HarnessStoreError>
+    readonly workerStarted: (sessionId: string, threadId: number) => Effect.Effect<void, HarnessStoreError>
+    readonly workerStopped: (sessionId: string) => Effect.Effect<void, HarnessStoreError>
     readonly processStarted: (sessionId: string, pid: number) => Effect.Effect<void, HarnessStoreError>
-    readonly processStopped: (sessionId: string) => Effect.Effect<void, HarnessStoreError>
+    readonly processStopped: (sessionId: string, pid?: number) => Effect.Effect<void, HarnessStoreError>
     readonly finishRequest: (request: ExecutionRequest, outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted', error?: string) => Effect.Effect<void, HarnessStoreError>
   }
 >()('folio/services/ExecutionEventSink') {
@@ -40,15 +42,17 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
       yield* log.append({ eventId, vaultId: vault.id, taskId: request.taskId, sessionId: request.sessionId,
         runId: request.id, attemptId: request.owner, payload })
     })
-    const emit = (id: string, bySession: boolean, payload: ExecutionEventPayload, stable = false, project = true) => Effect.gen(function* () {
+    const emit = (id: string, bySession: boolean, payload: ExecutionEventPayload, stable: boolean | string = false, project = true) => Effect.gen(function* () {
       const request = yield* active(id, bySession)
-      yield* publish(request, payload, stable ? `${request.owner}:${payload._tag}` : undefined)
+      yield* publish(request, payload, stable ? `${request.owner}:${typeof stable === 'string' ? stable : payload._tag}` : undefined)
       if (project) yield* subscriber.drain
     })
     return ExecutionEventSink.of({
       flush: subscriber.drain,
-      processStarted: (id, pid) => emit(id, true, { _tag: 'process-started', pid }, true),
-      processStopped: id => emit(id, true, { _tag: 'process-stopped' }, true, false),
+      workerStarted: (id, threadId) => emit(id, true, { _tag: 'worker-started', ownerPid: process.pid, threadId }, true),
+      workerStopped: id => emit(id, true, { _tag: 'worker-stopped' }, true, false),
+      processStarted: (id, pid) => emit(id, true, { _tag: 'process-started', pid }, `process-started:${pid}`),
+      processStopped: (id, pid) => emit(id, true, { _tag: 'process-stopped', ...(pid === undefined ? {} : { pid }) }, pid === undefined ? true : `process-stopped:${pid}`, false),
       bindSession: (id, binding) => emit(id, true, { _tag: 'session-bound', binding }, true),
       reserveRun: run => emit(run.id, false, { _tag: 'run-reserved', run }, true),
       markRunning: id => emit(id, false, { _tag: 'run-running' }, true, false),
@@ -63,6 +67,8 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
       // The receipt survives local projection failure, including failures before a Run existed.
       finishRequest: (request, outcome, error) => Effect.gen(function* () {
         yield* subscriber.drain
+        const workers = yield* sql<{ stopped: number }>`SELECT stopped FROM execution_workers WHERE request_id=${request.id}`
+        if (workers.some(worker => !worker.stopped)) return yield* invalid()
         const processes = yield* sql<{ stopped: number }>`SELECT stopped FROM execution_processes WHERE request_id=${request.id}`
         if (processes.some(process => !process.stopped)) return yield* invalid()
         yield* publish(request, { _tag: 'request-finished', outcome, error: error ?? null }, `${request.owner}:request-finished`)

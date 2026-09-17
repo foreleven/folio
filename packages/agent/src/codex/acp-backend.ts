@@ -1,12 +1,15 @@
+import type { CodexProcessTransport } from "./process-transport.js";
 import { RequestError, SessionUpdate } from "@agentclientprotocol/sdk/experimental/v2";
-import { NodeServices } from "@effect/platform-node";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Exit, Schema, Scope } from "effect";
 import { CodexSessionIdentity, type AcpSessionBackendFactory } from "../acp/session-backend.js";
 import { openCodexTurnRuntime, CodexTurnError, type CodexTurnRuntimeOptions } from "./turn-runtime.js";
 
 export interface CodexAcpBackendOptions {
+  readonly processTransport?: CodexProcessTransport;
   readonly executable?: string;
   readonly skillPaths?: readonly string[];
+  readonly onProcessStarted?: (pid: number) => Promise<void>;
   /** Subprocess test seam; production always uses the native Turn runtime. */
   readonly acquire?: (options: CodexTurnRuntimeOptions) => ReturnType<typeof openCodexTurnRuntime>;
 }
@@ -40,7 +43,7 @@ export const makeCodexAcpBackend = (options: CodexAcpBackendOptions = {}): AcpSe
     let completion: Promise<void> | undefined;
     try {
       const runtime = await run((options.acquire ?? openCodexTurnRuntime)({
-        cwd, nativeSessionId: resume?.nativeSessionId, executable: options.executable, skillPaths: options.skillPaths, onUpdate: async (update) => {
+        cwd, processTransport: options.processTransport, nativeSessionId: resume?.nativeSessionId, executable: options.executable, skillPaths: options.skillPaths, onProcessStarted: options.onProcessStarted, onUpdate: async (update) => {
           if (SessionUpdate.isStateUpdate(update) && update.state === "idle") finalizing = true;
           await onUpdate(update);
         },

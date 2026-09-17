@@ -37,12 +37,20 @@ export class VaultExecutionEvents extends Context.Service<VaultExecutionEvents, 
       if (request.taskId !== event.taskId || request.sessionId !== event.sessionId || request.owner !== event.attemptId) return yield* invalid()
       const payload = event.payload
       switch (payload._tag) {
+        case 'worker-started':
+          yield* sql`INSERT INTO execution_workers (request_id, owner_pid, thread_id)
+            VALUES (${event.runId}, ${payload.ownerPid}, ${payload.threadId})`
+          break
+        case 'worker-stopped':
+          yield* sql`UPDATE execution_workers SET stopped=1 WHERE request_id=${event.runId}`
+          break
         case 'process-started':
           yield* sql`INSERT INTO execution_processes (request_id, pid) VALUES (${event.runId}, ${payload.pid})`
           if (yield* routines.executionForTask(event.taskId)) yield* routines.setStatus(event.taskId, 'preparing')
           break
         case 'process-stopped':
-          yield* sql`UPDATE execution_processes SET stopped=1 WHERE request_id=${event.runId}`
+          if (payload.pid === undefined) yield* sql`UPDATE execution_processes SET stopped=1 WHERE request_id=${event.runId}`
+          else yield* sql`UPDATE execution_processes SET stopped=1 WHERE request_id=${event.runId} AND pid=${payload.pid}`
           break
         case 'session-bound':
           yield* store.bindSession(event.sessionId, payload.binding)
@@ -61,6 +69,7 @@ export class VaultExecutionEvents extends Context.Service<VaultExecutionEvents, 
           yield* store.finishRun(event.runId, payload.outcome, payload.error ?? undefined)
           break
         case 'request-finished': {
+          if ((yield* sql`SELECT request_id FROM execution_workers WHERE request_id=${event.runId} AND stopped=0`).length) return yield* invalid()
           const run = (yield* store.runs(event.taskId)).find(value => value.id === event.runId)
           if (run?.state === 'preparing' || run?.state === 'running' || (!run && payload.outcome === 'succeeded')) return yield* invalid()
           if ((yield* sql`SELECT request_id FROM execution_processes WHERE request_id=${event.runId} AND stopped=0`).length) return yield* invalid()

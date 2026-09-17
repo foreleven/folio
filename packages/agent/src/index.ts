@@ -78,4 +78,9 @@ export { makePiAcpBackend } from "./pi/acp-backend.js";
 export { makeCodexAcpBackend, type CodexAcpBackendOptions } from "./codex/acp-backend.js";
 export { nativeAgent, NativeSessionIdentity, CodexSessionIdentity, type AcpSessionBackend, type AcpSessionBackendFactory } from "./acp/session-backend.js";
 
-export { SessionLeaseError } from "./acp/session-lease.js";
+export { SessionLeaseError, SessionLeaseStore } from "./acp/session-lease.js";
+export { openAgentExecution, type AgentExecution, type AgentExecutionOptions } from "./runtime/execution.js";
+
+export type { CodexProcessTransport } from "./codex/process-transport.js";
+
+export { makeHostToolDefinitions, makePiLocalToolExecutor, type PiToolExecutor, type PiToolResult } from "./pi/host-tools.js";

@@ -1,3 +1,5 @@
+import { AgentWorkerPool } from './agent-worker-pool'
+import { openHarnessWorkerSession, type HarnessWorkerSessionOptions } from './harness-worker-session'
 import { ExecutionEventSink } from './execution-event-sink'
 import type { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
 import { SessionArchive, SessionLeaseError, nativeAgent } from '@folio/agent'
@@ -8,10 +10,9 @@ import { ChildProcessSpawner } from 'effect/unstable/process'
 import { HarnessStoreError, type SessionRecord, type TaskRecord } from '../../shared/harness'
 import { HarnessStore } from './harness-store'
 import { HarnessEventStore } from './harness-event-store'
-import { openHarnessSession, type HarnessSessionOptions } from './harness-session'
 
-type Session = Omit<Effect.Success<ReturnType<typeof openHarnessSession>>, 'close'>
-type RuntimeOptions = Omit<HarnessSessionOptions, 'taskId' | 'sessionId'>
+type Session = Omit<Effect.Success<ReturnType<typeof openHarnessWorkerSession>>, 'close'>
+type RuntimeOptions = Omit<HarnessWorkerSessionOptions, 'taskId' | 'sessionId'>
 interface Entry {
   readonly taskId: string
   readonly ready: Deferred.Deferred<Session, HarnessStoreError>
@@ -45,6 +46,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
       const store = yield* HarnessStore
       const dependencies = Context.make(HarnessStore, store).pipe(
         Context.add(HarnessEventStore, yield* HarnessEventStore),
+        Context.add(AgentWorkerPool, yield* AgentWorkerPool),
         Context.add(ExecutionEventSink, yield* ExecutionEventSink),
         Context.add(ChildProcessSpawner.ChildProcessSpawner, yield* ChildProcessSpawner.ChildProcessSpawner)
       )
@@ -81,7 +83,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
             : saved.purpose === 'task'
               ? task.worktree
               : yield* failure('invalid-state')
-          const session = yield* openHarnessSession({ ...runtimeOptions, ...resources, taskId, sessionId, cwd })
+          const session = yield* openHarnessWorkerSession({ ...runtimeOptions, ...resources, taskId, sessionId, cwd })
           // Callers cannot close the private resource Scope without also releasing the registry slot.
           yield* Deferred.succeed(ready, { pid: session.pid, connectionId: session.connectionId,
             prompt: session.prompt, cancel: session.cancel })
@@ -89,7 +91,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
         }).pipe(
           Effect.scoped,
           Effect.provide(dependencies),
-          Effect.catch(() => Deferred.fail(ready, failure('storage'))),
+          Effect.catch(error => Effect.logError('Agent Worker Session startup failed', { taskId, sessionId }, error).pipe(Effect.andThen(Deferred.fail(ready, error)))),
           Effect.onExit(() => Deferred.fail(ready, failure('invalid-state'))),
           Effect.asVoid,
           Effect.interruptible,

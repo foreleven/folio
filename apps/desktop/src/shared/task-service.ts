@@ -1,4 +1,4 @@
-import type { ExecutionRequest } from './execution'
+import type { ExecutionRequest, ExecutionCounts } from './execution'
 import { Context, Effect } from 'effect'
 import type { HarnessStoreError, SessionRecord, TaskRecord, RunRecord } from './harness'
 import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution } from './routine'
@@ -39,6 +39,7 @@ export class TaskService extends Context.Service<
     readonly abortTaskWikiConflict: (taskId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly pendingTaskSynchronizations: (taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
+    readonly executionCounts: Effect.Effect<ExecutionCounts, HarnessStoreError>
     readonly claimExecution: (owner: string) => Effect.Effect<ExecutionRequest | null, HarnessStoreError>
     readonly recoverExecutionState: Effect.Effect<number, HarnessStoreError>
     readonly executeRequest: (request: ExecutionRequest) => Effect.Effect<void, HarnessStoreError>

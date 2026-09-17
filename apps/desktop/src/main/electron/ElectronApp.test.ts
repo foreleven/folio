@@ -1,9 +1,8 @@
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
-import { NodeServices } from '@effect/platform-node'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { openAgentProcess } from '../services/agent-process'
+import { Worker } from 'node:worker_threads'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ElectronApp } from './ElectronApp'
 
@@ -40,24 +39,22 @@ beforeEach(() => {
 })
 
 describe('ElectronApp live service', () => {
-  it('keeps a real Agent alive without windows and holds repeated Quit until dependent cleanup finishes', async () => {
+  it('keeps a real Worker alive without windows and holds repeated Quit until dependent cleanup finishes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'folio-app-shutdown-'))
     const entrypoint = join(directory, 'agent.mjs')
-    await writeFile(entrypoint, "process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'ready'})+'\\n');setInterval(()=>{},1000)")
-    let pid = 0
+    await writeFile(entrypoint, "import { parentPort } from 'node:worker_threads'; parentPort.postMessage('ready'); setInterval(()=>{},1000)")
+    let exited = false
     let release!: () => void
     let cleanupStarted = false
     const barrier = new Promise<void>(resolve => { release = resolve })
     const resources = Layer.effectDiscard(Effect.gen(function*() {
       yield* ElectronApp
-      const agent = yield* openAgentProcess({ nodeExecutable: process.execPath, entrypoint, cwd: directory,
-        configDirectory: directory, agentDirectory: directory, agent: 'pi' })
-      pid = agent.pid
-      const reader = agent.stream.readable.getReader()
-      yield* Effect.promise(() => reader.read())
-      reader.releaseLock()
+      const worker = new Worker(entrypoint)
+      const stopped = new Promise<void>(resolve => worker.once('exit', () => { exited = true; resolve() }))
+      yield* Effect.addFinalizer(() => Effect.promise(async () => { await worker.terminate(); await stopped }))
+      yield* Effect.promise(() => new Promise<void>((resolve, reject) => { worker.once('message', () => resolve()); worker.once('error', reject) }))
       yield* Effect.addFinalizer(() => Effect.promise(async () => { cleanupStarted = true; await barrier }))
-    })).pipe(Layer.provide(NodeServices.layer))
+    }))
     const runtime = ManagedRuntime.make(resources.pipe(Layer.provideMerge(ElectronApp.layer)))
     try {
       const app = await runtime.runPromise(ElectronApp)
@@ -65,7 +62,7 @@ describe('ElectronApp live service', () => {
       const events = runtime.runPromise(Stream.runForEach(app.events, event => Effect.sync(() => { observed.push(event._tag) })))
       electronMocks.listeners.get('window-all-closed')?.()
       await vi.waitFor(() => expect(observed).toContain('WindowAllClosed'))
-      expect(() => process.kill(pid, 0)).not.toThrow()
+      expect(exited).toBe(false)
       expect(electronMocks.quit).not.toHaveBeenCalled()
       const preventDefault = vi.fn()
       electronMocks.listeners.get('before-quit')?.({ preventDefault })
@@ -75,10 +72,10 @@ describe('ElectronApp live service', () => {
       electronMocks.listeners.get('before-quit')?.({ preventDefault })
       expect(preventDefault).toHaveBeenCalledTimes(2)
       expect(electronMocks.quit).not.toHaveBeenCalled()
-      expect(() => process.kill(pid, 0)).not.toThrow()
+      expect(exited).toBe(false)
       release()
       await disposing
-      expect(() => process.kill(pid, 0)).toThrow()
+      expect(exited).toBe(true)
       expect(electronMocks.quit).toHaveBeenCalledOnce()
     } finally { release(); await runtime.dispose(); await rm(directory, { recursive: true, force: true }) }
   }, 10000)

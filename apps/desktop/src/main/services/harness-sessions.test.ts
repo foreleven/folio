@@ -1,3 +1,4 @@
+import { AgentWorkerPool } from './agent-worker-pool'
 import { protocolTestSink } from './testing/execution-event-sink'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Fiber, Layer, ManagedRuntime } from 'effect'
@@ -25,13 +26,13 @@ beforeEach(async () => {
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
-/** Uses production ACP/CLI/process layers and real Git/SQLite; only the native protocol endpoint is a fixture. */
-function runtime(entrypoint = resolve('../../packages/agent/dist/cli.js')) {
-  return ManagedRuntime.make(HarnessSessions.layer({ nodeExecutable: process.execPath, entrypoint,
+/** Uses the production Worker and SDK layers and real Git/SQLite; only the native protocol endpoint is a fixture. */
+function runtime(entrypoint = resolve('out/main/agent-worker.js')) {
+  return ManagedRuntime.make(HarnessSessions.layer({ entrypoint,
     configDirectory: root, agentDirectory: join(root, 'agent'), sessionStorageDirectory: join(root, 'vault-history'), codexExecutable: join(root, 'codex')
   }).pipe(
     Layer.provide(protocolTestSink),
-    Layer.provideMerge(TaskWorktrees.layer(root)),
+    Layer.provide(AgentWorkerPool.layer), Layer.provideMerge(TaskWorktrees.layer(root)),
     Layer.provideMerge(Layer.merge(HarnessStore.layer, HarnessEventStore.layer)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer)
   ))

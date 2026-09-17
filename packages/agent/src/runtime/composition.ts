@@ -1,3 +1,4 @@
+import { type PiToolExecutor } from "../pi/host-tools.js";
 import type { CreateModelRuntimeOptions, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { ModelRuntime as PiModelRuntime } from "@earendil-works/pi-coding-agent";
 import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
@@ -54,6 +55,7 @@ type RuntimeFactory = (options: CreateModelRuntimeOptions) => Promise<ModelRunti
 type SessionFactoryBuilder = typeof makePiSessionFactory;
 
 export interface FolioAgentRuntimeCompositionOptions {
+  readonly toolExecutor?: PiToolExecutor;
   /** Explicit mounted entrypoints; no global/project Skill discovery is enabled. */
   readonly skillPaths?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
@@ -196,6 +198,7 @@ export const makeFolioAgentRuntimeComposition = (
     }
     runtime = created;
     const sessionFactory = sessionFactoryBuilder({
+      toolExecutor: options.toolExecutor,
       agentDirectory: snapshot.agentDirectory,
       sessionDirectory: options.sessionDirectory,
       skillPaths: options.skillPaths,

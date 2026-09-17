@@ -1,3 +1,4 @@
+import type { AgentWorkerPool } from './agent-worker-pool'
 import { Effect } from 'effect'
 import type { SqlClient } from 'effect/unstable/sql'
 import type { ExecutionQueue } from './execution-queue'
@@ -20,6 +21,7 @@ export function hasExecutionProcess(pid: number): boolean {
  * and archive reconciliation are reused from the existing Harness instead of guessing success.
  */
 export function recoverExecutions(deps: {
+  readonly workers: AgentWorkerPool['Service']
   readonly owned: ReadonlySet<string>
   readonly queue: ExecutionQueue['Service']
   readonly sink: ExecutionEventSink['Service']
@@ -33,12 +35,18 @@ export function recoverExecutions(deps: {
     for (const request of yield* deps.queue.list()) {
       if (request.state === 'queued' || request.endedAt !== null || deps.owned.has(request.id)) continue
       yield* Effect.gen(function* () {
-        const processes = yield* deps.sql<{ pid: number; stopped: number }>`SELECT pid, stopped FROM execution_processes WHERE request_id=${request.id}`
-        const process = processes[0]
-        if (process && !process.stopped) {
-          if (hasExecutionProcess(process.pid)) return
-          yield* deps.sink.processStopped(request.sessionId)
+        const workers = yield* deps.sql<{ owner_pid: number; thread_id: number; stopped: number }>`SELECT owner_pid, thread_id, stopped FROM execution_workers WHERE request_id=${request.id}`
+        const worker = workers[0]
+        if (worker && !worker.stopped) {
+          if (worker.owner_pid === process.pid) {
+            if (deps.workers.hasThread(worker.thread_id)) return
+            yield* Effect.tryPromise({ try: () => deps.workers.reconcile(worker.thread_id), catch: error => error })
+          } else if (hasExecutionProcess(worker.owner_pid)) return
         }
+        const processes = yield* deps.sql<{ pid: number; stopped: number }>`SELECT pid, stopped FROM execution_processes WHERE request_id=${request.id}`
+        if (processes.some(native => !native.stopped && hasExecutionProcess(native.pid))) return
+        for (const native of processes) if (!native.stopped) yield* deps.sink.processStopped(request.sessionId, native.pid)
+        if (worker && !worker.stopped) yield* deps.sink.workerStopped(request.sessionId)
         let run = (yield* deps.store.runs(request.taskId)).find(value => value.id === request.id)
         const session = (yield* deps.store.sessions(request.taskId)).find(value => value.id === request.sessionId)
         if (yield* deps.sessions.hasLiveTask(request.taskId)) return

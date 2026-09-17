@@ -11,6 +11,7 @@ export const protocolTestSink = Layer.effect(ExecutionEventSink, Effect.gen(func
     bindSession: store.bindSession, reserveRun: store.reserveRun, markRunning: store.markRunning,
     finishRun: store.finishRun, appendUpdate: events.appendUpdate, appendProtocol: events.appendProtocol,
     appendProtocolDiagnostic: events.appendProtocolDiagnostic, flush: Effect.void,
+    workerStarted: () => Effect.void, workerStopped: () => Effect.void,
     processStarted: () => Effect.void, processStopped: () => Effect.void,
     finishRequest: () => Effect.die('Protocol-only fixtures must not finish queue requests.')
   })

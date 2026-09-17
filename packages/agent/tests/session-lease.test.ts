@@ -40,6 +40,11 @@ afterEach(async () => {
 });
 
 describe('durable session ownership', () => {
+  it('releases a Worker that exited before creating a store without creating evidence', async () => {
+    const leases = await store();
+    await leases.releaseExitedThread(1);
+    await expect(access(join(leases.directory, 'execution-owners.db'))).rejects.toThrow();
+  });
   it('does not create missing ownership evidence while recovering or releasing', async () => {
     const leases = await store();
     const filename = join(leases.directory, 'execution-owners.db');

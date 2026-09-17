@@ -1,3 +1,5 @@
+import { AgentWorkerPool } from './agent-worker-pool'
+import { VaultContext } from './vault-context'
 import { ExecutionEventSink } from './execution-event-sink'
 import { recoverExecutions } from './execution-recovery'
 import agentPackage from '../../../../../packages/agent/package.json'
@@ -114,6 +116,8 @@ export { TaskService } from '../../shared/task-service'
 export const TaskServiceLive = Layer.effect(
   TaskService,
   Effect.gen(function* () {
+    const workers = yield* AgentWorkerPool
+    const vault = yield* VaultContext
     const workspace = yield* WorkspaceChanges
     const changes = yield* GitChangeApplications
     const synchronization = yield* TaskGitSynchronization
@@ -444,7 +448,9 @@ export const TaskServiceLive = Layer.effect(
       yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) })
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
       return { execution, task, run }
-    }, sql.withTransaction, Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
+    }, sql.withTransaction,
+      (effect, input) => effect.pipe(Effect.tapError(error => Effect.logWarning('Routine submission failed', { vaultId: vault.id, routineId: input.routineId }, error))),
+      Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
     /** Replayable post-processing is derived from durable requests, never an in-memory callback. */
     const settleSuccessfulExecution = (request: ExecutionRequest) => Effect.gen(function* () {
       if (request.purpose === 'conflict-resolution') {
@@ -488,7 +494,9 @@ export const TaskServiceLive = Layer.effect(
       const outcome = run?.state === 'succeeded' ? 'succeeded' : latest.cancelRequested ? 'cancelled'
         : run ? run.state
         : Exit.isFailure(result) && Cause.hasInterrupts(result.cause) ? 'interrupted' : 'failed'
-      yield* sink.finishRequest(request, outcome, outcome === 'failed' ? 'Agent preparation or execution failed. Inspect the saved execution before retrying.' : undefined)
+      const executionError = Exit.isFailure(result) ? Cause.pretty(result.cause) : run?.error ?? undefined
+      if (executionError) yield* Effect.logError('Task Worker execution failed', { vaultId: vault.id, taskId: request.taskId, runId: request.id }, executionError)
+      yield* sink.finishRequest(request, outcome, outcome === 'failed' || outcome === 'interrupted' ? executionError ?? 'Agent execution ended without a successful result.' : undefined)
       if (outcome === 'succeeded') yield* settleSuccessfulExecution(request)
     })).pipe(Effect.ensuring(Effect.sync(() => { ownedExecutions.delete(request.id) })))
     const dispatchRoutine = Effect.fn('TaskService.dispatchRoutine')(function* (id: string) {
@@ -508,7 +516,7 @@ export const TaskServiceLive = Layer.effect(
         // A failed/uncertain execution needs an explicit retry; a timer must not replay its
         // prompt after an Agent may already have produced external effects.
         if ((yield* routines.executions(routine.id)).some(execution => ['failed', 'interrupted', 'cancelled'].includes(execution.status))) continue
-        yield* dispatchRoutine(routine.id).pipe(Effect.catch(() => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.')))
+        yield* dispatchRoutine(routine.id).pipe(Effect.catch(error => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.', { vaultId: vault.id, routineId: routine.id }, error)))
       }
     }).pipe(Effect.mapError(safeError))
     /** Returns only this Task's actionable operation after proving the Task belongs to the Vault. */
@@ -526,12 +534,13 @@ export const TaskServiceLive = Layer.effect(
       return settled
     })
     return TaskService.of({
+      executionCounts: queue.counts,
       tickRoutines,
       dispatchRoutine,
       runRoutine,
       executeRequest,
       recoverExecutionState: Effect.gen(function* () {
-        yield* recoverExecutions({ owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
         return (yield* queue.list()).filter(request => request.state !== 'queued' && request.endedAt === null && !ownedExecutions.has(request.id)).length
       }).pipe(gate.withPermit, Effect.mapError(safeError), Effect.tap(() => Effect.gen(function* () {
         for (const request of yield* queue.list()) {
@@ -540,7 +549,7 @@ export const TaskServiceLive = Layer.effect(
         }
       }))),
       claimExecution: owner => Effect.gen(function* () {
-        yield* recoverExecutions({ owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
         const request = yield* queue.claim(owner)
         if (request) ownedExecutions.add(request.id)
         return request

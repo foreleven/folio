@@ -103,3 +103,38 @@ it('rolls back messages with the cursor, retries projection without execution an
     }))
   } finally { await vault.dispose(); await global.dispose() }
 })
+
+it('retains ownership until every native process and Worker has a cleanup receipt', async () => {
+  const global = ManagedRuntime.make(logLayer())
+  const log = await global.runPromise(ExecutionEventLog)
+  const vault = ManagedRuntime.make(vaultLayer(log))
+  let sequence = 0
+  const emit = (payload: ExecutionEventPayload) => global.runPromise(log.append({
+    eventId: `cleanup-${++sequence}`, vaultId: 'a', taskId: 'task', sessionId: 'session',
+    runId: 'run', attemptId: 'attempt', payload
+  }))
+  try {
+    await vault.runPromise(setup)
+    await emit({ _tag: 'worker-started', ownerPid: 123, threadId: 1 })
+    await emit({ _tag: 'process-started', pid: 101 })
+    await emit({ _tag: 'process-started', pid: 102 })
+    await emit({ _tag: 'process-stopped', pid: 101 })
+    await vault.runPromise(Effect.gen(function* () {
+      yield* (yield* VaultExecutionEvents).drain
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT pid FROM execution_processes WHERE stopped=0`).toEqual([{ pid: 102 }])
+      expect(yield* (yield* ExecutionQueue).get('run')).toMatchObject({ state: 'preparing', owner: 'attempt' })
+    }))
+    // Older journals have a stop receipt without a PID: it stops all processes for that request.
+    await emit({ _tag: 'process-stopped' })
+    await emit({ _tag: 'worker-stopped' })
+    await emit({ _tag: 'request-finished', outcome: 'failed', error: 'Worker crashed during startup' })
+    await vault.runPromise(Effect.gen(function* () {
+      yield* (yield* VaultExecutionEvents).drain
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT pid FROM execution_processes WHERE stopped=0`).toEqual([])
+      expect(yield* sql`SELECT thread_id FROM execution_workers WHERE stopped=0`).toEqual([])
+      expect(yield* (yield* ExecutionQueue).get('run')).toMatchObject({ state: 'failed', error: 'Worker crashed during startup' })
+    }))
+  } finally { await vault.dispose(); await global.dispose() }
+})

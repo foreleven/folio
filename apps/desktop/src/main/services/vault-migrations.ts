@@ -455,6 +455,23 @@ export const migrateVault = SqliteMigrator.run({
         request_id TEXT PRIMARY KEY REFERENCES execution_requests(id), pid INTEGER NOT NULL CHECK(pid>0),
         stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
       )`
+    }),
+    '0024_execution_workers': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`CREATE TABLE execution_workers (
+        request_id TEXT PRIMARY KEY REFERENCES execution_requests(id), owner_pid INTEGER NOT NULL,
+        thread_id INTEGER NOT NULL, stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
+      )`
+    }),
+    '0025_execution_process_groups': Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`CREATE TABLE execution_process_groups (
+        request_id TEXT NOT NULL REFERENCES execution_requests(id), pid INTEGER NOT NULL CHECK(pid>0),
+        stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1)), PRIMARY KEY(request_id, pid)
+      )`
+      yield* sql`INSERT INTO execution_process_groups SELECT request_id, pid, stopped FROM execution_processes`
+      yield* sql`DROP TABLE execution_processes`
+      yield* sql`ALTER TABLE execution_process_groups RENAME TO execution_processes`
     })
   })
 })

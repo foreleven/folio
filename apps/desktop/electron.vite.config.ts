@@ -1,10 +1,17 @@
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'electron-vite'
+import { resolve } from 'node:path'
 
 export default defineConfig({
   main: {
     build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          'agent-worker': resolve('src/main/workers/agent-worker.ts')
+        }
+      },
       externalizeDeps: {
         // These workspace packages expose TypeScript source rather than a
         // runtime build, so the main bundle must compile them in place.

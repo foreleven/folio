@@ -40,8 +40,10 @@ describe('durable execution queue', () => {
     }).pipe(Effect.provide(layer())))
     await Effect.runPromise(Effect.gen(function* () {
       const queue = yield* ExecutionQueue
+      expect(yield* queue.counts).toMatchObject({ queued: 1, running: 0, failed: 0 })
       expect(yield* queue.list()).toHaveLength(1)
       expect(yield* queue.claim('worker')).toMatchObject({ id: 'first', state: 'preparing', owner: 'worker' })
+      expect(yield* queue.counts).toMatchObject({ queued: 0, preparing: 1 })
     }).pipe(Effect.provide(layer())))
   })
 

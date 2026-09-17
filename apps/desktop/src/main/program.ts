@@ -1,8 +1,9 @@
+import { AgentWorkerPool } from './services/agent-worker-pool'
 import { ExecutionEventLog } from './services/execution-event-log'
 import { GlobalExecutionSchedulerLive } from './services/global-execution-scheduler'
 import { ExecutionNotifications } from './services/execution-scheduler'
 import { RoutineSchedulerLive } from './services/routine-scheduler'
-import { NodeServices } from '@effect/platform-node'
+import * as NodeServices from '@effect/platform-node/NodeServices'
 import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
 import { gmail, GmailAssetsDirectory } from '@folio/integrations/gmail'
 import { app } from 'electron'
@@ -116,6 +117,7 @@ export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, Routine
   Layer.provideMerge(MainWindow.layer),
   Layer.provide(VaultService.layer),
   Layer.provide(VaultRuntime.layer),
+  Layer.provide(AgentWorkerPool.layer),
   Layer.provide(ExecutionNotifications.layer),
   Layer.provide(ExecutionEventLog.layer),
   Layer.provide(VaultWindowContexts.layer),

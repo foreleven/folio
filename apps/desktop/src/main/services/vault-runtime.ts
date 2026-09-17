@@ -1,3 +1,4 @@
+import { AgentWorkerPool } from './agent-worker-pool'
 import { ExecutionEventLog } from './execution-event-log'
 import { ExecutionEventSink } from './execution-event-sink'
 import { VaultExecutionEvents } from './vault-execution-events'
@@ -43,6 +44,7 @@ export class VaultRuntime extends Context.Service<
       const notifications = yield* ExecutionNotifications
       const fs = yield* FileSystem.FileSystem
       const runtime = yield* AgentRuntime
+      const workerPool = yield* AgentWorkerPool
       const models = yield* ModelService
       const integrations = yield* IntegrationService
       const agentDirectory = models.directory
@@ -72,7 +74,7 @@ export class VaultRuntime extends Context.Service<
                         return HarnessSessions.layer(
                           runtime.get.pipe(
                             Effect.map((paths) => ({ ...paths, configDirectory: config.directory, agentDirectory, sessionStorageDirectory: join(directory, 'agent-history') })),
-                            Effect.mapError(safeError)
+                            Effect.mapError(error => new HarnessStoreError({ reason: 'storage', message: error.message }))
                           ),
                           join(directory, 'agent-history'),
                           taskResources.prepare,
@@ -82,6 +84,7 @@ export class VaultRuntime extends Context.Service<
                     )
                   )
                 ),
+                Layer.provide(Layer.succeed(AgentWorkerPool)(workerPool)),
                 Layer.provide(ExecutionEventSink.layer),
                 Layer.provide(VaultExecutionEvents.layer),
                 Layer.provide(Layer.succeed(ExecutionEventLog)(eventLog)),

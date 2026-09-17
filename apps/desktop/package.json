@@ -56,8 +56,9 @@
       "out/**/*"
     ],
     "asarUnpack": [
-      "out/main/assets/**",
-      "out/main/chunks/**"
+      "out/main/**",
+      "node_modules/**",
+      "package.json"
     ],
     "extraResources": [
       {

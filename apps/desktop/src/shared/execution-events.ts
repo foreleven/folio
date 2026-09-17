@@ -4,8 +4,10 @@ import { RecordedProtocolDiagnostic, RecordedProtocolFrame, RecordedUpdate } fro
 
 /** The global journal contains execution facts, never Vault database handles or credentials. */
 export const ExecutionEventPayload = Schema.Union([
+  Schema.TaggedStruct('worker-started', { ownerPid: Schema.Int, threadId: Schema.Int }),
+  Schema.TaggedStruct('worker-stopped', {}),
   Schema.TaggedStruct('process-started', { pid: Schema.Int.check(Schema.isGreaterThan(0)) }),
-  Schema.TaggedStruct('process-stopped', {}),
+  Schema.TaggedStruct('process-stopped', { pid: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))) }),
   Schema.TaggedStruct('session-bound', { binding: SessionBinding }),
   Schema.TaggedStruct('run-reserved', { run: NewRun }),
   Schema.TaggedStruct('run-running', {}),

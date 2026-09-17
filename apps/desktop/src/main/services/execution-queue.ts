@@ -1,6 +1,6 @@
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { ExecutionRequest, ExecutionSubmission } from '../../shared/execution'
+import { ExecutionRequest, ExecutionSubmission, emptyExecutionCounts, type ExecutionCounts } from '../../shared/execution'
 import { HarnessStoreError, RunOutcome } from '../../shared/harness'
 
 const failure = (reason: HarnessStoreError['reason']) => new HarnessStoreError({ reason,
@@ -12,6 +12,7 @@ const decode = Schema.decodeUnknownEffect(Schema.Array(Row))
 
 /** Vault-owned durable inbox; only the global Scheduler may claim work and assign an owner. */
 export class ExecutionQueue extends Context.Service<ExecutionQueue, {
+  readonly counts: Effect.Effect<ExecutionCounts, HarnessStoreError>
   readonly submit: (input: ExecutionSubmission) => Effect.Effect<ExecutionRequest, HarnessStoreError>
   readonly get: (id: string) => Effect.Effect<ExecutionRequest, HarnessStoreError>
   readonly list: (taskId?: string) => Effect.Effect<readonly ExecutionRequest[], HarnessStoreError>
@@ -96,6 +97,14 @@ export class ExecutionQueue extends Context.Service<ExecutionQueue, {
         return yield* get(id)
       }))
     }, Effect.mapError(safeError))
-    return ExecutionQueue.of({ submit, get, list, claim, running, finish, cancel })
+    return ExecutionQueue.of({
+      counts: sql<{ state: keyof ExecutionCounts; count: number }>`SELECT state, COUNT(*) AS count FROM execution_requests GROUP BY state`.pipe(
+        Effect.map(rows => {
+          const counts = emptyExecutionCounts()
+          for (const row of rows) counts[row.state] = row.count
+          return counts
+        }), Effect.mapError(safeError)),
+      submit, get, list, claim, running, finish, cancel
+    })
   }))
 }

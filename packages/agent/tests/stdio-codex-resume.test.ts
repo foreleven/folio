@@ -21,7 +21,8 @@ it.skipIf(process.platform === "win32")("runs the Codex CLI branch without Pi co
       const session = await context.request(methods.agent.session.new, { cwd: directory });
       expect(session._meta?.["folio/nativeSessionId"]).toBe("native-thread");
       await context.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: "early-completion" }] });
-      expect(updates.at(-1)).toMatchObject({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+      // ACP prompt acknowledges admission; the terminal notification arrives independently.
+      await expect.poll(() => updates.at(-1)).toMatchObject({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
       expect(JSON.parse(await readFile(join(directory, 'turn-input.json'), 'utf8'))).toEqual([
         { type: 'text', text: 'early-completion', text_elements: [] },
         { type: 'skill', name: 'selected', path: await realpath(selected) },

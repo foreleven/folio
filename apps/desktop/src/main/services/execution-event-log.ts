@@ -63,7 +63,13 @@ export class ExecutionEventLog extends Context.Service<ExecutionEventLog, {
     const unstoppedProcesses = (vaultId: string) => sql<{ pid: number }>`SELECT json_extract(started.payload, '$.pid') AS pid
       FROM execution_events started WHERE started.vault_id=${vaultId} AND json_extract(started.payload, '$._tag')='process-started'
       AND NOT EXISTS (SELECT 1 FROM execution_events stopped WHERE stopped.vault_id=started.vault_id
-        AND stopped.run_id=started.run_id AND stopped.attempt_id=started.attempt_id AND json_extract(stopped.payload, '$._tag')='process-stopped')`
+        AND stopped.run_id=started.run_id AND stopped.attempt_id=started.attempt_id AND json_extract(stopped.payload, '$._tag')='process-stopped'
+        AND (json_extract(stopped.payload, '$.pid') IS NULL OR json_extract(stopped.payload, '$.pid')=json_extract(started.payload, '$.pid')))
+      UNION ALL
+      SELECT json_extract(started.payload, '$.ownerPid') AS pid FROM execution_events started
+      WHERE started.vault_id=${vaultId} AND json_extract(started.payload, '$._tag')='worker-started'
+      AND NOT EXISTS (SELECT 1 FROM execution_events stopped WHERE stopped.vault_id=started.vault_id
+        AND stopped.run_id=started.run_id AND stopped.attempt_id=started.attempt_id AND json_extract(stopped.payload, '$._tag')='worker-stopped')`
       .pipe(Effect.map(rows => rows.map(row => row.pid)), Effect.mapError(safe))
     return ExecutionEventLog.of({ append, after, unstoppedProcesses, changes: Stream.fromPubSub(notifications) })
   })).pipe(Layer.provide(Reactivity.layer))

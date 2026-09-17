@@ -1,4 +1,5 @@
-import { Deferred, Effect, Queue, Schema, Stream } from "effect";
+import type { CodexProcessTransport } from "./process-transport.js";
+import { Deferred, Effect, Queue, Schema, Sink, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { isAbsolute } from "node:path";
 
@@ -30,11 +31,14 @@ export interface CodexServerEvent {
 }
 
 export interface CodexConnectionOptions {
+  readonly processTransport?: CodexProcessTransport;
   readonly cwd: string;
   /** Local installation or an explicitly supplied executable; never interpreted by a shell. */
   readonly executable?: string;
   /** Deadline for a protocol acknowledgement, not a limit on model/Task execution time. */
   readonly requestTimeoutMs?: number;
+  /** Host persists ownership before any native handshake or prompt. */
+  readonly onProcessStarted?: (pid: number) => Promise<void>;
 }
 
 /**
@@ -63,7 +67,23 @@ export const openCodexConnection = Effect.fn("CodexConnection.open")(function*(o
     yield* Queue.shutdown(outgoing);
   });
 
-  const child = yield* spawner.spawn(ChildProcess.make(options.executable ?? "codex", [
+  const transport = options.processTransport;
+  if (transport) yield* Effect.addFinalizer(() => Effect.promise(transport.close));
+  const child: {
+    pid: number;
+    stdin: Sink.Sink<void, Uint8Array, never, unknown>;
+    stdout: Stream.Stream<Uint8Array, unknown>;
+    stderr: Stream.Stream<Uint8Array, unknown>;
+    exitCode: Effect.Effect<unknown, unknown>;
+    kill: (options?: Parameters<ChildProcessSpawner.ChildProcessHandle["kill"]>[0]) => Effect.Effect<void, unknown>;
+  } = transport ? {
+    pid: transport.pid,
+    stdin: Sink.fromWritableStream({ evaluate: () => transport.stdin, onError: () => failure("closed") }),
+    stdout: Stream.fromReadableStream({ evaluate: () => transport.stdout, onError: () => failure("closed") }),
+    stderr: Stream.fromReadableStream({ evaluate: () => transport.stderr, onError: () => failure("closed") }),
+    exitCode: Effect.tryPromise({ try: () => transport.exited, catch: () => failure("closed") }),
+    kill: (_options?: unknown) => Effect.tryPromise({ try: transport.close, catch: () => failure("closed") }),
+  } : yield* spawner.spawn(ChildProcess.make(options.executable ?? "codex", [
     "app-server", "--listen", "stdio://",
     // Process-local override: selected Skills travel as explicit native inputs, not an inherited catalog.
     "--config", "skills.include_instructions=false",
@@ -71,6 +91,9 @@ export const openCodexConnection = Effect.fn("CodexConnection.open")(function*(o
     Effect.mapError(() => failure("spawn_failed")),
   );
   yield* Effect.addFinalizer(() => terminate(failure("closed")));
+  if (options.onProcessStarted) yield* Effect.tryPromise({
+    try: () => options.onProcessStarted!(child.pid), catch: () => failure("spawn_failed"),
+  });
 
   /** Serializes complete NDJSON records through one stdin writer. */
   const send = Effect.fn("CodexConnection.send")(function*(message: unknown) {

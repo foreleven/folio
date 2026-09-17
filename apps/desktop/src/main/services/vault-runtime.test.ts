@@ -1,3 +1,4 @@
+import { AgentWorkerPool } from './agent-worker-pool'
 import { DatabaseSync } from 'node:sqlite'
 import { ExecutionEventLog } from './execution-event-log'
 import { ExecutionNotifications } from './execution-scheduler'
@@ -19,6 +20,7 @@ import { ModelService } from './model-service'
 function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle'))) {
   return ManagedRuntime.make(
     Layer.merge(VaultRuntime.layer, VaultService.layer).pipe(
+      Layer.provide(AgentWorkerPool.layer),
       Layer.provide(ExecutionNotifications.layer),
       Layer.provideMerge(ExecutionEventLog.layer),
       Layer.provide(agent),
@@ -121,13 +123,13 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
   }
 })
 
-it.skipIf(process.platform === 'win32')('executes queued requests through the real Agent process and joins cancellation before releasing ownership', async () => {
+it.skipIf(process.platform === 'win32')('executes queued requests through the real Agent Worker and joins cancellation before releasing ownership', async () => {
   const root = await mkdtemp(join(tmpdir(), 'folio-queued-agent-'))
   const fixture = (await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8'))
     .replace('id: "native-thread"', 'id: process.cwd()')
   await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
   const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
-    nodeExecutable: process.execPath, entrypoint: resolve('../../packages/agent/dist/cli.js'),
+    entrypoint: resolve('out/main/agent-worker.js'),
     agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
   }) }))
   try {
@@ -244,8 +246,8 @@ it.skipIf(process.platform === 'win32').each(['run-finished', 'request-finished'
     const root = await mkdtemp(join(tmpdir(), 'folio-terminal-recovery-'))
     const fixture = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
     await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
-    const agent = Layer.succeed(AgentRuntime)({ get: Effect.succeed({ nodeExecutable: process.execPath,
-      entrypoint: resolve('../../packages/agent/dist/cli.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex') }) })
+    const agent = Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+      entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex') }) })
     let runtime = createRuntime(root, agent)
     let vaultId = ''
     const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'

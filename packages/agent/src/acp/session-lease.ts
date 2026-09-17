@@ -1,3 +1,4 @@
+import { threadId, isMainThread } from "node:worker_threads";
 import { SqliteClient } from "@effect/sql-sqlite-node";
 import { Effect, Schema, Semaphore } from "effect";
 import { Reactivity } from "effect/unstable/reactivity";
@@ -70,9 +71,39 @@ export class SessionLeaseStore {
           lease_key TEXT PRIMARY KEY, token TEXT NOT NULL, host TEXT NOT NULL,
           owner_pid INTEGER NOT NULL CHECK (owner_pid > 0), worker_pid INTEGER CHECK (worker_pid > 0)
         )`;
-        return yield* sql.withTransaction(body(sql));
+        return yield* sql.withTransaction(Effect.gen(function*() {
+          const columns = yield* sql<{ name: string }>`PRAGMA table_info(session_owners)`;
+          if (!columns.some(column => column.name === "owner_thread_id")) {
+            yield* sql`ALTER TABLE session_owners ADD COLUMN owner_thread_id INTEGER NOT NULL DEFAULT 0`;
+          }
+          return yield* body(sql);
+        }));
       }).pipe(Effect.provide(Reactivity.layer), Effect.catchDefect(() => Effect.fail(failure("unavailable")))))));
     } catch (error) { throw error instanceof SessionLeaseError ? error : failure("unavailable"); }
+  }
+
+  /**
+   * Host-only cleanup after joining a failed Worker thread. A surviving native child still
+   * prevents release; the caller must prove thread exit before invoking this operation.
+   */
+  async releaseExitedThread(exitedThreadId: number): Promise<void> {
+    if (!isMainThread || !Number.isSafeInteger(exitedThreadId) || exitedThreadId <= 0) throw failure("unavailable");
+    // A Worker can fail to import before it creates the ownership store. Absence
+    // then means there is no lease to release; other filesystem failures still fail.
+    try { await lstat(join(this.directory, "execution-owners.db")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw failure("unavailable");
+    }
+    await this.#transaction(sql => Effect.gen(function*() {
+      const owners = yield* sql`SELECT * FROM session_owners WHERE owner_pid=${process.pid}
+        AND owner_thread_id=${exitedThreadId} AND host=${hostname()}`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Owners)));
+      if (owners.some(owner => owner.worker_pid !== null && owner.worker_pid !== process.pid && alive(owner.worker_pid))) {
+        return yield* failure("worker_running");
+      }
+      yield* sql`DELETE FROM session_owners WHERE owner_pid=${process.pid}
+        AND owner_thread_id=${exitedThreadId} AND host=${hostname()}`;
+    }), true);
   }
 
   /** Claims both identities before execution. Recovery requires existing ownership evidence; absence is not proof of death. */
@@ -91,8 +122,8 @@ export class SessionLeaseStore {
         return yield* failure("busy");
       }
       if (owner) yield* sql`DELETE FROM session_owners WHERE lease_key = ${key} AND token = ${owner.token}`;
-      yield* sql`INSERT INTO session_owners (lease_key, token, host, owner_pid, worker_pid)
-        VALUES (${key}, ${token}, ${host}, ${process.pid}, ${workerPid})`;
+      yield* sql`INSERT INTO session_owners (lease_key, token, host, owner_pid, worker_pid, owner_thread_id)
+        VALUES (${key}, ${token}, ${host}, ${process.pid}, ${workerPid}, ${threadId})`;
     });
     await this.#transaction((sql) => Effect.gen(function*() {
       for (const key of keys) yield* claim(sql, key, null);
