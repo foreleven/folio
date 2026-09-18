@@ -3,16 +3,17 @@ import { VaultContext } from './vault-context'
 import { ExecutionEventSink } from './execution-event-sink'
 import { recoverExecutions } from './execution-recovery'
 import agentPackage from '../../../../../packages/agent/package.json'
+import { RunFiles } from './run-files'
 import { ExecutionQueue } from './execution-queue'
 import { ExecutionNotifications } from './execution-scheduler'
 import { SqlClient } from 'effect/unstable/sql'
-import type { ExecutionRequest } from '../../shared/execution'
+import type { RunRecord } from '../../shared/execution'
 import { TaskService } from '../../shared/task-service'
 import { RoutineStore } from './routine-store'
 import type { RunRoutine, SaveRoutine } from '../../shared/routine'
 import { HarnessRuns } from './harness-runs'
 import { ModelService } from './model-service'
-import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema, Semaphore } from 'effect'
+import { Cause, DateTime, Effect, Exit, Fiber, Layer, Semaphore } from 'effect'
 import { dirname, join } from 'node:path'
 import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -129,6 +130,7 @@ export const TaskServiceLive = Layer.effect(
     const worktrees = yield* TaskWorktrees
     const sessions = yield* HarnessSessions
     const queue = yield* ExecutionQueue
+    const runFiles = yield* RunFiles
     const sink = yield* ExecutionEventSink
     const notifications = yield* ExecutionNotifications
     const sql = yield* SqlClient.SqlClient
@@ -165,13 +167,13 @@ export const TaskServiceLive = Layer.effect(
     })
     /** Checks Task ownership before returning its independent execution histories. */
     const get = Effect.fn('TaskService.get')(function* (id: string) {
-      return { executions: yield* queue.list(id), routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
+      return { routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
     })
     /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
     const completeUnlocked = Effect.fn('TaskService.completeUnlocked')(function* (taskId: string) {
       const task = yield* store.task(taskId)
       const history = yield* store.runs(taskId)
-      if ((yield* queue.list(taskId)).some(request => request.endedAt === null) || history.some((run) => run.state === 'preparing' || run.state === 'running'))
+      if (history.some(run => run.endedAt === null))
         return yield* new HarnessStoreError({ reason: 'task-busy', message: 'Stop the active Run before completing this Task.' })
       if (task.state === 'active' && history.some((run) => run.state === 'succeeded' && run.syncState !== 'completed' && run.syncState !== 'not-required'))
         return yield* failure('invalid-state')
@@ -199,13 +201,14 @@ export const TaskServiceLive = Layer.effect(
         yield* worktrees.complete(taskId)
         return
       }
-      if (task.state !== 'active' || (yield* queue.list(taskId)).some(request => request.endedAt === null)) return
+      if (task.state !== 'active') return
       let history = yield* store.runs(taskId)
+      if (history.some(run => run.endedAt === null)) return
       // Routine prompts are source-ingestion prompts. Automatically close the
       // wiki receipt when no wiki files changed; an actual wiki edit still
       // follows the existing explicit save/synchronization path.
       for (const run of history.filter((candidate) => candidate.state === 'succeeded' && candidate.syncState === 'pending')) {
-        yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit }).pipe(Effect.catch(() => Effect.void))
+        yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit! }).pipe(Effect.catch(() => Effect.void))
       }
       history = yield* store.runs(taskId)
       const succeeded = history.filter((run) => run.state === 'succeeded')
@@ -277,24 +280,20 @@ export const TaskServiceLive = Layer.effect(
       const savedSessions = yield* store.sessions(task.id)
       const source = savedSessions.find((session) => session.id === input.sourceSessionId)
       if (!source || source.purpose !== 'task' || source.agent !== task.configuration.agent) return yield* failure('invalid-state')
-      const existingRequest = (yield* queue.list(task.id)).find(request => request.id === input.runId)
-      if (existingRequest) {
-        const target = savedSessions.find(session => session.id === input.sessionId)
-        if (existingRequest.sessionId !== input.sessionId || existingRequest.purpose !== 'conflict-resolution' || target?.syncOperationId !== operation.id) return yield* failure('invalid-state')
-        return existingRequest
-      }
-      if ((yield* queue.list(task.id)).some(request => request.purpose === 'conflict-resolution' && request.endedAt === null)) return yield* failure('task-busy')
-      const previousRun = (yield* store.runs(task.id)).find((run) => run.id === input.runId)
+      const history = yield* store.runs(task.id)
+      const previousRun = history.find(run => run.id === input.runId)
       if (previousRun) {
-        if (previousRun.sessionId !== input.sessionId || previousRun.purpose !== 'conflict-resolution' || previousRun.resumesRunId !== null) return yield* failure('invalid-state')
-        const target = savedSessions.find((session) => session.id === input.sessionId)
-        if (!target || target.purpose !== 'conflict-resolution' || target.syncOperationId !== operation.id || target.agent !== source.agent) return yield* failure('invalid-state')
-        // A lost post-processing reply is retried without redispatching the Prompt.
-        if (previousRun.state === 'succeeded' && operation.state !== 'aligned') {
+        const target = savedSessions.find(session => session.id === input.sessionId)
+        if (previousRun.sessionId !== input.sessionId || previousRun.purpose !== 'conflict-resolution' || previousRun.resumesRunId !== null
+          || target?.purpose !== 'conflict-resolution' || target.syncOperationId !== operation.id || target.agent !== source.agent) return yield* failure('invalid-state')
+        // A retry of a successful Run can finish post-processing after a lost reply;
+        // queue admission and execution history now refer to this same record.
+        if (previousRun.state === 'succeeded' && (operation.state === 'conflict' || operation.state === 'resolving')) {
           yield* synchronization.acceptAgentResolution(task.id, operation.id, previousRun.id)
         }
         return previousRun
       }
+      if (history.some(run => run.purpose === 'conflict-resolution' && run.endedAt === null)) return yield* failure('task-busy')
       if (operation.state !== 'conflict') return yield* failure('invalid-state')
       const context = yield* synchronization.resolutionContext(task.id, operation.id)
       const target = savedSessions.find((session) => session.id === input.sessionId)
@@ -419,13 +418,10 @@ export const TaskServiceLive = Layer.effect(
     /** Creates or coalesces one current execution, then optionally starts its Task Run. */
     const prepareRoutine = Effect.fn('TaskService.prepareRoutine')(function* (input: RunRoutine) {
       const execution = yield* routines.schedule(input.routineId)
-      const routine = yield* routines.get(input.routineId)
-      // Derive the reservation's Task identity from the execution so concurrent
-      // scheduler ticks converge on one Task instead of orphaning duplicates.
-      const taskId = execution.taskId ?? execution.id
-      const task = yield* create({ id: taskId, goal: routine.prompt, agent: routine.agent, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds })
-      const attached = yield* routines.attachTask(execution.id, task.id)
-      return { execution: attached, task }
+      // schedule reserves the Task atomically. Its configuration belongs to the
+      // captured revision, even if the Routine was edited before admission/retry.
+      const task = yield* store.task(execution.taskId)
+      return { execution, task }
     })
     const runRoutine = Effect.fn('TaskService.runRoutine')(function* (input: RunRoutine) {
       if (input.requestId) {
@@ -439,20 +435,18 @@ export const TaskServiceLive = Layer.effect(
       const { execution, task } = yield* prepareRoutine(input)
       const pending = (yield* queue.list(task.id)).find(request => request.endedAt === null)
       if (pending) return { execution, task, run: pending }
-      const routine = yield* routines.get(input.routineId)
       const sessionId = randomUUID()
       const runId = input.requestId ?? randomUUID()
-      const windowStart = execution.windowStart ?? Math.min(execution.triggerTime, execution.firstTriggerTime - routine.intervalMinutes * 60_000)
-      const windowEnd = execution.windowEnd ?? execution.triggerTime
-      const prompt = `${routine.prompt}\n\nRoutine execution window (use these exact ISO timestamps for extraction):\n- start: ${new Date(windowStart).toISOString()}\n- end: ${new Date(windowEnd).toISOString()}`
-      yield* prepareSession({ taskId: task.id, sessionId, agent: routine.agent, ...(routine.model ? { model: routine.model } : {}) })
+      if (execution.windowStart === null || execution.windowEnd === null) return yield* failure('invalid-state')
+      const prompt = `${task.goal}\n\nRoutine execution window (use these exact ISO timestamps for extraction):\n- start: ${new Date(execution.windowStart).toISOString()}\n- end: ${new Date(execution.windowEnd).toISOString()}`
+      yield* prepareSession({ taskId: task.id, sessionId, agent: task.configuration.agent, ...(execution.model ? { model: execution.model } : {}) })
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
-      return { execution, task, run }
+      return { execution: (yield* routines.executionForTask(task.id))!, task, run }
     }, sql.withTransaction,
       (effect, input) => effect.pipe(Effect.tapError(error => Effect.logWarning('Routine submission failed', { vaultId: vault.id, routineId: input.routineId }, error))),
       Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
     /** Replayable post-processing is derived from durable requests, never an in-memory callback. */
-    const settleSuccessfulExecution = (request: ExecutionRequest) => Effect.gen(function* () {
+    const settleSuccessfulExecution = (request: RunRecord) => Effect.gen(function* () {
       if (request.purpose === 'conflict-resolution') {
         const session = (yield* store.sessions(request.taskId)).find(value => value.id === request.sessionId)
         if (!session?.syncOperationId) return yield* failure('invalid-state')
@@ -464,10 +458,10 @@ export const TaskServiceLive = Layer.effect(
       yield* completeRoutineAfterReceipt(request.taskId)
     })
     /** A global slot is held until Run cleanup and the durable terminal receipt both complete. */
-    const executeRequest = (request: ExecutionRequest) => Effect.uninterruptibleMask(restore => Effect.gen(function* () {
-      yield* sink.flush
+    const executeRequest = (request: RunRecord) => Effect.uninterruptibleMask(restore => Effect.gen(function* () {
       const current = yield* queue.get(request.id)
       if (current.owner !== request.owner || current.state !== 'preparing' || !request.owner) return yield* failure('invalid-state')
+      yield* sink.begin(current)
       const result = yield* restore(Effect.gen(function* () {
         if (current.cancelRequested) return
         const worker = yield* runs.execute(request).pipe(Effect.forkScoped)
@@ -475,8 +469,6 @@ export const TaskServiceLive = Layer.effect(
           while (true) {
             const latest = yield* queue.get(request.id)
             if (latest.cancelRequested) {
-              // Preserve the user's cancellation outcome in the Run ledger as well. A failure
-              // before Run reservation has no Run to read, but its worker still must be joined.
               yield* runs.cancel(request.taskId, request.id).pipe(Effect.catch(() => Effect.void))
               yield* Fiber.interrupt(worker)
               return
@@ -487,17 +479,12 @@ export const TaskServiceLive = Layer.effect(
         yield* Fiber.join(worker)
       }).pipe(Effect.scoped, Effect.exit))
       const latest = yield* queue.get(request.id)
-      const run = (yield* store.runs(request.taskId)).find(value => value.id === request.id)
-      // Missing terminal receipts require archive reconciliation. Ending the request here
-      // would hide an active Run from restart recovery and release its durable reservation.
-      if (run?.state === 'preparing' || run?.state === 'running') return yield* failure('invalid-state')
-      const outcome = run?.state === 'succeeded' ? 'succeeded' : latest.cancelRequested ? 'cancelled'
-        : run ? run.state
-        : Exit.isFailure(result) && Cause.hasInterrupts(result.cause) ? 'interrupted' : 'failed'
-      const executionError = Exit.isFailure(result) ? Cause.pretty(result.cause) : run?.error ?? undefined
+      const fallback = latest.cancelRequested ? 'cancelled'
+        : latest.baselineCommit !== null || (Exit.isFailure(result) && Cause.hasInterrupts(result.cause)) ? 'interrupted' : 'failed'
+      const executionError = Exit.isFailure(result) ? Cause.pretty(result.cause) : undefined
       if (executionError) yield* Effect.logError('Task Worker execution failed', { vaultId: vault.id, taskId: request.taskId, runId: request.id }, executionError)
-      yield* sink.finishRequest(request, outcome, outcome === 'failed' || outcome === 'interrupted' ? executionError ?? 'Agent execution ended without a successful result.' : undefined)
-      if (outcome === 'succeeded') yield* settleSuccessfulExecution(request)
+      yield* sink.finishRequest(request, fallback, executionError)
+      if ((yield* queue.get(request.id)).state === 'succeeded') yield* settleSuccessfulExecution(request)
     })).pipe(Effect.ensuring(Effect.sync(() => { ownedExecutions.delete(request.id) })))
     const dispatchRoutine = Effect.fn('TaskService.dispatchRoutine')(function* (id: string) {
       return yield* runRoutine({ routineId: id })
@@ -540,7 +527,7 @@ export const TaskServiceLive = Layer.effect(
       runRoutine,
       executeRequest,
       recoverExecutionState: Effect.gen(function* () {
-        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, files: runFiles })
         return (yield* queue.list()).filter(request => request.state !== 'queued' && request.endedAt === null && !ownedExecutions.has(request.id)).length
       }).pipe(gate.withPermit, Effect.mapError(safeError), Effect.tap(() => Effect.gen(function* () {
         for (const request of yield* queue.list()) {
@@ -549,7 +536,7 @@ export const TaskServiceLive = Layer.effect(
         }
       }))),
       claimExecution: owner => Effect.gen(function* () {
-        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, sql })
+        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, files: runFiles })
         const request = yield* queue.claim(owner)
         if (request) ownedExecutions.add(request.id)
         return request
@@ -589,13 +576,17 @@ export const TaskServiceLive = Layer.effect(
       closeSession: sessions.close,
       startRun: (input) => queue.submit({ ...input, source: input.purpose === 'recovery' ? 'recovery' : 'manual' }).pipe(gate.withPermit, Effect.tap(() => notifications.wake)),
       startConflictResolution,
-      inspectRun: runs.inspect,
+      inspectRun: (taskId, runId) => Effect.gen(function* () {
+        yield* runs.inspect(taskId, runId)
+        yield* recoverExecutions({ workers, owned: ownedExecutions, queue, sink, store, runs, sessions, files: runFiles })
+        return yield* queue.get(runId)
+      }).pipe(Effect.mapError(safeError)),
       cancelRun: (taskId, runId) => Effect.gen(function* () {
-        const request = (yield* queue.list(taskId)).find(value => value.id === runId)
-        if (!request) return yield* runs.cancel(taskId, runId)
+        const request = yield* queue.get(runId)
+        if (request.taskId !== taskId) return yield* failure('not-found')
         const cancelled = yield* queue.cancel(runId)
+        yield* sink.cancellation(cancelled).pipe(Effect.catch(() => Effect.logWarning('Cancellation was saved but its diagnostic log could not be written.')))
         yield* notifications.wake
-        if (cancelled.state === 'cancelled' && (yield* routines.executionForTask(taskId))) yield* routines.setStatus(taskId, 'cancelled')
         return cancelled
       })
     })

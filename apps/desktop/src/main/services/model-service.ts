@@ -207,6 +207,18 @@ export class ModelService extends Context.Service<ModelService, {
         }
       )
 
+      /** A managed credential belongs to its provider, so every dependent test result expires together. */
+      const resetProviderConnections = (settings: AgentSettings, providerId: string) => Ref.update(
+        connectionStatuses,
+        (statuses) => {
+          const next = new Map(statuses)
+          for (const profile of settings.modelProfiles) {
+            if (profile.credentialSource === 'managed' && profile.provider.providerId === providerId) next.delete(profile.id)
+          }
+          return next
+        }
+      )
+
       const saveProfile = Effect.fn('ModelService.saveProfile')(function*(input: ModelProfile) {
         const profile = yield* Schema.decodeUnknownEffect(ModelProfile)(input, {
           onExcessProperty: 'error',
@@ -266,7 +278,7 @@ export class ModelService extends Context.Service<ModelService, {
           try: () => credentials.modify(profile.provider.providerId, async () => ({ type: 'api_key', key: value })),
           catch: () => failure('credential_unavailable')
         })
-        yield* resetConnection(profile.id)
+        yield* resetProviderConnections(yield* getSettings, profile.provider.providerId)
         return yield* list
       }, commands.withPermit, announce)
 
@@ -284,9 +296,7 @@ export class ModelService extends Context.Service<ModelService, {
           try: () => credentials.modify(providerId, async () => ({ type: 'api_key', key })),
           catch: () => failure('credential_unavailable')
         })
-        for (const profile of settings.modelProfiles) {
-          if (profile.provider.providerId === providerId) yield* resetConnection(profile.id)
-        }
+        yield* resetProviderConnections(settings, providerId)
         return yield* list
       }, commands.withPermit, announce)
 

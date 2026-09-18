@@ -251,7 +251,7 @@ export const compileDerivedPiModelConfig = (
   settings: AgentSettings,
 ): Effect.Effect<DerivedPiModelConfig, ModelConfigCompilerError> => Effect.try({
   try: () => {
-    const providers: Record<string, DerivedPiProviderConfig> = {};
+    const providers = new Map<string, DerivedPiProviderConfig>();
     for (const profile of settings.modelProfiles) {
       if (profile.provider.type !== "custom") continue;
       const model = customModelDefinition(profile);
@@ -261,22 +261,22 @@ export const compileDerivedPiModelConfig = (
         api: profile.provider.api,
         models: [model],
       };
-      const existing = providers[profile.provider.providerId];
+      const existing = providers.get(profile.provider.providerId);
       if (existing === undefined) {
-        providers[profile.provider.providerId] = candidate;
+        providers.set(profile.provider.providerId, candidate);
         continue;
       }
       if (!sameProvider(existing, candidate)) throw compilerError("provider_conflict");
       if (existing.models.some(({ id }) => id === model.id)) throw compilerError("provider_conflict");
-      providers[profile.provider.providerId] = {
+      providers.set(profile.provider.providerId, {
         ...existing,
         models: [...existing.models, model],
-      };
+      });
     }
     return {
       version: 1,
       sourceChecksum: sourceChecksum(settings),
-      providers,
+      providers: Object.fromEntries(providers),
     };
   },
   catch: (error) => error instanceof ModelConfigCompilerError

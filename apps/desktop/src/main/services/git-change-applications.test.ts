@@ -1,3 +1,4 @@
+import { reserveClaimedRun, finishClaimedRun } from './testing/claimed-run'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, FileSystem, Layer, ManagedRuntime } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
@@ -201,21 +202,21 @@ it('blocks Run admission across an unfinished Task save, then registers its comm
       parent: snapshot.parent, tree: snapshot.tree, paths: ['wiki/task.md'] })
     const run = { id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution' as const,
       resumesRunId: null, baselineCommit: task.baselineCommit }
-    yield* store.reserveRun(run)
+    yield* reserveClaimedRun(run)
     expect(yield* applications.apply(saved.id).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
-    yield* store.finishRun(run.id, 'failed')
+    yield* finishClaimedRun(run.id, 'failed')
     const sql = yield* SqlClient.SqlClient
     yield* sql`CREATE TRIGGER fail_task_receipt BEFORE UPDATE OF state ON git_change_applications
       WHEN NEW.state='applied' BEGIN SELECT RAISE(ABORT, 'fixture lost Task receipt'); END`
     yield* applications.apply(saved.id).pipe(Effect.flip)
     expect(yield* isRegisteredGitCommit(task.branch, saved.commit, task.baselineCommit)).toBe(false)
-    expect(yield* store.reserveRun({ ...run, id: 'blocked' }).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+    expect(yield* reserveClaimedRun({ ...run, id: 'blocked' }).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
     expect(yield* worktrees.ensure('task').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     yield* sql`DROP TRIGGER fail_task_receipt`
     expect(yield* applications.recover(saved.id)).toMatchObject({ state: 'applied' })
     expect(yield* isRegisteredGitCommit(task.branch, saved.commit, task.baselineCommit)).toBe(true)
     expect((yield* git(task.path, ['rev-parse', 'HEAD'])).trim()).toBe(saved.commit)
-    yield* store.reserveRun({ ...run, id: 'next', baselineCommit: saved.commit })
+    yield* reserveClaimedRun({ ...run, id: 'next', baselineCommit: saved.commit })
   }).pipe(Effect.provide(layer())))
 })
 
@@ -358,8 +359,8 @@ it('records an explicit no-wiki-change receipt only for a clean successful Run b
     yield* store.bindSession('unchanged-session', { acpSessionId: 'unchanged-acp', nativeSessionId: null })
     const run = { id: 'unchanged-run', taskId: 'unchanged-task', sessionId: 'unchanged-session', prompt: 'inspect', purpose: 'execution' as const,
       resumesRunId: null, baselineCommit: task.baselineCommit }
-    yield* store.reserveRun(run)
-    yield* store.finishRun(run.id, 'succeeded')
+    yield* reserveClaimedRun(run)
+    yield* finishClaimedRun(run.id, 'succeeded')
     const applications = yield* GitChangeApplications
     const input = { taskId: run.taskId, runId: run.id, expectedHead: task.baselineCommit }
 
@@ -370,9 +371,9 @@ it('records an explicit no-wiki-change receipt only for a clean successful Run b
     expect(yield* applications.confirmRunWikiUnchanged({ ...input, expectedHead: '0'.repeat(40) }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
 
     const changed = { ...run, id: 'changed-run' }
-    yield* store.reserveRun(changed)
+    yield* reserveClaimedRun(changed)
     yield* Effect.promise(() => writeFile(join(task.path, 'wiki/output.md'), 'unsaved output'))
-    yield* store.finishRun(changed.id, 'succeeded')
+    yield* finishClaimedRun(changed.id, 'succeeded')
     expect(yield* applications.confirmRunWikiUnchanged({ ...input, runId: changed.id }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     expect((yield* store.runs(run.taskId)).find((candidate) => candidate.id === changed.id)?.syncState).toBe('pending')
     const snapshot = yield* snapshotGitChange({ cwd: task.path, parent: task.baselineCommit, paths: ['wiki/output.md'] })

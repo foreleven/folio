@@ -19,27 +19,34 @@ if (!token) throw new Error('GMAIL_ACCESS_TOKEN is not available')
 const api = async (path, options = {}) => {
   const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
     ...options,
+    signal: AbortSignal.timeout(30_000),
     headers: { authorization: `Bearer ${token}`, ...(options.headers ?? {}) }
   })
   if (!response.ok) throw new Error(`Gmail API request failed (${response.status})`)
   return response.json()
 }
-const query = `after:${Math.floor(startTime / 1000)} before:${Math.floor(endTime / 1000)}`
-const ids = []
-const maxMessages = 200
+// Gmail search has second precision. Fetch a covering range, then apply the
+// exact [start, end) millisecond window to avoid gaps between Routine runs.
+const query = `after:${Math.floor(startTime / 1000) - 1} before:${Math.ceil(endTime / 1000) + 1}`
+const ids = new Set()
+const pages = new Set()
 let pageToken
 do {
   const params = new URLSearchParams({ q: query, maxResults: '100' })
   if (pageToken) params.set('pageToken', pageToken)
   const page = await api(`messages?${params}`)
-  ids.push(...(page.messages ?? []))
-  if (ids.length >= maxMessages) break
+  for (const message of page.messages ?? []) ids.add(message.id)
   pageToken = page.nextPageToken
+  if (pageToken && pages.has(pageToken)) throw new Error('Gmail pagination repeated a cursor; the extraction window is incomplete')
+  if (pageToken) pages.add(pageToken)
 } while (pageToken)
 
 const messages = []
-for (const item of ids.slice(0, maxMessages)) {
-  const message = await api(`messages/${encodeURIComponent(item.id)}?format=full`)
+for (const id of ids) {
+  const message = await api(`messages/${encodeURIComponent(id)}?format=full`)
+  const receivedAt = Number(message.internalDate)
+  if (!Number.isFinite(receivedAt)) throw new Error('Gmail returned an invalid message timestamp')
+  if (receivedAt < startTime || receivedAt >= endTime) continue
   const headers = Object.fromEntries((message.payload?.headers ?? []).map((header) => [header.name.toLowerCase(), header.value]))
   const body = []
   const visit = (part) => {
@@ -50,7 +57,7 @@ for (const item of ids.slice(0, maxMessages)) {
   messages.push({
     id: message.id,
     threadId: message.threadId,
-    internalDate: Number(message.internalDate),
+    internalDate: receivedAt,
     labels: message.labelIds ?? [],
     from: headers.from ?? '',
     to: headers.to ?? '',

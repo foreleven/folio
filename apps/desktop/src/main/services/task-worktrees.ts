@@ -30,7 +30,7 @@ export class TaskWorktrees extends Context.Service<
   {
     readonly create: (input: TaskDraft) => Effect.Effect<TaskCheckout, HarnessStoreError>
     readonly reserve: (input: TaskDraft) => Effect.Effect<void, HarnessStoreError>
-    readonly ensure: (taskId: string) => Effect.Effect<TaskCheckout, HarnessStoreError>
+    readonly ensure: (taskId: string, claim?: { id: string; owner: string }) => Effect.Effect<TaskCheckout, HarnessStoreError>
     readonly complete: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     /** Reopens a released manual Task from the current registered main without rewriting history. */
     readonly reopen: (taskId: string) => Effect.Effect<TaskCheckout, HarnessStoreError>
@@ -51,13 +51,14 @@ export class TaskWorktrees extends Context.Service<
 
         /** Verifies a persisted Task's exact path, repository and branch; never repairs mismatched content by overwriting it. */
         const ensureLocked = Effect.fn('TaskWorktrees.ensureLocked')(
-          function* (taskId: string, checkpoint?: { readonly taskHead: string; readonly mainHead: string }) {
+          function* (taskId: string, checkpoint?: { readonly taskHead: string; readonly mainHead: string }, claim?: { id: string; owner: string }) {
             yield* Schema.decodeUnknownEffect(TaskId)(taskId)
             let task = yield* store.task(taskId)
             const path = join(parent, taskId)
             const branch = `folio/task/${taskId}`
             if (task.state !== 'active' || task.worktree !== path || task.branch !== branch) return yield* invalid()
-            const active = yield* sql`SELECT id FROM runs WHERE task_id=${taskId} AND state IN ('preparing', 'running')`
+            const active = yield* sql`SELECT id FROM runs WHERE task_id=${taskId} AND state IN ('preparing', 'running')
+              AND NOT (id IS ${claim?.id ?? null} AND owner IS ${claim?.owner ?? null} AND state='preparing' AND baseline_commit IS NULL)`
             if (active.length) return yield* new HarnessStoreError({ reason: 'task-busy', message: 'Task has an active Run.' })
             const saving = yield* sql`SELECT a.id FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
           WHERE p.task_id=${taskId} AND a.state='applying'`
@@ -139,7 +140,7 @@ export class TaskWorktrees extends Context.Service<
           // A Task cancelled before its first dispatch has no checkout or baseline to release.
           if (task.worktreeBase === null && (task.worktreeState === 'pending' || task.worktreeState === 'released')) {
             if ((yield* fs.exists(path)) || (yield* registered())) return yield* invalid()
-            if ((yield* sql`SELECT id FROM execution_requests WHERE task_id=${taskId} AND ended_at IS NULL`).length) return yield* invalid()
+            if ((yield* sql`SELECT id FROM runs WHERE task_id=${taskId} AND ended_at IS NULL`).length) return yield* invalid()
             yield* sql`UPDATE tasks SET state='completed', worktree_state='released' WHERE id=${taskId}`
             return yield* store.task(taskId)
           }
@@ -270,7 +271,7 @@ export class TaskWorktrees extends Context.Service<
           return yield* ensureLocked(taskId, { taskHead: mainHead, mainHead })
         }, Effect.mapError(storage))
 
-        const ensure = (taskId: string) => lock.withLock(ensureLocked(taskId))
+        const ensure = (taskId: string, claim?: { id: string; owner: string }) => lock.withLock(ensureLocked(taskId, undefined, claim))
         const complete = (taskId: string) => lock.withLock(completeLocked(taskId))
         const reopen = (taskId: string) => lock.withLock(reopenLocked(taskId))
 

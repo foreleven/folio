@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Schema, Stream } from 'effect'
+import { Context, Effect, FileSystem } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -87,51 +87,7 @@ export const ensureCli = Effect.fn('Lark.ensureCli')(function*(directory: string
 Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.ensureCli'))
 
 /** Executes only the Folio-managed CLI and injects the short-lived user token via its environment. */
-export const LARK_USER_ACCESS_TOKEN_ENV = 'LARK_USER_ACCESS_TOKEN' as const
-
-const CliIdentityStatus = Schema.Struct({
-  status: Schema.optional(Schema.String),
-  available: Schema.optional(Schema.Boolean),
-  verified: Schema.optional(Schema.Boolean),
-  openId: Schema.optional(Schema.String),
-  tokenStatus: Schema.optional(Schema.String),
-  scope: Schema.optional(Schema.String),
-  expiresAt: Schema.optional(Schema.String),
-  refreshExpiresAt: Schema.optional(Schema.String),
-  grantedAt: Schema.optional(Schema.String)
-})
-
-/** Stable subset of `lark-cli auth status --json --verify`; unknown CLI fields remain forward-compatible. */
-export const LarkCliAuthStatus = Schema.Struct({
-  appId: Schema.optional(Schema.String),
-  brand: Schema.optional(Schema.String),
-  identity: Schema.optional(Schema.String),
-  verified: Schema.Boolean,
-  identities: Schema.Struct({ user: Schema.optional(CliIdentityStatus) })
-})
-export type LarkCliAuthStatus = typeof LarkCliAuthStatus.Type
-
-/** Runs the structured CLI verification command and validates its output without logging identity data. */
-export const readCliAuthStatus = Effect.fn('Lark.readCliAuthStatus')(function*(directory: string, userToken?: string) {
-  const executable = yield* findCli(directory)
-  if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-  const command = ChildProcess.make(executable, ['auth', 'status', '--json', '--verify'], {
-    stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', extendEnv: true
-  }).pipe(userToken ? ChildProcess.setEnv({ [LARK_USER_ACCESS_TOKEN_ENV]: userToken }) : (effect) => effect)
-  const output = yield* Effect.scoped(Effect.gen(function*() {
-    const handle = yield* spawner.spawn(command)
-    const [stdout, code] = yield* Effect.all([
-      Stream.mkString(Stream.decodeText(handle.stdout)), handle.exitCode
-    ], { concurrency: 'unbounded' })
-    if (code !== 0) return yield* new IntegrationError({ message: 'The managed lark-cli authentication is no longer valid.' })
-    return stdout
-  })).pipe(Effect.mapError(() => new IntegrationError({ message: 'The managed lark-cli authentication check failed.' })))
-  return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(LarkCliAuthStatus))(output).pipe(
-    Effect.mapError(() => new IntegrationError({ message: 'The managed lark-cli returned an invalid authentication status.' }))
-  )
-}, Effect.tapError(() => Effect.logWarning('Lark CLI authentication check failed')),
-Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.readCliAuthStatus'))
+export const LARK_USER_ACCESS_TOKEN_ENV = 'LARKSUITE_CLI_USER_ACCESS_TOKEN' as const
 
 export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string) {
   yield* Effect.logDebug('Lark CLI command started').pipe(Effect.annotateLogs({ argumentCount: args.length }))

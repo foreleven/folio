@@ -4,20 +4,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HarnessStoreError } from '../../../shared/harness'
 import { TaskConversation } from './TaskConversation'
 
-const mocks = vi.hoisted(() => ({ start: vi.fn(), inspect: vi.fn(), cancel: vi.fn(), refresh: vi.fn(), runs: [] as unknown[], executions: [] as unknown[], messages: [] as unknown[] }))
+const mocks = vi.hoisted(() => ({ start: vi.fn(), inspect: vi.fn(), cancel: vi.fn(), refresh: vi.fn(), runs: [] as unknown[], messages: [] as unknown[] }))
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
   useAtomSet: (atom: string) => atom === 'start' ? mocks.start : atom === 'inspect' ? mocks.inspect : mocks.cancel,
-  useAtomValue: (atom: string) => ({ _tag: 'Success', value: atom === 'tasks.get' ? { runs: mocks.runs, executions: mocks.executions } : { messages: mocks.messages, tools: [] } })
+  useAtomValue: (atom: string) => ({ _tag: 'Success', value: atom === 'tasks.get' ? { runs: mocks.runs } : { messages: mocks.messages } })
 }))
 vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { startRun: 'start', inspectRun: 'inspect', cancelRun: 'cancel', query: (method: string) => method } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
-afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.executions = []; mocks.messages = [] })
+afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.messages = [] })
 const view = () => render(<TaskConversation taskId="task" sessionId="session" />)
 
 describe('Task conversation', () => {
-  it('renders and cancels a queued request before any Run exists', async () => {
-    mocks.executions = [{ id: 'queued', sessionId: 'session', state: 'queued', prompt: 'Read notes', endedAt: null }]
+  it('renders and cancels a queued Run before Agent startup', async () => {
+    mocks.runs = [{ id: 'queued', sessionId: 'session', state: 'queued', prompt: 'Read notes', endedAt: null }]
     view()
     expect(screen.getByText(/Queued/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Inspect run' })).toBeNull()
@@ -27,7 +27,7 @@ describe('Task conversation', () => {
   })
 
   it('shows startup failure and retries with a new request without inventing Run recovery history', async () => {
-    mocks.executions = [{ id: 'failed-start', sessionId: 'session', state: 'failed', prompt: 'Read notes', endedAt: 1, error: 'Runtime unavailable' }]
+    mocks.runs = [{ id: 'failed-start', sessionId: 'session', state: 'failed', prompt: 'Read notes', endedAt: 1, error: 'Runtime unavailable' }]
     view()
     expect(screen.getByRole('alert').textContent).toBe('Runtime unavailable')
     fireEvent.click(screen.getByRole('button', { name: 'Continue from this run' }))
@@ -78,7 +78,7 @@ describe('Task conversation', () => {
   it('inspects an abandoned Run without reconnecting or sending its original Prompt', async () => {
     mocks.runs = [{ id: 'old', sessionId: 'session', state: 'running', prompt: 'Original instruction', endedAt: null }]
     mocks.inspect.mockImplementationOnce(async () => {
-      mocks.runs = [{ id: 'old', sessionId: 'session', state: 'interrupted', prompt: 'Original instruction', endedAt: 1 }]
+      mocks.runs = [{ id: 'old', sessionId: 'session', state: 'interrupted', baselineCommit: 'verified-base', prompt: 'Original instruction', endedAt: 1 }]
       return {}
     })
     view()
@@ -90,8 +90,8 @@ describe('Task conversation', () => {
   })
 
   it('requires a new recovery instruction and renders tool/model text without interpreting HTML', async () => {
-    mocks.runs = [{ id: 'old', sessionId: 'session', state: 'interrupted', prompt: 'Original instruction', endedAt: 1 }]
-    mocks.messages = [{ id: 'reply', kind: 'message', runId: 'old', data: { role: 'assistant', content: [{ type: 'text', text: '<script>unsafe()</script>' }] } }]
+    mocks.runs = [{ id: 'old', sessionId: 'session', state: 'interrupted', baselineCommit: 'verified-base', prompt: 'Original instruction', endedAt: 1 }]
+    mocks.messages = [{ id: 'reply', runId: 'old', payload: { kind: 'message', data: { role: 'assistant', content: [{ type: 'text', text: '<script>unsafe()</script>' }] } } }]
     mocks.start.mockResolvedValueOnce({})
     const rendered = view()
     expect(rendered.container.querySelector('script')).toBeNull()

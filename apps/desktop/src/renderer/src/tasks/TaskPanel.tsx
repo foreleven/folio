@@ -7,7 +7,7 @@ import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
 import { IntegrationRpcClient } from '../rpc/integration-rpc'
 
-/** Creates durable Task workspaces and exposes interrupted creation for explicit retry. Execution is a separate action. */
+/** Reserves durable Tasks; their workspaces are prepared when the first queued Run starts. */
 export function TaskPanel(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const query = TaskRpcClient.query('tasks.list', {})
@@ -28,12 +28,12 @@ export function TaskPanel(): React.JSX.Element {
   const submitted = useRef<CreateTaskInput | null>(null)
 
   /** Reuses identical intent after a lost response; main also checks the immutable snapshot. */
-  async function submit(retry?: CreateTaskInput): Promise<void> {
-    if (inFlight.current || (!retry && !goal.trim())) return
+  async function submit(): Promise<void> {
+    if (inFlight.current || !goal.trim()) return
     const previous = submitted.current
-    const input = retry ?? (previous?.goal === goal.trim() && previous.agent === agent
+    const input = previous?.goal === goal.trim() && previous.agent === agent
       && JSON.stringify(previous.integrationIds ?? []) === JSON.stringify(integrationIds) ? previous
-      : { id: crypto.randomUUID(), goal: goal.trim(), agent, integrationIds })
+      : { id: crypto.randomUUID(), goal: goal.trim(), agent, integrationIds }
     submitted.current = input
     inFlight.current = true
     setPending(true)
@@ -41,7 +41,7 @@ export function TaskPanel(): React.JSX.Element {
     try {
       await create({ payload: input })
       submitted.current = null
-      if (!retry) setGoal('')
+      setGoal('')
     } catch { setFailed(true) }
     finally { inFlight.current = false; setPending(false); refresh() }
   }
@@ -88,8 +88,8 @@ export function TaskPanel(): React.JSX.Element {
           </label>
         })}
       </fieldset> : null}
-      <p className="text-support text-muted-foreground">{chinese ? '创建任务会准备独立工作区。打开会话后可向 Agent 发送指令。' : 'Creating a task prepares its workspace. Open a session to send instructions to the Agent.'}</p>
-      {failed ? <p role="alert" className="text-support text-destructive">{chinese ? '任务工作区未能就绪。已保存的任务会保留，可重试创建。' : 'Could not prepare the task workspace. Saved tasks are retained for retry.'}</p> : null}
+      <p className="text-support text-muted-foreground">{chinese ? '创建任务后，打开会话并发送指令。开始执行时会准备独立工作区。' : 'After creating a task, open a session and send a prompt. Its workspace is prepared when execution starts.'}</p>
+      {failed ? <p role="alert" className="text-support text-destructive">{chinese ? '任务创建未能确认。已保存的任务会保留，可重试提交。' : 'Task creation was not confirmed. Saved tasks are retained; retry the submission.'}</p> : null}
     </form>
     {tasks._tag !== 'Success' ? <p role="status" className="text-support text-muted-foreground">{tasks._tag === 'Failure'
       ? (chinese ? '无法加载任务，请刷新重试。' : 'Could not load tasks. Refresh to retry.')
@@ -101,10 +101,7 @@ export function TaskPanel(): React.JSX.Element {
           <span>{task.configuration.agent === 'pi' ? 'pi' : 'Codex'} · {task.state === 'completed'
             ? (chinese ? '已完成' : 'Completed') : task.worktreeState === 'ready'
               ? (chinese ? '工作区已就绪' : 'Workspace ready') : (chinese ? '工作区待准备' : 'Workspace pending')}</span>
-          {task.state === 'active' && task.worktreeState === 'ready' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
-          {task.state === 'active' && task.worktreeState !== 'ready' ? <Button variant="outline" size="sm" disabled={pending}
-            onClick={() => void submit({ id: task.id, goal: task.goal, agent: task.configuration.agent,
-              integrationIds: task.configuration.integrationIds })}>{chinese ? '重试' : 'Retry'}</Button> : null}
+          {task.state === 'active' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
           {task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
             onClick={() => void reopenTask(task.id)}>{reopeningTask === task.id ? (chinese ? '正在重开…' : 'Reopening…') : (chinese ? '重开' : 'Reopen')}</Button> : null}
         </div>

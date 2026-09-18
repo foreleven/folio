@@ -359,7 +359,7 @@ export class TaskGitSynchronization extends Context.Service<
           const staged = (yield* git(coordinator, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean)
           if (staged.some((path) => !path.startsWith('wiki/'))) return yield* invalid()
           if (staged.length) {
-            const entries = (yield* git(coordinator, ['ls-files', '--stage', '-z', '--', ...staged])).split('\0').filter(Boolean)
+            const entries = (yield* git(coordinator, ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...staged])).split('\0').filter(Boolean)
             if (entries.some((entry) => !entry.startsWith('100644 ') || !entry.includes('\t'))) return yield* invalid()
           }
           const parentCommit = row.canonicalCommits.at(-1)?.commit ?? row.mainBase
@@ -436,8 +436,9 @@ export class TaskGitSynchronization extends Context.Service<
           const files = (yield* git(coordinator, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean)
           if (!files.length || files.some((path) => !path.startsWith('wiki/'))) return yield* invalid()
           const commonBase = (yield* git(coordinator, ['rev-parse', `${sourceCommit}^`])).trim()
-          const canonicalDiff = yield* git(coordinator, ['diff', '--no-ext-diff', '--binary', commonBase, 'HEAD', '--', ...files])
-          const taskDiff = yield* git(coordinator, ['diff', '--no-ext-diff', '--binary', commonBase, sourceCommit, '--', ...files])
+          // Git-reported names are literal files, never patterns selecting additional evidence.
+          const canonicalDiff = yield* git(coordinator, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--binary', commonBase, 'HEAD', '--', ...files])
+          const taskDiff = yield* git(coordinator, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--binary', commonBase, sourceCommit, '--', ...files])
           // Refuse an unbounded Prompt rather than silently dropping one side of the conflict.
           if (Buffer.byteLength(canonicalDiff) + Buffer.byteLength(taskDiff) > 512 * 1024) return yield* invalid()
           return { directory: coordinator, files, commonBase, canonicalDiff, taskDiff }

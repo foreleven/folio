@@ -1,8 +1,10 @@
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { VaultLauncher } from './VaultLauncher'
+import { VaultRuntime } from '../services/vault-runtime'
 import { VaultService } from '../services/vault-service'
 import { MainWindow } from './MainWindow'
+import { HarnessStoreError } from '../../shared/harness'
 import { VaultError } from '../../shared/vault'
 import { RendererLoadError } from './renderer-window'
 import { ConfigService } from '../services/config-service'
@@ -29,7 +31,8 @@ function runtime(
     language: 'system',
     vaults: [vault],
     agent: { enabled: false, modelProfiles: [] }
-  })
+  }),
+  stop: Effect.Effect<void, HarnessStoreError> = Effect.void
 ) {
   const save = vi.fn(() => register)
   const launch = vi.fn(() => open)
@@ -39,12 +42,24 @@ function runtime(
   const instance = ManagedRuntime.make(VaultLauncher.layer.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeed(ConfigService)({ directory: '/config', filePath: '/config/config.json', get, watch: Stream.empty, update: () => get, setAgent: () => get, addVault: (entry) => Effect.succeed(entry), removeVault: removeRegistration }),
     Layer.succeed(VaultService)({ register: save, remove }),
+    Layer.succeed(VaultRuntime)({ open: () => Effect.die('Unexpected runtime open'), withClosed: (_id, operation) => stop.pipe(Effect.andThen(operation)) }),
     Layer.succeed(MainWindow)({ open: Effect.void, isOpen: Effect.succeed(false), openVault: launch, closeVault: close, getVault: () => Effect.succeed(null) })
   ))))
   return { instance, save, launch, close, remove, removeRegistration }
 }
 
 describe('VaultLauncher', () => {
+  it('retains files and registration when background cleanup fails', async () => {
+    const { instance, remove, removeRegistration } = runtime(undefined, undefined, undefined,
+      Effect.fail(new HarnessStoreError({ reason: 'task-busy', message: 'process retained' })))
+    try {
+      const launcher = await instance.runPromise(VaultLauncher)
+      expect(await instance.runPromise(launcher.remove(vault.id).pipe(Effect.flip))).toMatchObject({ _tag: 'VaultError', cause: { reason: 'task-busy' } })
+      expect(remove).not.toHaveBeenCalled()
+      expect(removeRegistration).not.toHaveBeenCalled()
+    } finally { await instance.dispose() }
+  })
+
   it('parents the picker to the focused window and opens only the persisted vault', async () => {
     mocks.select.mockImplementationOnce(async () => {
       // Another window becomes focused before the folder picker resolves.

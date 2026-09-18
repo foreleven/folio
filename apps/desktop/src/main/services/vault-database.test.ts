@@ -11,6 +11,33 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-database-tes
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 describe('vaultDatabaseLayer', () => {
+  it('creates the final ledger directly and preserves completed messages when reopened', async () => {
+    await Effect.runPromise(Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      const tables = yield* sql<{ name: string }>`SELECT name FROM sqlite_master
+        WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'effect_sql_migrations' ORDER BY name`
+      expect(tables.map(row => row.name)).toEqual([
+        'git_change_applications', 'git_change_preparation_runs', 'git_change_preparations',
+        'git_sync_operations', 'git_sync_resolution_inputs', 'messages', 'routines', 'runs', 'sessions', 'tasks'
+      ])
+      expect(yield* sql`SELECT migration_id, name FROM effect_sql_migrations`).toEqual([{ migration_id: 1, name: 'vault' }])
+      yield* sql`INSERT INTO tasks (id, goal, configuration, branch, worktree, state, created_at)
+        VALUES ('task', 'Test', '{"agent":"pi"}', 'task', '/task', 'active', 1)`
+      yield* sql`INSERT INTO sessions (id, task_id, agent, adapter_version, purpose, created_at)
+        VALUES ('session', 'task', 'pi', '1', 'task', 1)`
+      yield* sql`INSERT INTO messages (id, session_id, run_id, seq, type, timestamp, payload)
+        VALUES ('message', 'session', NULL, 1, 'message', 1, '{"kind":"tool_call"}')`
+    }).pipe(Effect.provide(vaultDatabaseLayer(root))))
+    await Effect.runPromise(Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT id, seq, type, payload FROM messages`).toEqual([
+        { id: 'message', seq: 1, type: 'message', payload: '{"kind":"tool_call"}' }
+      ])
+      expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
+      expect(yield* sql`PRAGMA integrity_check`).toEqual([{ integrity_check: 'ok' }])
+    }).pipe(Effect.provide(vaultDatabaseLayer(root))))
+  })
+
   it('persists isolated vault data across connection scopes and serializes concurrent transactions', async () => {
     const directories = [join(root, 'first'), join(root, 'second')]
     await Promise.all(directories.map((directory) => mkdir(directory)))

@@ -1,5 +1,4 @@
-import { Clock, Effect } from 'effect'
-import { Gaxios, type GaxiosResponse } from 'gaxios'
+import { Clock, Effect, Fiber } from 'effect'
 import { OAuth2Client } from 'google-auth-library'
 import { gmail_v1 } from 'googleapis/build/src/apis/gmail/v1.js'
 import { randomBytes } from 'node:crypto'
@@ -8,16 +7,9 @@ import { IntegrationError } from '../base/index.ts'
 import { GmailCredentials, readPrivateState, updatePrivateState } from './state.ts'
 
 export const gmailScope = 'https://www.googleapis.com/auth/gmail.readonly'
-const deviceEndpoint = 'https://oauth2.googleapis.com/device/code'
 const tokenEndpoint = 'https://oauth2.googleapis.com/token'
 const authorizationEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth'
 const callbackPath = '/oauth2callback'
-// Gaxios is also the HTTP transport used by Google's Node SDKs.  Unlike the
-// native fetch implementation, it honors HTTPS_PROXY/HTTP_PROXY/NO_PROXY in
-// the Electron process, which is important for hosts that cannot reach Google
-// directly.
-const oauthHttp = new Gaxios()
-
 /**
  * Resolves the proxy once per request so a desktop launcher can provide or
  * change its environment before a connection attempt. Gaxios also checks these
@@ -42,82 +34,8 @@ const googleOAuthClient = (clientId: string, clientSecret: string): OAuth2Client
 
 export const hasGmailScope = (scope: string | undefined): boolean => !scope || scope.split(/\s+/).includes(gmailScope)
 
-export interface DeviceAuthorization {
-  readonly deviceCode: string
-  readonly verificationUrl: string
-  readonly userCode: string
-  readonly expiresAt: number
-  readonly intervalSeconds: number
-}
-
-const responseJson = Effect.fn('Gmail.responseJson')(function* (response: GaxiosResponse<unknown>, endpoint: string) {
-  const body = response.data
-  // Gaxios returns the raw text when a response advertises JSON but contains
-  // malformed JSON. OAuth responses must be JSON objects, so report that
-  // condition explicitly instead of treating it as an incomplete response.
-  if (typeof body === 'string' || body === null || typeof body !== 'object') {
-    console.error('[Folio][Gmail OAuth] invalid response', {
-      endpoint,
-      status: response.status,
-      proxyConfigured: Boolean(response.config?.proxy ?? gmailProxy())
-    })
-    return yield* new IntegrationError({ message: 'Google returned an invalid response.' })
-  }
-  if (response.status < 200 || response.status >= 300) {
-    const code = objectString(body, 'error')
-    const description = objectString(body, 'error_description')
-    // Keep the diagnostic useful without logging request bodies, client
-    // secrets, access tokens, or refresh tokens.
-    console.error('[Folio][Gmail OAuth] Google rejected request', {
-      endpoint,
-      status: response.status,
-      error: code,
-      errorDescription: description,
-      proxyConfigured: Boolean(response.config?.proxy ?? gmailProxy())
-    })
-    const base = code ? `${code}${description ? `: ${description}` : ''}` : (description ?? 'Google rejected the Gmail authorization request.')
-    const typeHint = code === 'invalid_client' && /client\s+type/i.test(description ?? '') ? ' Create a "Desktop app" OAuth client in Google Cloud.' : ''
-    const error = `${base}${typeHint}`
-    return yield* new IntegrationError({ message: error })
-  }
-  return body
-})
-
-const formRequest = (endpoint: string, values: Record<string, string>) =>
-  Effect.tryPromise({
-    try: () => {
-      const proxy = gmailProxy()
-      return oauthHttp.request<unknown>({
-        url: endpoint,
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        data: new URLSearchParams(values).toString(),
-        responseType: 'json',
-        // Inspect OAuth error bodies ourselves so callers can distinguish
-        // authorization_pending/slow_down from terminal failures.
-        validateStatus: () => true,
-        timeout: 30_000,
-        ...(proxy ? { proxy } : {})
-      })
-    },
-    catch: (cause) => {
-      const detail = cause instanceof Error ? cause.message.slice(0, 300) : 'Unknown transport error'
-      console.error('[Folio][Gmail OAuth] transport error', {
-        endpoint,
-        error: detail,
-        proxyConfigured: Boolean(gmailProxy())
-      })
-      return new IntegrationError({
-        message: 'Could not reach Google authorization. Check your connection or set HTTPS_PROXY/HTTP_PROXY before launching Folio.'
-      })
-    }
-  }).pipe(Effect.flatMap((response) => responseJson(response, endpoint)))
-
 const objectString = (body: unknown, key: string): string | undefined =>
   typeof body === 'object' && body !== null && key in body && typeof body[key as keyof typeof body] === 'string' ? (body[key as keyof typeof body] as string) : undefined
-const objectNumber = (body: unknown, key: string): number | undefined =>
-  typeof body === 'object' && body !== null && key in body && typeof body[key as keyof typeof body] === 'number' ? (body[key as keyof typeof body] as number) : undefined
-
 /** Logs SDK failures without serializing request config or OAuth credentials. */
 const logGoogleSdkError = (endpoint: string, cause: unknown): void => {
   const value =
@@ -275,7 +193,7 @@ export const authorizeDesktop = Effect.fn('Gmail.authorizeDesktop')(function* (
   onAuthorizationCode?: () => Effect.Effect<void, IntegrationError>
 ) {
   const server = createServer()
-  try {
+  return yield* Effect.gen(function* () {
     const redirectUri = yield* listenLoopback(server)
     const client = googleOAuthClient(clientId, clientSecret)
     const state = randomBytes(32).toString('hex')
@@ -289,8 +207,11 @@ export const authorizeDesktop = Effect.fn('Gmail.authorizeDesktop')(function* (
     // Keep this assertion close to URL generation so a future SDK change
     // cannot silently send a non-Google URL to the host browser adapter.
     if (!authorizationUrl.startsWith(`${authorizationEndpoint}?`)) return yield* new IntegrationError({ message: 'Google returned an invalid authorization URL.' })
+    // Install the callback before publishing its URL; the browser may redirect
+    // while the host is still committing the visible authorization state.
+    const callback = yield* waitForAuthorizationCode(server, redirectUri, state).pipe(Effect.forkScoped({ startImmediately: true }))
     yield* onAuthorizationUrl(authorizationUrl)
-    const code = yield* waitForAuthorizationCode(server, redirectUri, state)
+    const code = yield* Fiber.join(callback)
     if (onAuthorizationCode) yield* onAuthorizationCode()
     const token = yield* Effect.tryPromise({
       try: () => client.getToken({ code, redirect_uri: redirectUri }),
@@ -311,66 +232,7 @@ export const authorizeDesktop = Effect.fn('Gmail.authorizeDesktop')(function* (
       expiresAt,
       scope: token.tokens.scope
     } satisfies AuthorizationCodeToken
-  } finally {
-    yield* closeLoopback(server)
-  }
-})
-
-/** Legacy device-flow helper retained for callers upgrading from an earlier build; Desktop connections use authorizeDesktop. */
-export const requestDeviceAuthorization = Effect.fn('Gmail.requestDeviceAuthorization')(function* (clientId: string, clientSecret: string) {
-  // Google's device-code endpoint identifies the public client with only its
-  // ID; the secret is required later by the token endpoint. Avoid sending it
-  // during this first request unnecessarily.
-  void clientSecret
-  const body = yield* formRequest(deviceEndpoint, { client_id: clientId, scope: gmailScope })
-  const deviceCode = objectString(body, 'device_code')
-  const verificationUrl = objectString(body, 'verification_url_complete') ?? objectString(body, 'verification_url')
-  const userCode = objectString(body, 'user_code')
-  const expiresIn = objectNumber(body, 'expires_in')
-  if (!deviceCode || !verificationUrl || !userCode || !expiresIn) return yield* new IntegrationError({ message: 'Google returned an incomplete device authorization.' })
-  const parsed = yield* Effect.try({ try: () => new URL(verificationUrl), catch: () => new IntegrationError({ message: 'Google returned an invalid authorization URL.' }) })
-  if (parsed.protocol !== 'https:' || !['google.com', 'www.google.com', 'accounts.google.com'].some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))) {
-    return yield* new IntegrationError({ message: 'Google returned an unsafe authorization URL.' })
-  }
-  if (!parsed.searchParams.has('user_code')) parsed.searchParams.set('user_code', userCode)
-  return {
-    deviceCode,
-    verificationUrl: parsed.toString(),
-    userCode,
-    expiresAt: Date.now() + expiresIn * 1000,
-    intervalSeconds: Math.max(1, objectNumber(body, 'interval') ?? 5)
-  } satisfies DeviceAuthorization
-})
-
-type TokenResult = { readonly accessToken: string; readonly refreshToken: string; readonly expiresAt: number; readonly scope?: string }
-
-/** Polls Google's device flow while the host exposes the verification URL action. */
-export const waitForDeviceToken = Effect.fn('Gmail.waitForDeviceToken')(function* (device: DeviceAuthorization, clientId: string, clientSecret: string) {
-  let delay = device.intervalSeconds * 1000
-  while (Date.now() < device.expiresAt) {
-    yield* Effect.sleep(delay)
-    const body = yield* formRequest(tokenEndpoint, {
-      client_id: clientId,
-      client_secret: clientSecret,
-      device_code: device.deviceCode,
-      grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
-    }).pipe(Effect.catchTag('IntegrationError', (error) => Effect.succeed(error)))
-    if (body instanceof IntegrationError) {
-      const code = typeof body.message === 'string' ? body.message : ''
-      if (code.includes('authorization_pending')) continue
-      if (code.includes('slow_down')) {
-        delay += 5_000
-        continue
-      }
-      return yield* body
-    }
-    const accessToken = objectString(body, 'access_token')
-    const refreshToken = objectString(body, 'refresh_token')
-    const expiresIn = objectNumber(body, 'expires_in')
-    if (!accessToken || !refreshToken || !expiresIn) return yield* new IntegrationError({ message: 'Google returned an incomplete Gmail token.' })
-    return { accessToken, refreshToken, expiresAt: Date.now() + expiresIn * 1000, scope: objectString(body, 'scope') } satisfies TokenResult
-  }
-  return yield* new IntegrationError({ message: 'Google authorization expired. Start Gmail connection again.' })
+  }).pipe(Effect.scoped, Effect.ensuring(closeLoopback(server)))
 })
 
 const refresh = Effect.fn('Gmail.refresh')(function* (credentials: GmailCredentials) {

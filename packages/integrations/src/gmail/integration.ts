@@ -95,6 +95,11 @@ const actions = [
     ]
   },
   {
+    id: 'retry_check',
+    label: { en: 'Retry connection check', 'zh-CN': '重试连接检查' },
+    description: { en: 'Refresh and verify your saved Gmail authorization.', 'zh-CN': '刷新并验证已保存的 Gmail 授权。' }
+  },
+  {
     id: 'retry_connect',
     label: { en: 'Retry Gmail connection', 'zh-CN': '重试 Gmail 连接' },
     description: {
@@ -133,14 +138,25 @@ const make = () => {
     const context = yield* IntegrationContext
     const state = yield* readPrivateState(context.directory)
     if (!(yield* hasAssets(context.directory)) || !state.installed) return result('install_required', [{ id: 'install', type: 'callback', primary: true }])
-    if (!state.credentials || state.credentials.verified === false || !hasGmailScope(state.credentials.scope) || state.credentials.expiresAt <= Date.now())
+    if (!state.credentials || !hasGmailScope(state.credentials.scope))
       return result('login_required', connectActions(!!state.oauthClient))
+    // Expired or unverified access tokens still have a saved refresh grant. Retrying
+    // verification must remain distinct from asking the user for a new browser grant.
+    if (state.credentials.verified === false || state.credentials.expiresAt <= Date.now()) {
+      return result('recovering', [
+        { id: 'retry_check', type: 'callback', primary: true },
+        ...connectActions(!!state.oauthClient).map(({ primary: _, ...action }) => action)
+      ])
+    }
     return result('ready')
   })
   const check = Effect.fn('GmailIntegration.check')(function* () {
     const context = yield* IntegrationContext
     const credentials = yield* maintainCredentials(context.directory)
-    yield* verifyCredentials(credentials)
+    yield* verifyCredentials(credentials).pipe(
+      // Keep the grant, but do not continue advertising a failed health check as ready.
+      Effect.tapError(() => updatePrivateState(context.directory, { credentials: { ...credentials, verified: false } }))
+    )
     if (credentials.verified === false) yield* updatePrivateState(context.directory, { credentials: { ...credentials, verified: true } })
   })
   const install = Effect.fn('GmailIntegration.install')(function* () {
@@ -186,13 +202,22 @@ const make = () => {
     ...gmailMetadata,
     actions,
     resources,
+    // Refresh only an explicitly installed provider when the host starts it.
+    setup: () => Effect.gen(function* () {
+      const context = yield* IntegrationContext
+      if (!(yield* readPrivateState(context.directory)).installed) return
+      yield* installAssets(context.directory)
+      for (const resource of resources) yield* context.registerResource(resource)
+    }),
     install,
     check,
     inspect,
     onActionCallback: (id, payload) =>
       id === 'install'
         ? install()
-        : id === 'connect'
+        : id === 'retry_check'
+          ? check()
+          : id === 'connect'
           ? connect(payload)
           : id === 'retry_connect'
             ? connect(undefined, true)

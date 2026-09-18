@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionArchive } from "../src/acp/session-archive.js";
 import { createFolioAgentApp } from "../src/acp/server.js";
 import { makeFakePiSessionFactory } from "../src/pi/fake-session-factory.js";
@@ -37,6 +37,33 @@ afterEach(async () => {
 });
 
 describe("ACP persisted session archive", () => {
+  it("reads replay only after acquiring ownership, including the preceding owner's final update", async () => {
+    const { archive, sessionFactory, cwd } = await fixture();
+    const first = createFolioAgentApp({ archive, sessionFactory, log: () => undefined });
+    let sessionId = "";
+    await client().connectWith(first, async context => {
+      await context.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, info: { name: "test", version: "1" }, capabilities: {} });
+      sessionId = (await context.request(methods.agent.session.new, { cwd })).sessionId;
+    });
+    await first.shutdown();
+    const lastUpdate: SessionUpdate = { sessionUpdate: "user_message", messageId: "last-before-release", content: [{ type: "text", text: "retained" }] };
+    const acquire = archive.leases.acquire.bind(archive.leases);
+    const spy = vi.spyOn(archive.leases, "acquire").mockImplementationOnce(async (...args) => {
+      // The previous writer finishes between header lookup and the new lease.
+      await archive.append(sessionId, lastUpdate);
+      return acquire(...args);
+    });
+    const second = createFolioAgentApp({ archive, sessionFactory, log: () => undefined });
+    const replay: SessionUpdate[] = [];
+    try {
+      await client().onNotification(methods.client.session.update, ({ params }) => { replay.push(params.update); }).connectWith(second, async context => {
+        await context.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, info: { name: "test", version: "1" }, capabilities: {} });
+        await context.request(methods.agent.session.resume, { sessionId, cwd, replayFrom: { type: "start" } });
+        expect(replay).toEqual([lastUpdate]);
+      });
+    } finally { spy.mockRestore(); await second.shutdown(); }
+  });
+
   it("rejects missing native history instead of replacing the archived identity", async () => {
     const { archive, sessionFactory, cwd } = await fixture();
     const first = createFolioAgentApp({ archive, sessionFactory, log: () => undefined });

@@ -26,6 +26,21 @@ afterEach(async () => {
 });
 
 describe("SecureCredentialStore", () => {
+  it.each(["constructor", "toString", "__proto__"])("treats %s as a literal provider identifier", async (providerId) => {
+    const { authPath, store } = await makeStore();
+    await expect(store.read(providerId)).resolves.toBeUndefined();
+    await store.modify(providerId, async (current) => {
+      expect(current).toBeUndefined();
+      return { type: "api_key", key: "provider-secret" };
+    });
+    const reopened = new SecureCredentialStore({ authPath });
+    expect(await reopened.read(providerId)).toEqual({ type: "api_key", key: "provider-secret" });
+    expect(await reopened.list()).toEqual([{ providerId, type: "api_key" }]);
+    await reopened.delete(providerId);
+    expect(await reopened.read(providerId)).toBeUndefined();
+    expect(await reopened.list()).toEqual([]);
+  });
+
   it("imports Pi API key and OAuth providers once, preserving Folio credentials and the source file", async () => {
     const { directory, store } = await makeStore();
     const source = join(directory, "pi-auth.json");

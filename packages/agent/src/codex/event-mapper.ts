@@ -55,7 +55,7 @@ export const mapCodexEvent = (event: CodexServerEvent): Effect.Effect<SessionUpd
       case "agentMessage": {
         const item = Schema.decodeUnknownSync(TextItem)(raw);
         return event.method === "item/completed"
-          ? [{ sessionUpdate: "agent_message", messageId: id, content: [{ type: "text", text: item.text }] }] : [];
+          ? [{ sessionUpdate: "agent_message", messageId: id, _meta: { "folio/messageComplete": true }, content: [{ type: "text", text: item.text }] }] : [];
       }
       case "commandExecution": {
         const item = Schema.decodeUnknownSync(Command)(raw);
@@ -73,7 +73,7 @@ export const mapCodexEvent = (event: CodexServerEvent): Effect.Effect<SessionUpd
       }
       case "reasoning": {
         const item = Schema.decodeUnknownSync(Reasoning)(raw);
-        return event.method === "item/completed" ? [{ sessionUpdate: "agent_thought", messageId: id,
+        return event.method === "item/completed" ? [{ sessionUpdate: "agent_thought", messageId: id, _meta: { "folio/messageComplete": true },
           content: [{ type: "text", text: (item.summary ?? item.content ?? []).join("\n") }] }] : [];
       }
       default: return [];

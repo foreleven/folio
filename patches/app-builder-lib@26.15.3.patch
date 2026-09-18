@@ -1,0 +1,49 @@
+diff --git a/out/node-module-collector/pnpmNodeModulesCollector.js b/out/node-module-collector/pnpmNodeModulesCollector.js
+index 8853912e013d3769f3e763d06720a94091a7ffaa..838a4e0b47fa4f05464b711aeb10e1aef6e05046 100644
+--- a/out/node-module-collector/pnpmNodeModulesCollector.js
++++ b/out/node-module-collector/pnpmNodeModulesCollector.js
+@@ -36,6 +36,7 @@ class PnpmNodeModulesCollector extends nodeModulesCollector_1.NodeModulesCollect
+          * every shared subtree of the pnpm list output, exploding work in deep workspaces.
+          */
+         this.collectedDeps = new Set();
++        this.dependenciesByReportedPath = new Map();
+     }
+     /**
+      * Returns the workspace packages to iterate over, gated by detected pnpm version:
+@@ -98,7 +99,16 @@ class PnpmNodeModulesCollector extends nodeModulesCollector_1.NodeModulesCollect
+         }
+         this.productionGraph[dependencyId] = { dependencies: [] };
+         if (((_a = tree.dedupedDependenciesCount) !== null && _a !== void 0 ? _a : 0) > 0) {
+-            const realDep = this.allDependencies.get(dependencyId);
++            let realDep = this.allDependencies.get(dependencyId);
++            if (!realDep && tree.path) {
++                // pnpm dedupes npm aliases by physical package, not by alias name.
++                // Retain the requested name in the output graph and copy location.
++                const canonical = this.dependenciesByReportedPath.get(tree.path);
++                if (canonical) {
++                    realDep = { ...canonical, name: tree.name || tree.from };
++                    this.allDependencies.set(dependencyId, realDep);
++                }
++            }
+             if (realDep) {
+                 this.cache.logSummary[moduleManager_1.LogMessageByKey.PKG_DUPLICATE_REF].push(dependencyId);
+                 tree = realDep;
+@@ -155,11 +165,17 @@ class PnpmNodeModulesCollector extends nodeModulesCollector_1.NodeModulesCollect
+             // The pnpm list output can include the same `name@version` thousands of times across a
+             // deep workspace; without this guard we re-resolve and re-recurse each occurrence.
+             if (this.collectedDeps.has(id)) {
++                // pnpm may expand different descendants of the same package at different
++                // occurrences. Reuse its location, but visit every finite JSON subtree so
++                // deduped references elsewhere can resolve their complete dependency data.
++                await this.collectDepsRecursively(value);
+                 return;
+             }
+             this.collectedDeps.add(id);
+             const pkg = await this.locateFromDepOrRoot(key, value.path, value.version);
+-            this.allDependencies.set(id, { ...value, path: (_b = pkg === null || pkg === void 0 ? void 0 : pkg.packageDir) !== null && _b !== void 0 ? _b : value.path });
++            const resolved = { ...value, path: (_b = pkg === null || pkg === void 0 ? void 0 : pkg.packageDir) !== null && _b !== void 0 ? _b : value.path };
++            this.allDependencies.set(id, resolved);
++            if (value.path) this.dependenciesByReportedPath.set(value.path, resolved);
+             await this.collectDepsRecursively(value);
+         };
+         for (const [key, value] of Object.entries(tree.dependencies || {})) {

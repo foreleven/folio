@@ -1,9 +1,11 @@
+import { reserveClaimedRun, markClaimedRunning, finishClaimedRun } from './testing/claimed-run'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ExecutionQueue } from './execution-queue'
 import { HarnessStore } from './harness-store'
 import { vaultDatabaseLayer } from './vault-database'
 import type { NewRun } from '../../shared/harness'
@@ -41,8 +43,7 @@ describe('Vault harness execution ledger', () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* setup
-        const store = yield* HarnessStore
-        yield* store.reserveRun(run)
+        yield* reserveClaimedRun(run)
       }).pipe(Effect.provide(layer()))
     )
     await Effect.runPromise(
@@ -51,15 +52,15 @@ describe('Vault harness execution ledger', () => {
         expect(yield* store.task('task')).toMatchObject({ state: 'active', configuration: { skillIds: ['notes'] } })
         expect(yield* store.sessions('task')).toMatchObject([{ id: 'folio-session', acpSessionId: 'acp-session', nativeSessionId: 'native-session' }])
         expect(yield* store.runs('task')).toMatchObject([{ id: 'run', state: 'preparing', endedAt: null }])
-        yield* store.finishRun('run', 'interrupted', 'Execution ownership was lost')
-        yield* store.reserveRun({ ...run, id: 'recovery', prompt: 'Inspect existing progress before continuing', purpose: 'recovery', resumesRunId: 'run' })
-        yield* store.markRunning('recovery')
-        yield* store.finishRun('recovery', 'succeeded')
+        yield* finishClaimedRun('run', 'interrupted', 'Execution ownership was lost')
+        yield* reserveClaimedRun({ ...run, id: 'recovery', prompt: 'Inspect existing progress before continuing', purpose: 'recovery', resumesRunId: 'run' })
+        yield* markClaimedRunning('recovery')
+        yield* finishClaimedRun('recovery', 'succeeded')
         expect(yield* store.task('task')).toMatchObject({ state: 'active' })
         const history = yield* store.runs('task')
         expect(history.find((row) => row.id === 'run')).toMatchObject({ prompt: 'Read the notes', state: 'interrupted' })
         expect(history.find((row) => row.id === 'recovery')).toMatchObject({ state: 'succeeded', syncState: 'pending', resumesRunId: 'run' })
-        expect(yield* store.finishRun('run', 'succeeded').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+        expect(yield* finishClaimedRun('run', 'succeeded').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       }).pipe(Effect.provide(layer()))
     )
   })
@@ -71,7 +72,7 @@ describe('Vault harness execution ledger', () => {
         const store = yield* HarnessStore
         yield* store.createSession({ id: 'second', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
         yield* store.bindSession('second', { acpSessionId: 'second-acp', nativeSessionId: null })
-        const outcomes = yield* Effect.all([store.reserveRun(run).pipe(Effect.result), store.reserveRun({ ...run, id: 'other-run', sessionId: 'second' }).pipe(Effect.result)], {
+        const outcomes = yield* Effect.all([reserveClaimedRun(run).pipe(Effect.result), reserveClaimedRun({ ...run, id: 'other-run', sessionId: 'second' }).pipe(Effect.result)], {
           concurrency: 'unbounded'
         })
         expect(outcomes.filter((result) => result._tag === 'Success')).toHaveLength(1)
@@ -88,8 +89,8 @@ describe('Vault harness execution ledger', () => {
         yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='other'`)
         yield* store.createSession({ id: 'other-session', taskId: 'other', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
         yield* store.bindSession('other-session', { acpSessionId: 'other-acp', nativeSessionId: null })
-        expect(yield* store.reserveRun({ ...run, id: 'wrong-task', taskId: 'other' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
-        yield* store.reserveRun({ ...run, id: 'independent', taskId: 'other', sessionId: 'other-session' })
+        expect(yield* reserveClaimedRun({ ...run, id: 'wrong-task', taskId: 'other' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+        yield* reserveClaimedRun({ ...run, id: 'independent', taskId: 'other', sessionId: 'other-session' })
         expect(yield* store.runs('other')).toHaveLength(1)
         const sql = yield* SqlClient.SqlClient
         expect(
@@ -110,12 +111,12 @@ describe('Vault harness execution ledger', () => {
         expect(yield* store.createSession({ id: 'codex', taskId: 'task', agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null }).pipe(Effect.flip)).toMatchObject({ reason: 'storage' })
         yield* store.createSession({ id: 'second', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
         yield* store.bindSession('second', { acpSessionId: 'second-acp', nativeSessionId: null })
-        yield* store.reserveRun(run)
-        yield* store.finishRun('run', 'failed')
-        expect(yield* store.reserveRun({ ...run, id: 'invalid', sessionId: 'second', purpose: 'recovery', resumesRunId: 'run' }).pipe(Effect.flip)).toMatchObject({
+        yield* reserveClaimedRun(run)
+        yield* finishClaimedRun('run', 'failed')
+        expect(yield* reserveClaimedRun({ ...run, id: 'invalid', sessionId: 'second', purpose: 'recovery', resumesRunId: 'run' }).pipe(Effect.flip)).toMatchObject({
           reason: 'invalid-state'
         })
-        expect(yield* store.reserveRun({ ...run, id: 'invalid', sessionId: 'missing' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+        expect(yield* reserveClaimedRun({ ...run, id: 'invalid', sessionId: 'missing' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
         expect(yield* store.runs('task')).toHaveLength(1)
         // Constraints also protect callers that accidentally bypass the service boundary.
         const sql = yield* SqlClient.SqlClient
@@ -134,7 +135,7 @@ describe('Vault harness execution ledger', () => {
         const store = yield* HarnessStore
         expect(yield* store.task('task').pipe(Effect.flip)).toMatchObject({ reason: 'not-found' })
         expect(yield* store.sessions('task')).toEqual([])
-        expect(yield* store.markRunning('unknown').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+        expect(yield* Effect.flatMap(ExecutionQueue, queue => queue.running('unknown', 'owner')).pipe(Effect.provide(ExecutionQueue.layer), Effect.flip)).toMatchObject({ reason: 'invalid-state' })
         yield* setup
       }).pipe(Effect.provide(layer(other)))
     )

@@ -19,7 +19,7 @@ it("projects native file changes, failed commands and final reasoning without in
   const thought = await Effect.runPromise(mapCodexEvent({ method: "item/completed", params: {
     threadId: "thread", turnId: "turn", item: { id: "thought", type: "reasoning", summary: ["Summary"], content: ["Native content"] },
   } }));
-  expect(thought).toEqual([{ sessionUpdate: "agent_thought", messageId: codexItemId("turn", "thought"),
+  expect(thought).toEqual([{ sessionUpdate: "agent_thought", messageId: codexItemId("turn", "thought"), _meta: { "folio/messageComplete": true },
     content: [{ type: "text", text: "Summary" }] }]);
 });
 

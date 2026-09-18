@@ -1,3 +1,4 @@
+import { reserveClaimedRun, finishClaimedRun } from './testing/claimed-run'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
@@ -188,16 +189,16 @@ it('rejects extra tree changes and associates Agent commits only with a successf
     const task = yield* worktrees.create({ id: 'task', goal: 'notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
     yield* store.createSession({ id: 'session', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
     yield* store.bindSession('session', { acpSessionId: 'acp', nativeSessionId: null })
-    yield* store.reserveRun({ id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution',
+    yield* reserveClaimedRun({ id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution',
       resumesRunId: null, baselineCommit: task.baselineCommit })
     yield* Effect.promise(() => writeFile(join(task.path, 'wiki/note.md'), 'agent result'))
     const snapshot = yield* snapshotGitChange({ cwd: task.path, parent: task.baselineCommit, paths: ['wiki/note.md'] })
     const agent: GitChangeIntent = { ...input, id: 'agent', taskId: 'task', runIds: ['run-2', 'run', 'run'], kind: 'wiki', tree: snapshot.tree }
     expect(yield* journal.prepare(agent).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
-    yield* store.finishRun('run', 'succeeded')
-    yield* store.reserveRun({ id: 'run-2', taskId: 'task', sessionId: 'session', prompt: 'more notes', purpose: 'execution',
+    yield* finishClaimedRun('run', 'succeeded')
+    yield* reserveClaimedRun({ id: 'run-2', taskId: 'task', sessionId: 'session', prompt: 'more notes', purpose: 'execution',
       resumesRunId: null, baselineCommit: task.baselineCommit })
-    yield* store.finishRun('run-2', 'succeeded')
+    yield* finishClaimedRun('run-2', 'succeeded')
     expect(yield* journal.prepare({ ...agent, kind: 'raws' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     expect(yield* journal.prepare({ ...agent, runIds: ['other-run'] }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     const prepared = yield* journal.prepare(agent)

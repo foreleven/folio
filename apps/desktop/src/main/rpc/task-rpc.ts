@@ -4,8 +4,7 @@ import { TaskService } from '../services/task-service'
 
 /** Task storage and worktree operations remain in the application service, beyond renderer lifetimes. */
 export const TaskRpcHandlersLive = TaskRpcs.toLayer(
-  Effect.gen(function* () {
-    return TaskRpcs.of({
+  Effect.succeed(TaskRpcs.of({
       'workspace.changes': () => Effect.flatMap(TaskService, (service) => service.workspace.inspect),
       'workspace.diff': ({ input }) => Effect.flatMap(TaskService, (service) => service.workspace.diff(input)),
       'workspace.saveFiles': ({ input }) => Effect.flatMap(TaskService, (service) => service.saveWorkspaceFiles(input)),
@@ -39,6 +38,5 @@ export const TaskRpcHandlersLive = TaskRpcs.toLayer(
       'tasks.get': ({ id }) => Effect.flatMap(TaskService, (service) => service.get(id)),
       'tasks.openSession': (input) => Effect.flatMap(TaskService, (service) => service.openSession(input)),
       'tasks.closeSession': ({ taskId, sessionId }) => Effect.flatMap(TaskService, (service) => service.closeSession(taskId, sessionId))
-    })
-  })
+    }))
 )

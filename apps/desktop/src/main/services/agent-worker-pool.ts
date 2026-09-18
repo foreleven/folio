@@ -46,7 +46,8 @@ export class AgentWorkerPool extends Context.Service<AgentWorkerPool, {
         const pids = new Set<number>()
         const recordedPids = new Set<number>()
         let workerRecorded = false
-        const client = new AgentWorkerClient(input.entrypoint, input.onUpdate, input.environment, async nativePid => {
+        let client: AgentWorkerClient
+        try { client = new AgentWorkerClient(input.entrypoint, input.onUpdate, input.environment, async nativePid => {
           pids.add(nativePid)
           await input.onProcessStarted(nativePid)
           recordedPids.add(nativePid)
@@ -54,6 +55,7 @@ export class AgentWorkerPool extends Context.Service<AgentWorkerPool, {
           if (hasExecutionProcess(pid)) throw new Error('Tool process group has not exited.')
           await input.onProcessStopped(pid)
         })
+        } catch (error) { await input.onStopped(); throw error }
         const threadId = client.worker.threadId
         alive.add(threadId)
         void client.exited.then(() => alive.delete(threadId))
@@ -77,7 +79,7 @@ export class AgentWorkerPool extends Context.Service<AgentWorkerPool, {
             await new SessionLeaseStore(join(input.options.storageDirectory, 'acp-sessions')).releaseExitedThread(threadId)
           }
           for (const pid of recordedPids) await input.onProcessStopped(pid)
-          if (workerRecorded) await input.onStopped()
+          await input.onStopped()
           leases.delete(threadId)
         })().catch(error => { closing = undefined; throw error }) }
         leases.set(threadId, lease)

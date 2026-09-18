@@ -9,6 +9,7 @@ import { MainWindow } from './MainWindow'
 const windowLayer = MainWindow.layer.pipe(
   Layer.provide(
     Layer.succeed(VaultRuntime)({
+      withClosed: (_id, operation) => operation,
       open: (id) =>
         Effect.succeed(Context.make(VaultContext, makeVaultContext({ id, name: 'wiki', path: '/wiki' }, '/config')).pipe(Context.add(TaskService, {} as TaskService['Service'])))
     })

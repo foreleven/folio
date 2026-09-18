@@ -35,13 +35,9 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
   const [routineBusy, setRoutineBusy] = useState(false)
   const busy = useRef(false)
   const submitted = useRef<StartTaskRunInput | null>(null)
-  const savedRuns = detail._tag === 'Success' ? detail.value.runs : []
-  const requests = detail._tag === 'Success' ? detail.value.executions ?? [] : []
-  const runs = [
-    ...savedRuns.filter(run => !requests.some(request => request.id === run.id)),
-    ...requests.map(request => ({ ...request, syncState: savedRuns.find(run => run.id === request.id)?.syncState }))
-  ]
+  const runs = detail._tag === 'Success' ? detail.value.runs : []
   const active = runs.find(run => run.state === 'queued' || run.state === 'preparing' || run.state === 'running')
+  const activeId = active?.id
   const awaiting = awaitingId !== null && !runs.some(run => run.id === awaitingId && run.endedAt !== null)
 
   const lastEnded = runs.filter(run => run.sessionId === sessionId && run.endedAt !== null).at(-1)?.id
@@ -52,10 +48,10 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
   // Poll only during foreground execution or while its accepted record is catching up. Unmount
   // removes display timers; the main-process worker deliberately remains alive.
   useEffect(() => {
-    if (!active && !awaiting) return
+    if (!activeId && !awaiting) return
     const timer = setInterval(() => { refreshDetail(); refreshHistory() }, 1000)
     return () => clearInterval(timer)
-  }, [active?.id, awaiting, refreshDetail, refreshHistory])
+  }, [activeId, awaiting, refreshDetail, refreshHistory])
 
   /** Reuses a lost request's identity, while recovery requires a fresh user instruction. */
   async function submit(): Promise<void> {
@@ -128,22 +124,22 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
     {runs.filter(run => run.sessionId === sessionId).map(run => <article key={run.id} className="space-y-2 border-b pb-3 text-ui">
       <p className="whitespace-pre-wrap break-words font-medium">{run.prompt}</p>
       <p className="text-support text-muted-foreground">{labels[run.state]} · {run.syncState ? syncLabels[run.syncState] : chinese ? '改动尚未提交同步' : 'Changes have not been committed or synced'}</p>
-      {history._tag === 'Success' ? history.value.messages.filter(message => message.runId === run.id && message.kind === 'message' && message.data.role !== 'user').map(message =>
-        <div key={message.id} className="whitespace-pre-wrap break-words">{message.data.role === 'thought'
-          ? <details><summary>{chinese ? '思考过程' : 'Reasoning'}</summary>{displayContent(message.data.content)}</details>
-          : displayContent(message.data.content)}</div>) : null}
-      {history._tag === 'Success' ? history.value.messages.filter(tool => tool.runId === run.id && tool.kind === 'tool_call').map(tool => <details key={tool.id} className="text-support">
-        <summary>{typeof tool.data.title === 'string' ? tool.data.title : tool.id} · {String(tool.data.status ?? '')}</summary>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.data, null, 2)}</pre>
+      {history._tag === 'Success' ? history.value.messages.filter(message => message.runId === run.id && message.payload.kind === 'message' && message.payload.data.role !== 'user').map(message =>
+        <div key={message.id} className="whitespace-pre-wrap break-words">{message.payload.data.role === 'thought'
+          ? <details><summary>{chinese ? '思考过程' : 'Reasoning'}</summary>{displayContent(message.payload.data.content)}</details>
+          : displayContent(message.payload.data.content)}</div>) : null}
+      {history._tag === 'Success' ? history.value.messages.filter(tool => tool.runId === run.id && tool.payload.kind === 'tool_call').map(tool => <details key={tool.id} className="text-support">
+        <summary>{typeof tool.payload.data.title === 'string' ? tool.payload.data.title : tool.id} · {String(tool.payload.data.status ?? '')}</summary>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.payload.data, null, 2)}</pre>
       </details>) : null}
       {run.error ? <p role="alert" className="text-support text-destructive">{run.error}</p> : null}
       {['failed', 'interrupted', 'cancelled'].includes(run.state) ? <Button variant="ghost" size="sm" disabled={pending || !!active}
-        onClick={() => { if (savedRuns.some(saved => saved.id === run.id)) setRecoveryId(run.id); else { setRecoveryId(null); setPrompt(run.prompt) } }}>{chinese ? '从这一轮继续' : 'Continue from this run'}</Button> : null}
+        onClick={() => { if (run.baselineCommit) setRecoveryId(run.id); else { setRecoveryId(null); setPrompt(run.prompt) } }}>{chinese ? '从这一轮继续' : 'Continue from this run'}</Button> : null}
     </article>)}
     {history._tag === 'Success' && history.value.messages.some(message => message.runId === null)
       ? <details className="text-ui" open><summary>{chinese ? '其他会话记录' : 'Other session history'}</summary>
-        {history.value.messages.filter(message => message.runId === null && message.kind === 'message').map(message => <p key={message.id} className="whitespace-pre-wrap break-words">{displayContent(message.data.content)}</p>)}
-        {history.value.messages.filter(tool => tool.runId === null && tool.kind === 'tool_call').map(tool => <pre key={tool.id} className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.data, null, 2)}</pre>)}
+        {history.value.messages.filter(message => message.runId === null && message.payload.kind === 'message').map(message => <p key={message.id} className="whitespace-pre-wrap break-words">{displayContent(message.payload.data.content)}</p>)}
+        {history.value.messages.filter(tool => tool.runId === null && tool.payload.kind === 'tool_call').map(tool => <pre key={tool.id} className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.payload.data, null, 2)}</pre>)}
       </details> : null}
     <form className="space-y-2" onSubmit={event => { event.preventDefault(); void submit() }}>
       {recoveryId ? <p className="text-support">{chinese ? '请输入新的恢复指令，先检查已有进展；不会重放原指令。' : 'Enter a new recovery instruction that checks existing progress. The original prompt will not be replayed.'}
@@ -153,7 +149,7 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
           onChange={event => setPrompt(event.target.value)} disabled={pending} required />
       </label>
       <div className="flex justify-end gap-2">
-        {active && savedRuns.some(run => run.id === active.id) ? <Button type="button" variant="ghost" disabled={pending} onClick={() => void inspectRun(active.id)}>{chinese ? '检查运行状态' : 'Inspect run'}</Button> : null}
+        {active && active.state !== 'queued' ? <Button type="button" variant="ghost" disabled={pending} onClick={() => void inspectRun(active.id)}>{chinese ? '检查运行状态' : 'Inspect run'}</Button> : null}
         {active ? <Button type="button" variant="outline" disabled={pending} onClick={() => void stop(active.id)}>{active.state === 'queued' ? (chinese ? '取消排队' : 'Cancel queued run') : (chinese ? '停止运行' : 'Stop run')}</Button> : null}
         <Button type="submit" disabled={pending || !!active || !prompt.trim() || detail._tag !== 'Success'}>{chinese ? '发送' : 'Send'}</Button>
       </div>

@@ -18,7 +18,7 @@ import {
   ZapIcon
 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
-import type { RoutineExecution, RoutineRecord } from '../../../shared/routine'
+import { routineDateState, routineGapDates, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
 import { RoutineEditor } from './RoutineEditor'
@@ -67,21 +67,6 @@ function formatDate(date: string, chinese: boolean): string {
 
 function formatNextTrigger(record: RoutineRecord, chinese: boolean): string {
   return record.nextTriggerAt === null ? (chinese ? '未安排' : 'Not scheduled') : formatTime(record.nextTriggerAt, record.timeZone, chinese)
-}
-
-function deriveGapDates(rows: readonly RoutineExecution[]): string[] {
-  const completed = new Set(rows.filter((row) => row.isEnd && row.status === 'succeeded').map((row) => row.routineDate))
-  const dates = rows.map((row) => row.routineDate).sort()
-  if (!dates.length) return []
-  const cursor = new Date(`${dates[dates.length - 1]}T12:00:00Z`)
-  const today = new Date()
-  today.setUTCHours(12, 0, 0, 0)
-  const gaps: string[] = []
-  for (let date = new Date(`${dates[0]}T12:00:00Z`); date < today; date.setUTCDate(date.getUTCDate() + 1)) {
-    const key = date.toISOString().slice(0, 10)
-    if (date <= cursor && !completed.has(key)) gaps.push(key)
-  }
-  return gaps
 }
 
 function latestExecution(rows: readonly RoutineExecution[], routineId: string): RoutineExecution | undefined {
@@ -340,7 +325,7 @@ function RoutineCard({
                 ? '加载中…'
                 : 'Loading…'
               : execution
-                ? formatTime(execution.triggerTime, record.timeZone, chinese)
+                ? formatTime(execution.triggerTime, execution.timeZone, chinese)
                 : chinese
                   ? '暂无记录'
                   : 'No runs yet'}
@@ -377,9 +362,10 @@ function RoutineDetail({
   const runRequest = useRef<{ routineId: string; requestId: string } | null>(null)
   const dates = useMemo(() => {
     const datesWithRows = executions.map((row) => row.routineDate)
-    return [...new Set([...datesWithRows, ...deriveGapDates(executions)])].sort().reverse()
-  }, [executions])
+    return [...new Set([...datesWithRows, ...routineGapDates(record, executions)])].sort().reverse()
+  }, [executions, record])
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [visibleDays, setVisibleDays] = useState(31)
   const activeDate = selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? null)
   const activeRows = executions.filter((row) => row.routineDate === activeDate).sort((left, right) => left.triggerTime - right.triggerTime)
 
@@ -510,9 +496,9 @@ function RoutineDetail({
               <p className="px-2 py-2 text-support text-muted-foreground">{chinese ? '暂无执行日期' : 'No execution dates'}</p>
             ) : (
               <ul className="space-y-0.5">
-                {dates.map((date) => {
+                {dates.slice(0, visibleDays).map((date) => {
                   const dayRows = executions.filter((row) => row.routineDate === date)
-                  const state = dayRows.length ? dateState(dayRows) : 'missing'
+                  const state = dayRows.length ? routineDateState(dayRows) : 'missing'
                   return (
                     <li key={date}>
                       <button
@@ -532,6 +518,9 @@ function RoutineDetail({
                 })}
               </ul>
             )}
+            {dates.length > visibleDays ? <Button variant="ghost" size="sm" onClick={() => setVisibleDays(count => count + 31)}>
+              {chinese ? '显示更早日期' : 'Show earlier dates'}
+            </Button> : null}
           </div>
         </aside>
         <main className="min-w-0 p-4 md:p-5">
@@ -547,7 +536,7 @@ function RoutineDetail({
             ) : null}
           </div>
           {activeDate && activeRows.length ? (
-            <ExecutionProcess rows={activeRows} timeZone={record.timeZone} chinese={chinese} />
+            <ExecutionProcess rows={activeRows} chinese={chinese} />
           ) : (
             <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
               {activeDate ? (
@@ -597,17 +586,11 @@ function DetailItem({ label, value }: { label: string; value: string }): React.J
   )
 }
 
-function dateState(rows: readonly RoutineExecution[]): 'success' | 'progress' | 'attention' {
-  if (rows.some((row) => row.status === 'failed' || row.status === 'interrupted' || row.status === 'cancelled')) return 'attention'
-  if (rows.some((row) => row.status !== 'succeeded')) return 'progress'
-  return 'success'
-}
-
-function ExecutionProcess({ rows, timeZone, chinese }: { rows: readonly RoutineExecution[]; timeZone: string; chinese: boolean }): React.JSX.Element {
+function ExecutionProcess({ rows, chinese }: { rows: readonly RoutineExecution[]; chinese: boolean }): React.JSX.Element {
   return (
     <ol className="relative space-y-4 before:absolute before:bottom-4 before:left-3 before:top-4 before:w-px before:bg-border">
       {rows.map((row) => (
-        <li key={row.id} className="relative pl-8">
+        <li key={row.taskId} className="relative pl-8">
           <span
             className={`absolute left-1.5 top-4 flex size-3 items-center justify-center rounded-full border-2 border-card ${row.status === 'succeeded' ? 'bg-success' : row.status === 'failed' || row.status === 'interrupted' ? 'bg-destructive' : 'bg-progress'}`}
             aria-hidden="true"
@@ -620,7 +603,7 @@ function ExecutionProcess({ rows, timeZone, chinese }: { rows: readonly RoutineE
                   <Badge variant={statusVariant(row.status)}>{statusLabel(row.status, chinese)}</Badge>
                 </div>
                 <p className="mt-1 text-support text-muted-foreground">
-                  {formatTime(row.triggerTime, timeZone, chinese)} · {row.triggerCount} {chinese ? '次触发合并' : 'trigger(s) coalesced'}
+                  {formatTime(row.triggerTime, row.timeZone, chinese)} · {row.triggerCount} {chinese ? '次触发合并' : 'trigger(s) coalesced'}
                 </p>
               </div>
               {row.taskId ? (
@@ -630,13 +613,13 @@ function ExecutionProcess({ rows, timeZone, chinese }: { rows: readonly RoutineE
               ) : null}
             </div>
             <div className="mt-4 grid gap-3 border-t pt-3 sm:grid-cols-3">
-              <ProcessStep icon={TimerIcon} label={chinese ? '首次触发' : 'First trigger'} value={formatTime(row.firstTriggerTime, timeZone, chinese)} />
+              <ProcessStep icon={TimerIcon} label={chinese ? '首次触发' : 'First trigger'} value={formatTime(row.firstTriggerTime, row.timeZone, chinese)} />
               <ProcessStep
                 icon={row.taskId ? CheckCircle2Icon : Clock3Icon}
                 label={chinese ? '任务' : 'Task'}
                 value={row.taskId ? (chinese ? '已关联' : 'Attached') : chinese ? '等待创建' : 'Waiting'}
               />
-              <ProcessStep icon={row.endedAt ? CheckCircle2Icon : PlayIcon} label={chinese ? '结束时间' : 'Finished'} value={formatTime(row.endedAt, timeZone, chinese)} />
+              <ProcessStep icon={row.endedAt ? CheckCircle2Icon : PlayIcon} label={chinese ? '结束时间' : 'Finished'} value={formatTime(row.endedAt, row.timeZone, chinese)} />
             </div>
           </div>
         </li>

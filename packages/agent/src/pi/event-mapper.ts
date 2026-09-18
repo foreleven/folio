@@ -79,8 +79,13 @@ export const makePiEventMapper = ({ createMessageId }: PiEventMapperOptions): Pi
         }
 
         case "message_end":
-          if (event.message.role === "assistant") {
+          if (event.message.role === "assistant" && assistantMessageId) {
+            const messageId = assistantMessageId;
             assistantMessageId = undefined;
+            return [{ sessionUpdate: "agent_message", messageId,
+              _meta: { "folio/messageComplete": true,
+                ...(["error", "aborted", "length"].includes(event.message.stopReason)
+                  ? { "folio/messageIncomplete": true } : {}) } }];
           }
           return [];
 

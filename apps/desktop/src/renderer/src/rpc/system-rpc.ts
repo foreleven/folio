@@ -1,5 +1,5 @@
 import { AtomRpc } from 'effect/unstable/reactivity'
-import { Count, GetSystemInfo, SystemRpcs } from '../../../shared/rpc/system-rpc'
+import { GetSystemInfo, SystemRpcs } from '../../../shared/rpc/system-rpc'
 import { ElectronRpcProtocolLive } from './electron-rpc-protocol'
 
 /** Renderer-owned AtomRpc client backed by the Electron bridge protocol. */
@@ -11,5 +11,4 @@ export class SystemRpcClient extends AtomRpc.Service<SystemRpcClient>()(
   }
 ) {
   static readonly getSystemInfo = SystemRpcClient.query(GetSystemInfo._tag, void 0, {})
-  static readonly count = SystemRpcClient.mutation(Count._tag)
 }

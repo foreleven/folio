@@ -191,16 +191,21 @@ const authorizeUser = Effect.fn('LarkService.authorizeUser')(function*(
     step: 'user', url: device.verification_uri_complete || device.verification_uri, expiresIn: device.expires_in
   })
   let interval = Math.max(device.interval ?? 5, 1)
-  let attempt = 0
   while ((yield* Clock.currentTimeMillis) < deadline) {
-    yield* Effect.sleep(Math.min(interval * 1000, deadline - (yield* Clock.currentTimeMillis)))
+    const pollAt = Math.min((yield* Clock.currentTimeMillis) + interval * 1000, deadline)
+    // A timer can wake slightly early. Wait until the actual polling boundary,
+    // especially when expiry arrives before the next permitted token request.
+    let observedAt = yield* Clock.currentTimeMillis
+    while (observedAt < pollAt) {
+      yield* Effect.sleep(pollAt - observedAt)
+      observedAt = yield* Clock.currentTimeMillis
+    }
     if ((yield* Clock.currentTimeMillis) >= deadline) break
     const response = yield* request(`${endpoints(app).open}/open-apis/authen/v2/oauth/token`, {
       method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: app.clientId, client_secret: app.clientSecret,
         device_code: device.device_code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }).toString()
     }, TokenResponse)
-    attempt++
     const token = response.body
     if (token.error === 'authorization_pending') continue
     if (token.error === 'slow_down') {

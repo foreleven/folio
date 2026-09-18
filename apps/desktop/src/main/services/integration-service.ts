@@ -45,7 +45,7 @@ export interface PreparedIntegrationResources {
   readonly executableDirectories: readonly string[]
   readonly instructions: readonly string[]
   readonly workspaceFiles?: readonly { readonly path: string; readonly content: string }[]
-  /** Ephemeral provider environment; never included in a Task resource snapshot. */
+  /** Ephemeral provider environment; never persisted with Task data. */
   readonly environment?: Readonly<Record<string, string>>
 }
 
@@ -140,62 +140,109 @@ export class IntegrationService extends Context.Service<IntegrationService, {
      * The command gate excludes a new installation/action while preparing; existing jobs fail fast.
      */
     const prepare = Effect.fn('IntegrationService.prepare')(function*(ids: readonly string[], workspaceDirectory: string, resourceIds: readonly string[] = []) {
-      if (!isAbsolute(workspaceDirectory)) return yield* failure()
-      const requestedResources = new Set(resourceIds)
-      if ([...requestedResources].some(resource => {
-        const separator = resource.indexOf('/')
-        return separator <= 0 || !new Set(ids).has(resource.slice(0, separator))
-      })) return yield* failure()
-      const rows = yield* store.list
-      const skillPaths = new Set<string>()
-      const executableDirectories = new Set<string>()
-      const instructions = new Set<string>()
-      const workspaceFiles = new Map<string, string>()
-      const environment = new Map<string, string>()
-      for (const id of new Set(ids)) {
-        const integration = catalog.find(item => item.id === id)
-        const installed = rows.find(row => row.id === id)
-        if (!integration || !installed || running.has(id)
-          || integration.states[installed.state]?.kind !== 'ready') return yield* failure()
-        if (integration.resources.some(resource => !installed.resources.some(row => row.id === resource.id))) return yield* failure()
-        // Readiness in SQLite can be stale; the provider owns the current executable/account check.
-        yield* withContext(id, integration.check())
-        const context: IngestContext = {
-          integrationDirectory: join(config.directory, 'integrations', id), workspaceDirectory,
-          skills: [], executableDirectories: [], instructions: [], workspaceFiles: [], env: {}
+      let stage = 'validate-request'
+      let integrationId: string | undefined
+      let resourceId: string | undefined
+      let assetPath: string | undefined
+      // Keep provider diagnostics inside the main process and omit credentials and payloads.
+      const rejected = (message: string) => new IntegrationSettingsError({ message })
+      return yield* Effect.gen(function*() {
+        if (!isAbsolute(workspaceDirectory)) return yield* rejected('Workspace directory must be absolute')
+        const requestedResources = new Set(resourceIds)
+        if ([...requestedResources].some(resource => {
+          const separator = resource.indexOf('/')
+          return separator <= 0 || !new Set(ids).has(resource.slice(0, separator))
+        })) return yield* rejected('Selected resource does not belong to a requested integration')
+        stage = 'read-installed-integrations'
+        const rows = yield* store.list
+        // Validate the complete selection before any provider hook can prepare partial resources.
+        for (const requested of requestedResources) {
+          const separator = requested.indexOf('/')
+          integrationId = requested.slice(0, separator)
+          resourceId = requested.slice(separator + 1)
+          const installed = rows.find(row => row.id === integrationId)
+          const provider = catalog.find(item => item.id === integrationId)
+          if (!installed?.resources.some(resource => resource.id === resourceId)
+            || !provider?.resources.some(resource => resource.id === resourceId)) {
+            return yield* rejected('Selected resource is not installed or has no provider implementation')
+          }
         }
-        const selected = resourceIds.length ? installed.resources.filter(resource => requestedResources.has(`${id}/${resource.id}`)) : installed.resources
-        if (resourceIds.length && selected.length === 0) return yield* failure()
-        for (const resource of selected) {
-          const implementation = integration.resources.find(item => item.id === resource.id)
-          if (!implementation) return yield* failure()
-          yield* implementation.onIngest(context)
+        const skillPaths = new Set<string>()
+        const executableDirectories = new Set<string>()
+        const instructions = new Set<string>()
+        const workspaceFiles = new Map<string, string>()
+        const environment = new Map<string, string>()
+        for (const id of new Set(ids)) {
+          integrationId = id
+          resourceId = undefined
+          assetPath = undefined
+          stage = 'validate-installed-integration'
+          const integration = catalog.find(item => item.id === id)
+          const installed = rows.find(row => row.id === id)
+          if (!integration) return yield* rejected('Integration is not in the catalog')
+          if (!installed) return yield* rejected('Integration is not installed')
+          if (running.has(id)) return yield* rejected('Integration has an operation in progress')
+          if (integration.states[installed.state]?.kind !== 'ready') return yield* rejected(`Integration is not ready (state: ${installed.state})`)
+          if (integration.resources.some(resource => !installed.resources.some(row => row.id === resource.id))) return yield* rejected('Installed integration is missing registered resources')
+          // Readiness in SQLite can be stale; the provider owns the current executable/account check.
+          stage = 'check-provider'
+          yield* withContext(id, integration.check())
+          const context: IngestContext = {
+            integrationDirectory: join(config.directory, 'integrations', id), workspaceDirectory,
+            skills: [], executableDirectories: [], instructions: [], workspaceFiles: [], env: {}
+          }
+          stage = 'select-resources'
+          const selected = resourceIds.length ? installed.resources.filter(resource => requestedResources.has(`${id}/${resource.id}`)) : installed.resources
+          if (resourceIds.length && selected.length === 0) return yield* rejected('None of the selected resources are installed')
+          for (const resource of selected) {
+            resourceId = resource.id
+            stage = 'prepare-resource'
+            const implementation = integration.resources.find(item => item.id === resource.id)
+            if (!implementation) return yield* rejected('Installed resource has no provider implementation')
+            yield* implementation.onIngest(context)
+          }
+          // Environment credentials use a separate ephemeral channel; they are never
+          // persisted with Task data.
+          stage = 'validate-skill-paths'
+          for (const path of context.skills) {
+            assetPath = path
+            if (!isAbsolute(path) || basename(path) !== 'SKILL.md' || (yield* fs.stat(path)).type !== 'File') return yield* rejected('Skill path must be an absolute SKILL.md file')
+            skillPaths.add(path)
+          }
+          stage = 'validate-executable-directories'
+          for (const path of context.executableDirectories) {
+            assetPath = path
+            if (!isAbsolute(path) || path.includes(delimiter) || (yield* fs.stat(path)).type !== 'Directory') return yield* rejected('Executable path must be an absolute directory without a PATH delimiter')
+            executableDirectories.add(path)
+          }
+          for (const instruction of context.instructions) instructions.add(instruction)
+          stage = 'validate-workspace-files'
+          for (const file of context.workspaceFiles ?? []) {
+            // Match TaskResources' platform-independent path spelling before comparing ownership.
+            const path = file.path.replaceAll('\\', '/')
+            const previous = workspaceFiles.get(path)
+            if (previous !== undefined && previous !== file.content) return yield* rejected('Providers supplied conflicting workspace files')
+            workspaceFiles.set(path, file.content)
+          }
+          stage = 'validate-environment'
+          assetPath = undefined
+          for (const [key, value] of Object.entries(context.env)) {
+            if (!/^[A-Z][A-Z0-9_]*$/.test(key)
+              || ['PATH', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)
+              || key.startsWith('FOLIO_')) return yield* rejected('Provider supplied a prohibited environment variable')
+            const previous = environment.get(key)
+            if (previous !== undefined && previous !== value) return yield* rejected('Providers supplied conflicting environment values')
+            environment.set(key, value)
+          }
         }
-        // Environment credentials use a separate ephemeral channel; they are never
-        // included in the asset manifest or persisted integration snapshot.
-        for (const path of context.skills) {
-          if (!isAbsolute(path) || basename(path) !== 'SKILL.md' || (yield* fs.stat(path)).type !== 'File') return yield* failure()
-          skillPaths.add(path)
-        }
-        for (const path of context.executableDirectories) {
-          if (!isAbsolute(path) || path.includes(delimiter) || (yield* fs.stat(path)).type !== 'Directory') return yield* failure()
-          executableDirectories.add(path)
-        }
-        for (const instruction of context.instructions) instructions.add(instruction)
-        for (const file of context.workspaceFiles ?? []) workspaceFiles.set(file.path, file.content)
-        for (const [key, value] of Object.entries(context.env)) {
-          if (!/^[A-Z][A-Z0-9_]*$/.test(key)
-            || ['PATH', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)
-            || key.startsWith('FOLIO_')) return yield* failure()
-          const previous = environment.get(key)
-          if (previous !== undefined && previous !== value) return yield* failure()
-          environment.set(key, value)
-        }
-      }
-      const files = [...workspaceFiles].map(([path, content]) => ({ path, content }))
-      const env = Object.fromEntries(environment)
-      return { skillPaths: [...skillPaths], executableDirectories: [...executableDirectories], instructions: [...instructions],
-        ...(files.length ? { workspaceFiles: files } : {}), ...(Object.keys(env).length ? { environment: env } : {}) }
+        const files = [...workspaceFiles].map(([path, content]) => ({ path, content }))
+        const env = Object.fromEntries(environment)
+        return { skillPaths: [...skillPaths], executableDirectories: [...executableDirectories], instructions: [...instructions],
+          ...(files.length ? { workspaceFiles: files } : {}), ...(Object.keys(env).length ? { environment: env } : {}) }
+      }).pipe(Effect.tapError(error => Effect.logError('Integration resource preparation failed', {
+        stage, integration: integrationId, resource: resourceId, assetPath, workspaceDirectory,
+        integrationIds: ids, resourceIds, error: operationErrorDetails(error)
+      })))
     }, commands.withPermit, Effect.mapError(failure))
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {

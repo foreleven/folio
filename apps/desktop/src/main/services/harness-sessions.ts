@@ -30,7 +30,7 @@ const failure = (reason: HarnessStoreError['reason']) => new HarnessStoreError({
  */
 export class HarnessSessions extends Context.Service<HarnessSessions, {
   /** Opens an existing Folio Session, joining concurrent startup. Never creates or sends a Run. */
-  readonly open: (taskId: string, sessionId: string) => Effect.Effect<Session, HarnessStoreError>
+  readonly open: (taskId: string, sessionId: string, claim?: { id: string; owner: string }) => Effect.Effect<Session, HarnessStoreError>
   /** Reports local process ownership so automatic cleanup never closes an inspection Session. */
   readonly hasLiveTask: (taskId: string) => Effect.Effect<boolean>
   /** Holds local and durable ownership while reconciling a stopped Session; never opens an Agent. */
@@ -55,7 +55,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
       let shuttingDown = false
 
       /** Only startup and ownership lookup are serialized; different Task processes initialize concurrently. */
-      const acquire = Effect.fn('HarnessSessions.acquire')(function*(taskId: string, sessionId: string) {
+      const acquire = Effect.fn('HarnessSessions.acquire')(function*(taskId: string, sessionId: string, claim?: { id: string; owner: string }) {
         if (shuttingDown) return yield* failure('invalid-state')
         const existing = entries.get(sessionId)
         if (existing) {
@@ -68,7 +68,8 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
         if (!saved) return yield* failure('not-found')
         if (task.state !== 'active' || task.worktreeState !== 'ready') return yield* failure('invalid-state')
         if ([...entries.values()].some(entry => entry.taskId === taskId)
-          || (yield* store.runs(taskId)).some(run => run.state === 'preparing' || run.state === 'running')) {
+          || (yield* store.runs(taskId)).some(run => (run.state === 'preparing' || run.state === 'running')
+            && !(run.id === claim?.id && run.owner === claim.owner && run.state === 'preparing' && run.baselineCommit === null))) {
           return yield* failure('task-busy')
         }
         const ready = yield* Deferred.make<Session, HarnessStoreError>()
@@ -162,7 +163,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
       return HarnessSessions.of({
         withStoppedSession,
         hasLiveTask,
-        open: (taskId, sessionId) => acquire(taskId, sessionId).pipe(Effect.flatMap(Deferred.await)),
+        open: (taskId, sessionId, claim) => acquire(taskId, sessionId, claim).pipe(Effect.flatMap(Deferred.await)),
         close: (taskId, sessionId) => beginClose(taskId, sessionId).pipe(Effect.flatMap(fiber => fiber ? Fiber.join(fiber) : Effect.void))
       })
     }))

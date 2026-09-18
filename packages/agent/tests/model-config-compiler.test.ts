@@ -245,6 +245,16 @@ describe("model config compiler", () => {
     }
   });
 
+  it.each(["constructor", "toString", "__proto__"])("compiles the literal provider id %s without inherited entries", async (providerId) => {
+    const profile = customProfile({ provider: {
+      type: "custom", providerId, baseUrl: "https://api.example.test/v1", api: "openai-completions",
+    } });
+    const derived = await Effect.runPromise(compileDerivedPiModelConfig(settings([profile], profile.id)));
+    expect(Object.keys(derived.providers)).toEqual([providerId]);
+    expect(derived.providers[providerId]?.models.map(model => model.id)).toEqual([profile.modelId]);
+    expect(serializeDerivedPiModelConfig(derived)).toContain(`"${providerId}":`);
+  });
+
   it("rejects conflicting custom provider definitions instead of silently overriding", async () => {
     const conflicting = customProfile({
       id: "conflicting",

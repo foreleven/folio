@@ -46,7 +46,20 @@ export class NativeAgentProcess {
         await this.exited
         return
       }
-      this.signal('SIGTERM')
+      try { this.signal('SIGTERM') }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+        // Darwin reports EPERM for a group containing only an unreaped child.
+        // The SDK may have killed it just before our group signal. Only continue
+        // if Node actually observes close; real permission failures stay failures.
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        try {
+          const exited = await Promise.race([this.exited.then(() => true), new Promise<boolean>(resolve => {
+            timeout = setTimeout(() => resolve(false), 2000)
+          })])
+          if (!exited) throw error
+        } finally { clearTimeout(timeout) }
+      }
       const timer = setTimeout(() => { try { this.signal('SIGKILL') } catch { /* Verified below. */ } }, 2000)
       try { await this.exited } finally { clearTimeout(timer) }
       // The group may outlive its leader, so clean remaining descendants too.

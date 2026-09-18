@@ -4,6 +4,7 @@ import {
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { makePiAcpBackend } from "../pi/acp-backend.js";
 import { makeFakePiSessionFactory } from "../pi/fake-session-factory.js";
 import type { FakeModel } from "../pi/fake-model.js";
@@ -113,7 +114,18 @@ export const createFolioAgentApp = (options: FolioAgentOptions = {}): FolioAgent
       throw RequestError.invalidParams({ reason: "agent_mismatch" }, "The session belongs to another Agent.");
     }
     record.opening = (async () => {
-      if (options.archive) record.lease = await options.archive.leases.acquire(record.sessionId, resume, { requireExistingStore: resume !== undefined });
+      if (options.archive) {
+        record.lease = await options.archive.leases.acquire(record.sessionId, resume, { requireExistingStore: resume !== undefined });
+        if (resume) {
+          // The preceding owner can still append after header lookup. Read the
+          // replay under both identity leases, before native startup emits updates.
+          const archived = await options.archive.read(record.sessionId);
+          if (archived.header.cwd !== record.cwd || !isDeepStrictEqual(archived.header.native, resume)) {
+            throw RequestError.internalError({ reason: "identity_mismatch" }, "Archived session identity changed.");
+          }
+          record.history = archived.history;
+        }
+      }
       return factory.create({ sessionId: record.sessionId, cwd: record.cwd, resume, signal: record.openingController.signal, onUpdate: async (update) => {
         if (record.buffer) record.buffer.push(update);
         else await notify(record, update);
@@ -192,11 +204,10 @@ export const createFolioAgentApp = (options: FolioAgentOptions = {}): FolioAgent
       try {
         let record = records.get(params.sessionId);
         if (!record && options.archive) {
-          const archived = await options.archive.read(params.sessionId);
-          if (params.cwd !== archived.header.cwd) throw RequestError.invalidParams({ reason: "cwd_mismatch" }, "cwd does not match the session");
+          const header = await options.archive.readHeader(params.sessionId);
+          if (params.cwd !== header.cwd) throw RequestError.invalidParams({ reason: "cwd_mismatch" }, "cwd does not match the session");
           record = created = recordFor(params.sessionId, params.cwd, client);
-          record.history = archived.history;
-          await install(record, archived.header.native);
+          await install(record, header.native);
         }
         if (shuttingDown || !record) throw RequestError.resourceNotFound("session");
         if (!record.ready || !record.backend || await record.backend.state() !== "idle") throw busy();

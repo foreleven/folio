@@ -1,4 +1,4 @@
-import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelThinkingLevel, StopReason } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { Effect, Schema } from "effect";
 import {
@@ -63,6 +63,7 @@ interface SessionRegistryEntry {
   cancelRequested: boolean;
   events: Promise<void>;
   eventFailed: boolean;
+  assistantStopReason?: StopReason;
 }
 
 export interface SessionRegistryOptions {
@@ -70,7 +71,7 @@ export interface SessionRegistryOptions {
   readonly onEvent: (sessionId: string, event: AgentSessionEvent) => void | Promise<void>;
 }
 
-export type SessionPromptStopReason = "end_turn" | "cancelled";
+export type SessionPromptStopReason = "end_turn" | "cancelled" | "max_tokens";
 
 export interface SessionPromptHandle {
   readonly completion: Promise<SessionPromptStopReason>;
@@ -240,6 +241,11 @@ export const makeSessionRegistry = ({
       entry.unsubscribe = yield* Effect.try({
         try: () => piSession.subscribe((event) => {
           if (entry.state === "closed") return;
+          // Pi resolves prompt() after both successful and failed model turns.
+          // Retain the latest terminal message: an automatic retry may recover.
+          if (event.type === "message_end" && event.message.role === "assistant") {
+            entry.assistantStopReason = event.message.stopReason;
+          }
           entry.events = entry.events
             .then(() => onEvent(sessionId, event))
             .then(() => undefined, () => { entry.eventFailed = true; });
@@ -356,6 +362,7 @@ export const makeSessionRegistry = ({
     entry.state = "prompting";
     entry.cancelRequested = false;
     entry.eventFailed = false;
+    entry.assistantStopReason = undefined;
     yield* Effect.tryPromise({
       try: () => Promise.resolve(onAccepted()),
       catch: () => failure("prompt_failed"),
@@ -366,7 +373,12 @@ export const makeSessionRegistry = ({
       .then(async (): Promise<SessionPromptStopReason> => {
         await entry.events.catch(() => undefined);
         if (entry.eventFailed) throw failure("prompt_failed");
-        return entry.cancelRequested ? "cancelled" : "end_turn";
+        if (entry.cancelRequested || entry.assistantStopReason === "aborted") return "cancelled";
+        if (entry.assistantStopReason === "length") return "max_tokens";
+        if (entry.assistantStopReason === "error" || entry.assistantStopReason === "pending" || entry.assistantStopReason === "deferred") {
+          throw failure("prompt_failed");
+        }
+        return "end_turn";
       })
       .catch(async () => {
         await entry.events.catch(() => undefined);

@@ -154,6 +154,22 @@ describe('VaultService', () => {
     } finally { await runtime.dispose() }
   })
 
+  it('retries removal after the managed tree was deleted but the index still exists', async () => {
+    const selected = await folder('retry-removal')
+    const runtime = makeRuntime()
+    try {
+      const store = await runtime.runPromise(VaultService)
+      const vault = await runtime.runPromise(store.register(selected))
+      await rm(join(root, 'config/vaults', vault.id), { recursive: true })
+      await runtime.runPromise(store.remove(vault))
+      await runtime.runPromise(store.remove(vault))
+      await expect(lstat(selected)).rejects.toMatchObject({ code: 'ENOENT' })
+      const config = await runtime.runPromise(ConfigService)
+      await runtime.runPromise(config.removeVault(vault.id))
+      expect((await runtime.runPromise(config.get)).vaults).toEqual([])
+    } finally { await runtime.dispose() }
+  })
+
   it('deduplicates simultaneous selections and symlink aliases', async () => {
     const selected = await folder('wiki')
     const alias = join(root, 'alias')

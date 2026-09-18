@@ -111,7 +111,6 @@ export class SessionLeaseStore {
     const token = randomUUID();
     const host = hostname();
     const keys = [JSON.stringify(["acp", sessionId]), ...(native ? [nativeKey(native)] : [])];
-    const store = this;
 
     /** Reclaims only verified dead local owners, under the same write transaction as the new claim. */
     const claim = Effect.fn("SessionLease.claim")(function*(sql: SqliteClient.SqliteClient, key: string, workerPid: number | null) {
@@ -132,7 +131,7 @@ export class SessionLeaseStore {
     return {
       bind: async (identity, workerPid) => {
         if (released || !Number.isSafeInteger(workerPid) || workerPid <= 0) throw failure("unavailable");
-        await store.#transaction((sql) => Effect.gen(function*() {
+        await this.#transaction((sql) => Effect.gen(function*() {
           const owners = yield* sql`SELECT * FROM session_owners WHERE token = ${token}`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Owners)));
           if (!owners.length || owners.some((owner) => owner.owner_pid !== process.pid || owner.host !== host)) return yield* failure("unavailable");
           // A receipt belongs to one native execution for its entire lifetime, including repeated bind calls.
@@ -144,7 +143,7 @@ export class SessionLeaseStore {
       },
       release: async () => {
         if (released) return;
-        await store.#transaction((sql) => Effect.gen(function*() {
+        await this.#transaction((sql) => Effect.gen(function*() {
           const owners = yield* sql`SELECT * FROM session_owners WHERE token = ${token}`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Owners)));
           if (owners.some((owner) => owner.worker_pid !== null && owner.worker_pid !== process.pid && alive(owner.worker_pid))) {
             return yield* failure("worker_running");

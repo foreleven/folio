@@ -26,10 +26,5 @@ export const GetSystemInfo = Rpc.make('system.getInfo', {
   success: SystemInfo
 })
 
-export const Count = Rpc.make('system.count', {
-  success: Schema.Int,
-  payload: Schema.Int
-})
-
 /** Complete system RPC contract shared by the renderer client and main server. */
-export class SystemRpcs extends RpcGroup.make(GetSystemInfo, Count) {}
+export class SystemRpcs extends RpcGroup.make(GetSystemInfo) {}

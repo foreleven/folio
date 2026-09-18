@@ -186,7 +186,7 @@ export class SecureCredentialStore implements CredentialStore {
     } catch (error) {
       if (signal?.aborted) throw error;
       if (errorCode(error) === "ELOCKED") throw storageError("locked");
-      throw error;
+      throw mapStorageError(error);
     }
   }
 
@@ -226,7 +226,8 @@ export class SecureCredentialStore implements CredentialStore {
   read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
     const id = decodeProviderId(providerId);
     return runStorageOperation(async () => {
-      const credential = (await this.#readFile())[id];
+      const data = await this.#readFile();
+      const credential = Object.hasOwn(data, id) ? data[id] : undefined;
       return credential === undefined ? undefined : structuredClone(credential);
     }, options?.signal);
   }
@@ -284,12 +285,16 @@ export class SecureCredentialStore implements CredentialStore {
     return this.#exclusive(async () => {
       const id = decodeProviderId(providerId);
       await runStorageOperation(() => this.#ensureStorage(), options?.signal);
-      const release = await runStorageOperation(() => this.#acquireLock(options?.signal), options?.signal);
+      // Receive ownership directly: a post-acquisition abort check outside try/finally
+      // could discard the release function and leave the cross-process lock held.
+      const release = await this.#acquireLock(options?.signal);
       try {
         const data = await runStorageOperation(() => this.#readFile(), options?.signal);
-        const next = await fn(data[id] === undefined ? undefined : structuredClone(data[id]));
+        // Provider IDs are data, including names inherited by ordinary JavaScript objects.
+        const current = Object.hasOwn(data, id) ? data[id] : undefined;
+        const next = await fn(current === undefined ? undefined : structuredClone(current));
         options?.signal?.throwIfAborted();
-        if (next === undefined) return data[id] === undefined ? undefined : structuredClone(data[id]);
+        if (next === undefined) return current === undefined ? undefined : structuredClone(current);
         const checked = decodeCredential(next);
         await runStorageOperation(() => this.#writeFile({ ...data, [id]: checked }), options?.signal);
         return structuredClone(checked);
@@ -303,10 +308,10 @@ export class SecureCredentialStore implements CredentialStore {
     return this.#exclusive(async () => {
       const id = decodeProviderId(providerId);
       await runStorageOperation(() => this.#ensureStorage(), options?.signal);
-      const release = await runStorageOperation(() => this.#acquireLock(options?.signal), options?.signal);
+      const release = await this.#acquireLock(options?.signal);
       try {
         const data = await runStorageOperation(() => this.#readFile(), options?.signal);
-        if (!(id in data)) return;
+        if (!Object.hasOwn(data, id)) return;
         const { [id]: _removed, ...remaining } = data;
         await runStorageOperation(() => this.#writeFile(remaining), options?.signal);
       } finally {

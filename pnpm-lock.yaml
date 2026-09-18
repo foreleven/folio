@@ -7,6 +7,14 @@ settings:
 overrides:
   '@effect/platform-node-shared': 4.0.0-rc.112
 
+patchedDependencies:
+  '@earendil-works/pi-coding-agent@0.85.1':
+    hash: 27dd033302f4cb52ae57348def48e6cd70495ec6498ec62c8706da9d11d97951
+    path: patches/@earendil-works__pi-coding-agent@0.85.1.patch
+  app-builder-lib@26.15.3:
+    hash: 82b63a991e327769fc05644e5fb64c17323b814f1d9524e5cd75dd0b41ea3e3b
+    path: patches/app-builder-lib@26.15.3.patch
+
 importers:
 
   .:
@@ -131,7 +139,7 @@ importers:
         version: 0.85.1(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)
       '@earendil-works/pi-coding-agent':
         specifier: 0.85.1
-        version: 0.85.1(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)
+        version: 0.85.1(patch_hash=27dd033302f4cb52ae57348def48e6cd70495ec6498ec62c8706da9d11d97951)(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)
       '@effect/platform-node':
         specifier: 4.0.0-rc.112
         version: 4.0.0-rc.112(effect@4.0.0-rc.112)(redis@6.2.1)
@@ -169,9 +177,6 @@ importers:
       effect:
         specifier: 4.0.0-rc.112
         version: 4.0.0-rc.112
-      gaxios:
-        specifier: 7.1.3
-        version: 7.1.3
       google-auth-library:
         specifier: 10.5.0
         version: 10.5.0
@@ -5280,7 +5285,7 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-coding-agent@0.85.1(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)':
+  '@earendil-works/pi-coding-agent@0.85.1(patch_hash=27dd033302f4cb52ae57348def48e6cd70495ec6498ec62c8706da9d11d97951)(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)':
     dependencies:
       '@earendil-works/chord': 0.85.1
       '@earendil-works/pi-agent-core': 0.85.1(@modelcontextprotocol/sdk@1.30.0(zod@4.6.0))(ws@8.21.3)(zod@4.6.0)
@@ -6556,7 +6561,7 @@ snapshots:
 
   ansi-styles@6.2.3: {}
 
-  app-builder-lib@26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3):
+  app-builder-lib@26.15.3(patch_hash=82b63a991e327769fc05644e5fb64c17323b814f1d9524e5cd75dd0b41ea3e3b)(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3):
     dependencies:
       '@electron/asar': 3.4.1
       '@electron/fuses': 1.8.0
@@ -6988,7 +6993,7 @@ snapshots:
 
   dmg-builder@26.15.3(electron-builder-squirrel-windows@26.15.3):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(patch_hash=82b63a991e327769fc05644e5fb64c17323b814f1d9524e5cd75dd0b41ea3e3b)(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
       builder-util: 26.15.3
       fs-extra: 10.1.0
       js-yaml: 4.3.2
@@ -7039,7 +7044,7 @@ snapshots:
 
   electron-builder-squirrel-windows@26.15.3(dmg-builder@26.15.3):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(patch_hash=82b63a991e327769fc05644e5fb64c17323b814f1d9524e5cd75dd0b41ea3e3b)(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
       builder-util: 26.15.3
       electron-winstaller: 5.4.0
     transitivePeerDependencies:
@@ -7048,7 +7053,7 @@ snapshots:
 
   electron-builder@26.15.3(electron-builder-squirrel-windows@26.15.3):
     dependencies:
-      app-builder-lib: 26.15.3(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
+      app-builder-lib: 26.15.3(patch_hash=82b63a991e327769fc05644e5fb64c17323b814f1d9524e5cd75dd0b41ea3e3b)(dmg-builder@26.15.3)(electron-builder-squirrel-windows@26.15.3)
       builder-util: 26.15.3
       builder-util-runtime: 9.7.0
       chalk: 4.1.2

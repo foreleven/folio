@@ -47,7 +47,7 @@ export const SessionRecord = Schema.Struct({
 export type SessionRecord = typeof SessionRecord.Type
 
 /** Preparing already reserves the worktree. A prompt acknowledgement is not a terminal result. */
-export const RunState = Schema.Literals(['preparing', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled'])
+export const RunState = Schema.Literals(['queued', 'preparing', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled'])
 export const RunOutcome = Schema.Literals(['succeeded', 'failed', 'interrupted', 'cancelled'])
 export type RunOutcome = typeof RunOutcome.Type
 export const NewRun = Schema.Struct({
@@ -63,7 +63,11 @@ export const RunIntent = Schema.Struct({
 })
 export type RunIntent = typeof RunIntent.Type
 export const RunRecord = Schema.Struct({
-  ...NewRun.fields, state: RunState,
+  ...NewRun.fields, baselineCommit: Schema.NullOr(Id), state: RunState,
+  sequence: Schema.Number,
+  source: Schema.Literals(['manual', 'routine', 'recovery', 'conflict-resolution']),
+  owner: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean,
+  startedAt: Schema.NullOr(Schema.Number),
   syncState: Schema.Literals(['not-required', 'pending', 'syncing', 'conflict', 'completed', 'failed']),
   createdAt: Schema.Number, endedAt: Schema.NullOr(Schema.Number), error: Schema.NullOr(Schema.String)
 })

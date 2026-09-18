@@ -1,5 +1,4 @@
 import { AgentWorkerPool } from './services/agent-worker-pool'
-import { ExecutionEventLog } from './services/execution-event-log'
 import { GlobalExecutionSchedulerLive } from './services/global-execution-scheduler'
 import { ExecutionNotifications } from './services/execution-scheduler'
 import { RoutineSchedulerLive } from './services/routine-scheduler'
@@ -23,8 +22,6 @@ const gmailAssetsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'gmail-assets')
   : join(app.getAppPath(), '../../packages/integrations/src/gmail/assets')
 import { IntegrationService } from './services/integration-service'
-import type { Integration } from '@folio/integrations/base'
-import type { IntegrationPlatform } from './services/integration-catalog'
 import { IntegrationCatalog } from './services/integration-catalog'
 import { IntegrationStore } from './services/integration-store'
 import { IntegrationBrowser } from './electron/IntegrationBrowser'
@@ -119,7 +116,6 @@ export const MainLive = Layer.mergeAll(MainRpcLive, ApplicationMenuLive, Routine
   Layer.provide(VaultRuntime.layer),
   Layer.provide(AgentWorkerPool.layer),
   Layer.provide(ExecutionNotifications.layer),
-  Layer.provide(ExecutionEventLog.layer),
   Layer.provide(VaultWindowContexts.layer),
   Layer.provide(IntegrationsLive),
   Layer.provide(ModelService.layer()),

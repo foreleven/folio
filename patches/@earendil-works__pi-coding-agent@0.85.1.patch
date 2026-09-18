@@ -1,0 +1,66 @@
+diff --git a/dist/core/tools/find.d.ts b/dist/core/tools/find.d.ts
+index 531a5904c619fe4146bb7b692dcc4862b57e3a0b..a0469e73e991296418ec90cd589504079189c9c3 100644
+--- a/dist/core/tools/find.d.ts
++++ b/dist/core/tools/find.d.ts
+@@ -1,3 +1,4 @@
++import type { ChildProcessWithoutNullStreams } from "node:child_process";
+ import type { AgentTool } from "@earendil-works/pi-agent-core";
+ import path from "path";
+ import { type Static, Type } from "typebox";
+@@ -33,6 +34,8 @@ export interface FindOperations {
+     }) => Promise<string[]> | string[];
+ }
+ export interface FindToolOptions {
++    /** Host-owned native process creation; the host retains cleanup ownership. */
++    spawn?: (executable: string, args: string[], signal?: AbortSignal) => Promise<ChildProcessWithoutNullStreams>;
+     /** Custom operations for find. Default: local filesystem plus fd */
+     operations?: FindOperations;
+ }
+diff --git a/dist/core/tools/find.js b/dist/core/tools/find.js
+index a3bab76c952c2a03d6534aba80a72f7743a52b94..c6f8b17f817c9c0449d2952de6889f8354117ba6 100644
+--- a/dist/core/tools/find.js
++++ b/dist/core/tools/find.js
+@@ -158,7 +158,9 @@ export function createFindToolDefinition(cwd, options) {
+                                 effectivePattern = effectivePattern.replaceAll("/", String.raw `[/\\]`);
+                         }
+                         args.push("--", effectivePattern, searchPath);
+-                        const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
++                        const child = options?.spawn
++                            ? await options.spawn(fdPath, args, signal)
++                            : spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+                         const rl = createInterface({ input: child.stdout });
+                         let stderr = "";
+                         const lines = [];
+diff --git a/dist/core/tools/grep.d.ts b/dist/core/tools/grep.d.ts
+index a0ee106148058186ebaecbe20850898dc56713cb..89b408ece22748b29e908851e4aa7d7a90837305 100644
+--- a/dist/core/tools/grep.d.ts
++++ b/dist/core/tools/grep.d.ts
+@@ -1,3 +1,4 @@
++import type { ChildProcessWithoutNullStreams } from "node:child_process";
+ import type { AgentTool } from "@earendil-works/pi-agent-core";
+ import { type Static, Type } from "typebox";
+ import type { ToolDefinition } from "../extensions/types.ts";
+@@ -32,6 +33,8 @@ export interface GrepOperations {
+     readFile: (absolutePath: string) => Promise<string> | string;
+ }
+ export interface GrepToolOptions {
++    /** Host-owned native process creation; the host retains cleanup ownership. */
++    spawn?: (executable: string, args: string[], signal?: AbortSignal) => Promise<ChildProcessWithoutNullStreams>;
+     /** Custom operations for grep. Default: local filesystem plus ripgrep */
+     operations?: GrepOperations;
+ }
+diff --git a/dist/core/tools/grep.js b/dist/core/tools/grep.js
+index d427d071582ead6e0c876121a8b67ad9fe6c45f7..9cbe8addf394de02fc0289f4cdad6e74b203abf7 100644
+--- a/dist/core/tools/grep.js
++++ b/dist/core/tools/grep.js
+@@ -98,7 +98,9 @@ export function createGrepToolDefinition(cwd, options) {
+                         if (glob)
+                             args.push("--glob", glob);
+                         args.push("--", pattern, searchPath);
+-                        const child = spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
++                        const child = options?.spawn
++                            ? await options.spawn(rgPath, args, signal)
++                            : spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+                         const rl = createInterface({ input: child.stdout });
+                         let stderr = "";
+                         let matchCount = 0;

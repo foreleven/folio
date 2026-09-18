@@ -11,6 +11,7 @@ vi.mock('@effect/atom-react', () => ({
 vi.mock('../rpc/integration-rpc', () => ({ IntegrationRpcClient: { integrations: 'integrations' } }))
 vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { create: {}, reopen: {}, query: () => ({}) } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
+vi.mock('./TaskSessions', () => ({ TaskSessions: ({ task }: { task: { id: string } }) => <div data-testid="sessions">{task.id}</div> }))
 afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.tasks = []; mocks.integrations = [] })
 
 describe('Task creation', () => {
@@ -34,12 +35,13 @@ describe('Task creation', () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(2)
   })
 
-  it('retries a persisted unfinished workspace with its original identity and Agent', async () => {
-    mocks.tasks = [{ id: 'original', goal: 'Persisted intent', state: 'active', worktreeState: 'creating', configuration: { agent: 'pi', integrationIds: ['notes'] } }]
-    mocks.create.mockResolvedValueOnce({})
+  it.each(['pending', 'creating', 'ready'])('opens Sessions before workspace preparation (%s) without resubmitting the Task', async worktreeState => {
+    mocks.tasks = [{ id: 'original', goal: 'Persisted intent', state: 'active', worktreeState, configuration: { agent: 'pi', integrationIds: ['notes'] } }]
     render(<TaskPanel />)
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })) })
-    expect(mocks.create).toHaveBeenCalledWith({ payload: { id: 'original', goal: 'Persisted intent', agent: 'pi', integrationIds: ['notes'] } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sessions' })) })
+    expect(screen.getByTestId('sessions').textContent).toBe('original')
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
   })
 
   it('saves explicit Integration selection and allocates new intent when a failed request selection changes', async () => {

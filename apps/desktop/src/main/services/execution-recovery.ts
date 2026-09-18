@@ -1,6 +1,7 @@
 import type { AgentWorkerPool } from './agent-worker-pool'
 import { Effect } from 'effect'
-import type { SqlClient } from 'effect/unstable/sql'
+import { processIdentity } from './process-identity'
+import { fileEffect, RUN_INSTANCE_ID, type RunFileStore } from './run-files'
 import type { ExecutionQueue } from './execution-queue'
 import type { ExecutionEventSink } from './execution-event-sink'
 import type { HarnessStore } from './harness-store'
@@ -28,39 +29,67 @@ export function recoverExecutions(deps: {
   readonly store: HarnessStore['Service']
   readonly runs: HarnessRuns['Service']
   readonly sessions: HarnessSessions['Service']
-  readonly sql: SqlClient.SqlClient
+  readonly files: RunFileStore
 }) {
   return Effect.gen(function* () {
-    yield* deps.sink.flush
-    for (const request of yield* deps.queue.list()) {
-      if (request.state === 'queued' || request.endedAt !== null || deps.owned.has(request.id)) continue
+    const states = yield* fileEffect(() => deps.files.list())
+    const requests = yield* deps.queue.list()
+    // Include terminal/orphan file entries: a committed terminal receipt may precede file removal.
+    for (const state of states) {
+      const request = requests.find(value => value.id === state.runId && value.owner === state.owner)
+      if (!request) return yield* Effect.fail(new Error('Unowned execution recovery file requires inspection'))
+      if (deps.owned.has(request.id)) continue
       yield* Effect.gen(function* () {
-        const workers = yield* deps.sql<{ owner_pid: number; thread_id: number; stopped: number }>`SELECT owner_pid, thread_id, stopped FROM execution_workers WHERE request_id=${request.id}`
-        const worker = workers[0]
-        if (worker && !worker.stopped) {
-          if (worker.owner_pid === process.pid) {
-            if (deps.workers.hasThread(worker.thread_id)) return
-            yield* Effect.tryPromise({ try: () => deps.workers.reconcile(worker.thread_id), catch: error => error })
-          } else if (hasExecutionProcess(worker.owner_pid)) return
+        const retain = (reason: string) => Effect.promise(() => deps.files.log(state, 'recovery', { decision: reason }))
+        if (!state.workerStopped) {
+          if (state.ownerPid === process.pid && state.instanceId === RUN_INSTANCE_ID && state.threadId !== null) {
+            if (deps.workers.hasThread(state.threadId)) return yield* retain('live-worker')
+            yield* Effect.tryPromise({ try: () => deps.workers.reconcile(state.threadId!), catch: error => error })
+          } else if (hasExecutionProcess(state.ownerPid)) {
+            const identity = yield* Effect.promise(() => processIdentity(state.ownerPid))
+            if (!identity || !state.ownerIdentity || identity.started === state.ownerIdentity.started) return yield* retain('live-or-unknown-owner')
+          }
+          // The spawn/registration window needs native lease inspection, never an assumed exit.
+          if (state.threadId === null && state.phase === 'starting') return yield* retain('startup-identity-unconfirmed')
         }
-        const processes = yield* deps.sql<{ pid: number; stopped: number }>`SELECT pid, stopped FROM execution_processes WHERE request_id=${request.id}`
-        if (processes.some(native => !native.stopped && hasExecutionProcess(native.pid))) return
-        for (const native of processes) if (!native.stopped) yield* deps.sink.processStopped(request.sessionId, native.pid)
-        if (worker && !worker.stopped) yield* deps.sink.workerStopped(request.sessionId)
-        let run = (yield* deps.store.runs(request.taskId)).find(value => value.id === request.id)
+        for (const native of state.processes) {
+          if (native.stopped || !hasExecutionProcess(native.pid)) continue
+          const identity = yield* Effect.promise(() => processIdentity(native.pid))
+          if (!identity || !native.identity || identity.started === native.identity.started) return yield* retain('live-or-unknown-process')
+          // A reused leader PID does not prove that its old tool process group exited.
+          if (process.platform !== 'win32') {
+            const groupAlive = yield* Effect.sync(() => {
+              try { process.kill(-native.identity!.group, 0); return true }
+              catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH' }
+            })
+            if (groupAlive) return yield* retain('live-process-group')
+          }
+        }
+        if (yield* deps.sessions.hasLiveTask(request.taskId)) return yield* retain('live-session')
+        yield* Effect.promise(() => deps.files.log(state, 'recovery', { decision: 'processes-stopped' }))
+        if (state.binding) yield* deps.store.bindSession(request.sessionId, state.binding)
         const session = (yield* deps.store.sessions(request.taskId)).find(value => value.id === request.sessionId)
-        if (yield* deps.sessions.hasLiveTask(request.taskId)) return
-        if (run && (run.state === 'preparing' || run.state === 'running')) {
-          run = yield* deps.runs.inspect(request.taskId, request.id)
-        } else if (!run && session?.acpSessionId && session.nativeSessionId) {
+        if (session?.acpSessionId && session.nativeSessionId) {
           yield* deps.sessions.withStoppedSession(request.taskId, request.sessionId, () => Effect.void)
         }
-        // Without process-started, the Worker could not yet send initialize/session.new.
-        // The request still becomes interrupted rather than silently replaying its prompt.
-        const outcome = run && run.state !== 'preparing' && run.state !== 'running' ? run.state : 'interrupted'
-        yield* deps.sink.finishRequest(request, outcome, outcome === 'interrupted'
-          ? 'Previous execution stopped. Inspect saved progress before submitting a new request.' : undefined)
+        yield* fileEffect(() => deps.files.update(request.id, state.owner, current => ({ ...current,
+          workerStopped: true, processes: current.processes.map(native => ({ ...native, stopped: true })), phase: 'cleaning' })))
+        if (request.endedAt !== null) {
+          yield* fileEffect(() => deps.files.remove(request.id, state.owner))
+          return
+        }
+        if (!state.result && session?.acpSessionId && session.nativeSessionId) yield* deps.runs.inspect(request.taskId, request.id)
+        yield* deps.sink.finishRequest(request, 'interrupted', 'Previous execution stopped. Inspect saved progress before submitting a new request.')
       }).pipe(Effect.catch(() => Effect.logWarning('An execution still requires stopped-process or archive reconciliation.')))
+    }
+    yield* Effect.promise(() => deps.files.prune(new Set(requests.filter(run => run.endedAt !== null).map(run => run.id))))
+    // A missing receipt after claim cannot prove that no Agent was launched. Keep its
+    // durable ownership visible instead of automatically dispatching the same prompt.
+    for (const request of requests) {
+      if (request.state === 'queued' || request.endedAt !== null || deps.owned.has(request.id)) continue
+      if (!states.some(state => state.runId === request.id && state.owner === request.owner)) {
+        yield* Effect.logWarning('Execution recovery file is missing; ownership is retained', { runId: request.id })
+      }
     }
   })
 }

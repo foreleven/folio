@@ -1,8 +1,10 @@
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { HarnessStoreError } from '../../shared/harness'
 import { RoutineExecution, RoutineRecord, SaveRoutine, previousRoutineDate, routineDateAt, routineDayEnd } from '../../shared/routine'
+import { TaskWorktrees } from './task-worktrees'
 import { SessionModelSelection } from '../../shared/model'
 
 const now = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
@@ -37,7 +39,6 @@ const DbRoutine = Schema.Struct({
   updatedAt: RoutineRecord.fields.updatedAt
 })
 const DbExecution = Schema.Struct({
-  id: RoutineExecution.fields.id,
   routineId: RoutineExecution.fields.routineId,
   taskId: RoutineExecution.fields.taskId,
   routineDate: RoutineExecution.fields.routineDate,
@@ -47,6 +48,8 @@ const DbExecution = Schema.Struct({
   isEnd: Schema.Union([Schema.Boolean, Schema.Number]),
   windowStart: RoutineExecution.fields.windowStart,
   windowEnd: RoutineExecution.fields.windowEnd,
+  model: Schema.NullOr(Schema.fromJsonString(SessionModelSelection)),
+  timeZone: RoutineExecution.fields.timeZone,
   routineRevision: RoutineExecution.fields.routineRevision,
   status: RoutineExecution.fields.status,
   startedAt: RoutineExecution.fields.startedAt,
@@ -57,14 +60,15 @@ const DbExecution = Schema.Struct({
 
 function decodeRoutine(row: typeof DbRoutine.Type): RoutineRecord {
   const model = row.modelProviderId && row.modelId && row.thinkingLevel ? { providerId: row.modelProviderId, modelId: row.modelId, thinkingLevel: row.thinkingLevel } : null
-  return { ...row, enabled: row.enabled === true || row.enabled === 1, model }
+  const { modelProviderId: _provider, modelId: _model, thinkingLevel: _thinking, ...record } = row
+  return { ...record, enabled: row.enabled === true || row.enabled === 1, model }
 }
 
 function decodeExecution(row: typeof DbExecution.Type): RoutineExecution {
   return { ...row, isEnd: row.isEnd === true || row.isEnd === 1 }
 }
 
-/** Owns flat Routine configuration and the single coalescing execution ledger. */
+/** Owns Routine configuration and scheduling metadata on Tasks. Execution receipts remain in runs. */
 export class RoutineStore extends Context.Service<
   RoutineStore,
   {
@@ -75,14 +79,13 @@ export class RoutineStore extends Context.Service<
     readonly allExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly executions: (routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly executionForTask: (taskId: string) => Effect.Effect<RoutineExecution | null, HarnessStoreError>
-    readonly attachTask: (executionId: string, taskId: string) => Effect.Effect<RoutineExecution, HarnessStoreError>
-    readonly setStatus: (taskId: string, status: RoutineExecution['status'], startedAt?: number, endedAt?: number) => Effect.Effect<void, HarnessStoreError>
   }
 >()('folio/services/RoutineStore') {
   static readonly layer = Layer.effect(
     RoutineStore,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
+      const worktrees = yield* TaskWorktrees
       const decodeRoutines = Schema.decodeUnknownEffect(Schema.Array(DbRoutine))
       const decodeExecutions = (input: unknown) => Schema.decodeUnknownEffect(Schema.Array(DbExecution))(input).pipe(Effect.map((rows) => rows.map(decodeExecution)))
 
@@ -96,19 +99,25 @@ export class RoutineStore extends Context.Service<
         Effect.mapError(safe)
       )
 
-      const readExecutionRows = (routineId?: string) =>
-        (routineId
-          ? sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
-          first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd,
-          window_start AS windowStart, window_end AS windowEnd, routine_revision AS routineRevision, status,
-          started_at AS startedAt, ended_at AS endedAt, created_at AS createdAt, updated_at AS updatedAt
-          FROM routine_executions WHERE routine_id=${routineId} ORDER BY routine_date DESC, trigger_time DESC, id`
-          : sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
-          first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd,
-          window_start AS windowStart, window_end AS windowEnd, routine_revision AS routineRevision, status,
-          started_at AS startedAt, ended_at AS endedAt, created_at AS createdAt, updated_at AS updatedAt
-          FROM routine_executions ORDER BY routine_date DESC, trigger_time DESC, id`
-        ).pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
+      // A Routine execution is a read projection of its Task and latest normal request.
+      // Resolution requests must not overwrite the outcome of the Routine's actual work.
+      const readExecutionRows = (routineId?: string, taskId?: string) =>
+        sql`SELECT t.routine_id AS routineId, t.id AS taskId, t.routine_date AS routineDate,
+          t.trigger_time AS triggerTime, t.first_trigger_time AS firstTriggerTime, t.trigger_count AS triggerCount,
+          t.is_end AS isEnd, t.window_start AS windowStart, t.window_end AS windowEnd,
+          t.routine_model AS model, t.routine_time_zone AS timeZone,
+          t.routine_revision AS routineRevision,
+          CASE WHEN t.state='cancelled' THEN 'cancelled'
+            WHEN r.state='queued' THEN 'pending' ELSE COALESCE(r.state, 'pending') END AS status,
+          r.started_at AS startedAt, r.ended_at AS endedAt, t.created_at AS createdAt,
+          MAX(t.routine_updated_at, COALESCE(r.ended_at, r.started_at, r.created_at, 0)) AS updatedAt
+          FROM tasks t LEFT JOIN runs r ON r.sequence=(
+            SELECT MAX(sequence) FROM runs WHERE task_id=t.id AND purpose<>'conflict-resolution')
+          WHERE t.routine_id IS NOT NULL
+            AND (${routineId ?? null} IS NULL OR t.routine_id=${routineId ?? null})
+            AND (${taskId ?? null} IS NULL OR t.id=${taskId ?? null})
+          ORDER BY t.routine_date DESC, t.trigger_time DESC, t.id`
+          .pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
 
       const list = readRoutines
       const get = Effect.fn('RoutineStore.get')(function* (id: string) {
@@ -133,10 +142,9 @@ export class RoutineStore extends Context.Service<
             if (
               previous &&
               previous.revision === revision &&
-              JSON.stringify({ ...value, skillIds, integrationIds, resourceIds }) ===
-                JSON.stringify({
+              isDeepStrictEqual({ ...value, skillIds, integrationIds, resourceIds }, {
                   id: previous.id,
-                  expectedRevision: previous.revision - 1,
+                  expectedRevision: value.expectedRevision,
                   name: previous.name,
                   prompt: previous.prompt,
                   agent: previous.agent,
@@ -176,12 +184,7 @@ export class RoutineStore extends Context.Service<
       const allExecutions = readExecutionRows()
       const executions = Effect.fn('RoutineStore.executions')((routineId: string) => executionRows(routineId))
       const executionForTask = Effect.fn('RoutineStore.executionForTask')(function* (taskId: string) {
-        return (
-          (yield* sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
-        first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd, window_start AS windowStart,
-        window_end AS windowEnd, routine_revision AS routineRevision, status, started_at AS startedAt, ended_at AS endedAt,
-        created_at AS createdAt, updated_at AS updatedAt FROM routine_executions WHERE task_id=${taskId}`.pipe(Effect.flatMap(decodeExecutions))).at(0) ?? null
-        )
+        return (yield* readExecutionRows(undefined, taskId)).at(0) ?? null
       }, Effect.mapError(safe))
 
       const schedule = Effect.fn('RoutineStore.schedule')(function* (routineId: string, at = Date.now()) {
@@ -192,45 +195,55 @@ export class RoutineStore extends Context.Service<
             // Each execution is a bounded ingestion window. The first run covers one
             // configured interval; later runs begin at the previous trigger. A
             // pending execution keeps its original start while its end is coalesced.
-            const defaultWindowStart = Math.min(at, Math.max(routine.createdAt, routine.lastTriggerAt ?? at - routine.intervalMinutes * 60_000))
             const today = routineDateAt(at, routine.timeZone)
             const previousDate = previousRoutineDate(today, routine.timeZone)
             const candidates = yield* executionRows(routineId)
+            // Dispatch wall time can be later than a day-end window. Continue from
+            // the last reserved data boundary so midnight-to-dispatch data is not lost.
+            const windowStartFor = (end: number) => Math.min(end, Math.max(routine.createdAt,
+              candidates[0]?.windowEnd ?? routine.lastTriggerAt ?? end - routine.intervalMinutes * 60_000))
+            const defaultWindowStart = windowStartFor(at)
             // An admitted prompt is immutable. Coalescing its time window would make the UI
             // describe different work from the queued request and could enqueue a second Task.
-            for (const candidate of candidates) {
-              if (!candidate.taskId) continue
-              if ((yield* sql`SELECT id FROM execution_requests WHERE task_id=${candidate.taskId}
-                AND state IN ('queued', 'preparing', 'running') LIMIT 1`).length) {
-                yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
-                return candidate
-              }
+            const admitted = (yield* sql<{ taskId: string }>`SELECT r.task_id AS taskId FROM runs r
+              JOIN tasks t ON t.id=r.task_id WHERE t.routine_id=${routineId}
+                AND r.state IN ('queued', 'preparing', 'running') ORDER BY r.sequence LIMIT 1`)[0]
+            if (admitted) {
+              yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
+              return candidates.find(candidate => candidate.taskId === admitted.taskId)!
             }
             const pending =
               candidates.find((execution) => execution.status === 'pending') ?? candidates.find((execution) => ['failed', 'interrupted', 'cancelled'].includes(execution.status))
             const time = yield* now
             if (pending) {
-              if (pending.routineDate === today && !pending.isEnd) {
-                yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at}, trigger_count=trigger_count+1,
-              window_start=COALESCE(window_start, ${defaultWindowStart}), status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
-              } else if (pending.routineDate === previousDate && !pending.isEnd) {
-                const end = routineDayEnd(previousDate, routine.timeZone)
-                yield* sql`UPDATE routine_executions SET trigger_time=${end}, window_end=${end}, is_end=1,
-              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+              // Editing the Routine does not reinterpret an already reserved civil day.
+              const pendingToday = routineDateAt(at, pending.timeZone)
+              const pendingPreviousDate = previousRoutineDate(pendingToday, pending.timeZone)
+              // A day-end remains bounded to its civil day, even after repeated failures.
+              if (pending.isEnd) {
+                yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
+                return pending
+              }
+              if (pending.routineDate === pendingToday && !pending.isEnd) {
+                yield* sql`UPDATE tasks SET trigger_time=${at}, window_end=${at}, trigger_count=trigger_count+1,
+              window_start=COALESCE(window_start, ${defaultWindowStart}), routine_updated_at=${time} WHERE id=${pending.taskId}`
+              } else if (pending.routineDate === pendingPreviousDate && !pending.isEnd) {
+                const end = routineDayEnd(pendingPreviousDate, pending.timeZone)
+                yield* sql`UPDATE tasks SET trigger_time=${end}, window_end=${end}, is_end=1,
+              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, routine_updated_at=${time} WHERE id=${pending.taskId}`
               } else {
                 // A missed execution is still one logical window: later ticks update its
                 // latest trigger rather than creating a queue of catch-up rows. We only
                 // mark the previous civil day as ended when this is the first tick of the
                 // following day; older gaps remain visible in the derived calendar.
-                yield* sql`UPDATE routine_executions SET trigger_time=${at}, window_end=${at},
-              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, status='pending', started_at=NULL, ended_at=NULL, updated_at=${time} WHERE id=${pending.id} AND status IN ('pending', 'failed', 'interrupted', 'cancelled')`
+                yield* sql`UPDATE tasks SET trigger_time=${at}, window_end=${at},
+              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, routine_updated_at=${time} WHERE id=${pending.taskId}`
               }
               yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
-              return (yield* executionRows(routineId)).find((execution) => execution.id === pending.id)!
+              return (yield* executionRows(routineId)).find((execution) => execution.taskId === pending.taskId)!
             }
-            const previousEnd =
-              (yield* sql`SELECT id FROM routine_executions WHERE routine_id=${routineId} AND routine_date=${previousDate}
-          AND is_end=1 AND status='succeeded' LIMIT 1`).length > 0
+            const previousEnd = candidates.some(execution =>
+              execution.routineDate === previousDate && execution.isEnd && execution.status === 'succeeded')
             const unresolvedEnd = (yield* executionRows(routineId)).find(
               (execution) => execution.routineDate === previousDate && execution.isEnd && execution.status !== 'succeeded'
             )
@@ -241,58 +254,25 @@ export class RoutineStore extends Context.Service<
             const date = !previousEnd && createdDate < today ? previousDate : today
             const isEnd = date === previousDate && !previousEnd
             const triggerTime = isEnd ? routineDayEnd(date, routine.timeZone) : at
-            const execution = {
-              id: randomUUID(),
-              routineId,
-              taskId: null,
-              routineDate: date,
-              triggerTime,
-              firstTriggerTime: triggerTime,
-              triggerCount: 1,
-              isEnd,
-              windowStart: defaultWindowStart,
-              windowEnd: triggerTime,
-              routineRevision: routine.revision,
-              status: 'pending' as const,
-              startedAt: null,
-              endedAt: null,
-              createdAt: time,
-              updatedAt: time
-            }
-            yield* sql`INSERT INTO routine_executions (id, routine_id, task_id, routine_date, trigger_time, first_trigger_time,
-          trigger_count, is_end, window_start, window_end, routine_revision, status, started_at, ended_at, created_at, updated_at)
-          VALUES (${execution.id}, ${routineId}, NULL, ${date}, ${triggerTime}, ${triggerTime}, 1, ${isEnd ? 1 : 0}, ${defaultWindowStart},
-            ${triggerTime}, ${routine.revision}, 'pending', NULL, NULL, ${time}, ${time})`
+            const taskId = randomUUID()
+            // Reserve the normal Task and its window in the same transaction. No orphan
+            // execution or second identity can survive a failed reservation.
+            yield* worktrees.reserve({ id: taskId, goal: routine.prompt, configuration: {
+              agent: routine.agent, skillIds: [],
+              integrationIds: routine.integrationIds, resourceIds: routine.resourceIds ?? []
+            } })
+            yield* sql`UPDATE tasks SET routine_id=${routineId}, routine_date=${date}, trigger_time=${triggerTime},
+              first_trigger_time=${triggerTime}, trigger_count=1, is_end=${isEnd ? 1 : 0},
+              window_start=${windowStartFor(triggerTime)}, window_end=${triggerTime}, routine_revision=${routine.revision},
+              routine_model=${routine.model ? JSON.stringify(routine.model) : null}, routine_time_zone=${routine.timeZone},
+              routine_updated_at=${time} WHERE id=${taskId}`
             yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
-            return execution
+            return (yield* readExecutionRows(routineId, taskId))[0]!
           })
         )
       }, Effect.mapError(safe))
 
-      const attachTask = Effect.fn('RoutineStore.attachTask')(function* (executionId: string, taskId: string) {
-        const changed = yield* sql`UPDATE routine_executions SET task_id=${taskId}, updated_at=${yield* now}
-        WHERE id=${executionId} AND (task_id IS NULL OR task_id=${taskId}) RETURNING id`
-        if (!changed.length) return yield* fail('invalid-state', 'Execution is already attached to another Task.')
-        const row = (yield* sql`SELECT id, routine_id AS routineId, task_id AS taskId, routine_date AS routineDate, trigger_time AS triggerTime,
-        first_trigger_time AS firstTriggerTime, trigger_count AS triggerCount, is_end AS isEnd, window_start AS windowStart,
-        window_end AS windowEnd, routine_revision AS routineRevision, status, started_at AS startedAt, ended_at AS endedAt,
-        created_at AS createdAt, updated_at AS updatedAt FROM routine_executions WHERE id=${executionId}`.pipe(Effect.flatMap(decodeExecutions))).at(0)
-        if (!row) return yield* fail('not-found')
-        return row
-      }, Effect.mapError(safe))
-
-      const setStatus = Effect.fn('RoutineStore.setStatus')(function* (taskId: string, status: RoutineExecution['status'], startedAt?: number, endedAt?: number) {
-        yield* Schema.decodeUnknownEffect(RoutineExecution.fields.status)(status)
-        const timestamp = yield* now
-        const terminal = ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(status)
-        const changed = yield* sql`UPDATE routine_executions SET status=${status},
-        started_at=COALESCE(${startedAt ?? null}, started_at),
-        ended_at=COALESCE(${endedAt ?? (terminal ? timestamp : null)}, ended_at),
-        updated_at=${timestamp} WHERE task_id=${taskId} RETURNING id`
-        if (!changed.length) return yield* fail('not-found', 'Routine execution was not found for this Task.')
-      }, Effect.mapError(safe))
-
-      return RoutineStore.of({ list, get, save, schedule, allExecutions, executions, executionForTask, attachTask, setStatus })
+      return RoutineStore.of({ list, get, save, schedule, allExecutions, executions, executionForTask })
     })
   )
 }

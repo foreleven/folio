@@ -102,7 +102,12 @@ export class VaultService extends Context.Service<
         function* (vault: Vault) {
           const managed = path.join(config.directory, 'vaults', vault.id)
           const managedWiki = path.join(managed, 'workspace', 'wiki')
-          const managedWikiCanonical = yield* fs.realPath(managedWiki)
+          // Deletion may have removed the managed tree before the global index
+          // commit failed. Resolve the stable root to make that retry idempotent.
+          const managedWikiCanonical = yield* fs.realPath(managedWiki).pipe(
+            Effect.catchReason('PlatformError', 'NotFound', () =>
+              fs.realPath(config.directory).pipe(Effect.map(root => path.join(root, 'vaults', vault.id, 'workspace', 'wiki'))))
+          )
           const linkTarget = yield* fs.readLink(vault.path).pipe(
             Effect.map((target) => path.resolve(path.dirname(vault.path), target)),
             Effect.catch(() => Effect.succeed(null))

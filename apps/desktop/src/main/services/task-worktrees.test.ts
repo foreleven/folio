@@ -1,3 +1,4 @@
+import { reserveClaimedRun, finishClaimedRun } from './testing/claimed-run'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
@@ -91,9 +92,9 @@ describe('Task Git worktree creation checkpoints', () => {
       yield* store.bindSession('session', { acpSessionId: 'acp', nativeSessionId: null })
       const sql = yield* SqlClient.SqlClient
       yield* sql`UPDATE tasks SET worktree_state='creating' WHERE id='task'`
-      expect(yield* store.reserveRun({ id: 'blocked', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution', resumesRunId: null, baselineCommit: checkout.baselineCommit }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      expect(yield* reserveClaimedRun({ id: 'blocked', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution', resumesRunId: null, baselineCommit: checkout.baselineCommit }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       yield* sql`UPDATE tasks SET worktree_state='ready' WHERE id='task'`
-      yield* store.reserveRun({ id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution', resumesRunId: null, baselineCommit: checkout.baselineCommit })
+      yield* reserveClaimedRun({ id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution', resumesRunId: null, baselineCommit: checkout.baselineCommit })
       expect(yield* worktrees.ensure('task').pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
     }).pipe(Effect.provide(layer())))
   })
@@ -123,9 +124,9 @@ describe('Task Git worktree creation checkpoints', () => {
       const store = yield* HarnessStore
       yield* store.createSession({ id: 'completed-session', taskId: 'completed', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
       yield* store.bindSession('completed-session', { acpSessionId: 'completed-acp', nativeSessionId: null })
-      yield* store.reserveRun({ id: 'completed-run', taskId: 'completed', sessionId: 'completed-session', prompt: 'finish', purpose: 'execution',
+      yield* reserveClaimedRun({ id: 'completed-run', taskId: 'completed', sessionId: 'completed-session', prompt: 'finish', purpose: 'execution',
         resumesRunId: null, baselineCommit: checkout.baselineCommit })
-      yield* store.finishRun('completed-run', 'succeeded')
+      yield* finishClaimedRun('completed-run', 'succeeded')
       expect(yield* worktrees.complete('completed').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       const sql = yield* SqlClient.SqlClient
       yield* sql`UPDATE runs SET sync_state='not-required' WHERE id='completed-run'`

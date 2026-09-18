@@ -195,6 +195,7 @@ describe("ACP v2 baseline contract", () => {
 
       resolveCompletion("world");
       const message = await session.nextUpdate();
+      const completed = await session.nextUpdate();
       const stop = await session.nextUpdate();
       expect(message).toMatchObject({
         kind: "session_update",
@@ -204,7 +205,41 @@ describe("ACP v2 baseline contract", () => {
           content: { type: "text", text: "world" },
         },
       });
+      expect(completed).toMatchObject({
+        kind: "session_update",
+        update: { sessionUpdate: "agent_message", _meta: { "folio/messageComplete": true } },
+      });
+      if (message.kind === "session_update" && completed.kind === "session_update") {
+        expect(completed.update).toHaveProperty("messageId", Reflect.get(message.update, "messageId"));
+      }
       expect(stop).toMatchObject({ kind: "stop", stopReason: "end_turn" });
+      session.dispose();
+    });
+  });
+
+  it.each([
+    ["error", "refusal"], ["aborted", "cancelled"], ["length", "max_tokens"],
+  ] as const)("preserves the Pi %s outcome even when the SDK prompt resolves", async (reason, expected) => {
+    const { factory, sessions } = makeContractFactory();
+    const app = createFolioAgentApp({ sessionFactory: factory, sessionId: () => "pi-outcome", log: () => undefined });
+    await client().connectWith(app, async context => {
+      await initialize(context);
+      const session = await context.buildSession("/workspace/outcome").start();
+      await session.prompt("test");
+      await session.nextUpdate(); // user message
+      await session.nextUpdate(); // running
+      const pi = sessions.get("/workspace/outcome")!;
+      const message = { ...assistantMessage, stopReason: reason };
+      pi.emit(piEvent({ type: "message_start", message }));
+      pi.emit(piEvent({ type: "message_update", message, assistantMessageEvent: {
+        type: "text_delta", contentIndex: 0, delta: "partial", partial: message,
+      } }));
+      pi.emit(piEvent({ type: "message_end", message }));
+      pi.complete();
+      expect(await session.nextUpdate()).toMatchObject({ update: { sessionUpdate: "agent_message_chunk", content: { text: "partial" } } });
+      expect(await session.nextUpdate()).toMatchObject({ update: { sessionUpdate: "agent_message",
+        _meta: { "folio/messageComplete": true, "folio/messageIncomplete": true } } });
+      expect(await session.nextUpdate()).toMatchObject({ kind: "stop", stopReason: expected });
       session.dispose();
     });
   });

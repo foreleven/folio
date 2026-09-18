@@ -1,4 +1,4 @@
-import { Effect, FileSystem, Schedule } from 'effect'
+import { Effect, FileSystem, Schedule, Schema } from 'effect'
 import { join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { ChildProcessSpawner } from 'effect/unstable/process'
@@ -9,7 +9,7 @@ import type { LarkAuthSnapshot } from './auth.ts'
 import { ensureCli, findCli, LARK_USER_ACCESS_TOKEN_ENV } from './cli.ts'
 import { larkMetadata } from './metadata.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
-import { migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
+import { LarkPrivateState, migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
 import { ensureExtractor } from './workflows.ts'
 
 const imWorkflowPrompt = 'For the current Routine window, read raws/lark-im/_workflow.md and run the extraction workflow it describes before reviewing messages. Use the execution window provided by the Routine; do not invent a different time range.'
@@ -43,32 +43,33 @@ const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) =>
       )
     }
   }
-  // The CLI is launched by the Agent, so pass only the short-lived user token
-  // through the ephemeral Task environment; it is never copied into snapshots.
-  const token = yield* Effect.tryPromise({
+  // External credentials isolate task commands from the user's global CLI account.
+  // They remain in the ephemeral process environment, never in resource snapshots.
+  const credentials = yield* Effect.tryPromise({
     try: async () => {
-      let raw: string
-      try { raw = await readFile(join(context.integrationDirectory, 'private.json'), 'utf8') }
-      catch (error) {
-        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-          // A legacy installation may be prepared before its background setup
-          // gets a chance to consolidate auth.json into private.json.
-          try { raw = await readFile(join(context.integrationDirectory, 'auth.json'), 'utf8') }
-          catch (legacyError) {
-            if (legacyError instanceof Error && 'code' in legacyError && legacyError.code === 'ENOENT') return undefined
-            throw legacyError
-          }
-          const legacy = JSON.parse(raw) as { accessToken?: unknown }
-          return typeof legacy.accessToken === 'string' ? legacy.accessToken : undefined
+      const read = async (name: string): Promise<unknown> => {
+        try { return JSON.parse(await readFile(join(context.integrationDirectory, name), 'utf8')) }
+        catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+          throw error
         }
-        throw error
       }
-      const parsed = JSON.parse(raw) as { userAuth?: { accessToken?: unknown } }
-      return typeof parsed.userAuth?.accessToken === 'string' ? parsed.userAuth.accessToken : undefined
+      return Schema.decodeUnknownSync(LarkPrivateState)(await read('private.json') ?? {
+        version: 1, installed: false, app: await read('app.json'),
+        appAuth: await read('app-auth.json'), userAuth: await read('auth.json')
+      })
     },
     catch: () => new IntegrationError({ message: 'Lark user authorization is unavailable.' })
   })
-  if (token) context.env[LARK_USER_ACCESS_TOKEN_ENV] = token
+  const { app, appAuth, userAuth } = credentials
+  if (app && userAuth) Object.assign(context.env, {
+    LARKSUITE_CLI_APP_ID: app.clientId,
+    LARKSUITE_CLI_APP_SECRET: app.clientSecret,
+    LARKSUITE_CLI_BRAND: app.brand,
+    LARKSUITE_CLI_DEFAULT_AS: 'user',
+    [LARK_USER_ACCESS_TOKEN_ENV]: userAuth.accessToken,
+    ...(appAuth ? { LARKSUITE_CLI_TENANT_ACCESS_TOKEN: appAuth.tenantAccessToken ?? appAuth.appAccessToken } : {})
+  })
 })
 const resources = [
   { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('lark-im') },
@@ -145,6 +146,8 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
 
   const check = Effect.fn('LarkIntegration.check')(
     function* () {
+      const { directory } = yield* IntegrationContext
+      if (!(yield* findCli(directory))) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
       yield* auth.check()
     },
     Effect.annotateLogs({ integration: 'lark', subsystem: 'integration' }),
@@ -219,12 +222,13 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
       const context = yield* IntegrationContext
       const privateState = yield* readPrivateState(context.directory)
       if (!privateState.installed) return
-      const snapshot = yield* auth.reconcile
-      const checked = integrationState(snapshot.phase)
-      yield* context.writeState(checked.state, {}, checked.actions)
+      yield* auth.reconcile(snapshot => {
+        const checked = snapshot ? integrationState(snapshot.phase) : result('check_failed')
+        return context.writeState(checked.state, {}, checked.actions)
+      })
     },
-    Effect.catch(() => Effect.flatMap(IntegrationContext, (context) => context.writeState('check_failed', {}))),
-    Effect.catch(() => Effect.void),
+    // A failed publication must not write a stale fallback after a newer operation acquires the lock.
+    Effect.catch(() => Effect.logWarning('Lark maintenance state could not be published')),
     Effect.annotateLogs({ integration: 'lark', subsystem: 'integration' })
   )
 

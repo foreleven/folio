@@ -100,9 +100,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
   const conflictRun = conflictSession && detail._tag === 'Success'
     ? detail.value.runs.filter(run => run.sessionId === conflictSession.id && run.purpose === 'conflict-resolution').at(-1)
     : undefined
-  const conflictRequest = conflictSession && detail._tag === 'Success'
-    ? detail.value.executions?.filter(request => request.sessionId === conflictSession.id).at(-1) : undefined
-  const conflictActive = conflictRequest ? conflictRequest.endedAt === null : conflictRun?.state === 'preparing' || conflictRun?.state === 'running'
+  const conflictActive = conflictRun !== undefined && ['queued', 'preparing', 'running'].includes(conflictRun.state)
   useEffect(() => {
     if (!conflictActive) return
     const timer = setInterval(() => { refreshDetail(); refreshSynchronizations() }, 1000)
@@ -146,6 +144,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
 
   /** Records a durable no-change receipt for one successful Run; the Run ID is the retry key. */
   async function confirmNoWikiChanges(run: RunRecord): Promise<void> {
+    if (!run.baselineCommit) return
     if (inFlight.current) return
     inFlight.current = true; setPending(true); setFailed(false)
     try {
@@ -197,7 +196,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
       // Durable history determines the next attempt. Lost replies and storage-free refreshes
       // reconstruct the same UUID; an explicitly retried terminal attempt gets a new UUID.
       sessionId: conflictSession?.id ?? uuidv5(`folio:conflict-session:${taskId}:${operation!.id}`, uuidv5.URL),
-      runId: uuidv5(`folio:conflict-run:${taskId}:${operation!.id}:${conflictRequest?.id ?? conflictRun?.id ?? 'initial'}`, uuidv5.URL)
+      runId: uuidv5(`folio:conflict-run:${taskId}:${operation!.id}:${conflictRun?.id ?? 'initial'}`, uuidv5.URL)
     }
     writeTaskWikiIntent(intentKey, { ...readTaskWikiIntent(intentKey), conflict: request })
     setConflictIntent(request)
@@ -351,14 +350,14 @@ function TaskWikiConflictRunHistory({ taskId, sessionId, runId }: { taskId: stri
   if (history._tag !== 'Success') return <p role="status" className="text-support text-muted-foreground">
     {history._tag === 'Failure' ? (chinese ? '无法读取冲突解决消息，请刷新重试。' : 'Could not load conflict-resolution messages.') : (chinese ? '正在读取冲突解决消息…' : 'Loading conflict-resolution messages…')}
   </p>
-  const messages = history.value.messages.filter(message => message.runId === runId && message.kind === 'message' && message.data.role !== 'user')
-  const tools = history.value.messages.filter(tool => tool.runId === runId && tool.kind === 'tool_call')
+  const messages = history.value.messages.filter(message => message.runId === runId && message.payload.kind === 'message' && message.payload.data.role !== 'user')
+  const tools = history.value.messages.filter(tool => tool.runId === runId && tool.payload.kind === 'tool_call')
   if (!messages.length && !tools.length) return <p className="text-support text-muted-foreground">{chinese ? '冲突解决 Run 尚无消息。' : 'No conflict-resolution messages yet.'}</p>
   return <details className="space-y-2 rounded border p-2" open>
     <summary className="text-support font-medium">{chinese ? '冲突解决 Run 消息' : 'Conflict-resolution Run messages'}</summary>
-    {messages.map(message => <p key={message.id} className="whitespace-pre-wrap break-words text-support">{displayConflictContent(message.data.content)}</p>)}
-    {tools.map(tool => <details key={tool.id} className="text-support"><summary>{typeof tool.data.title === 'string' ? tool.data.title : tool.id}</summary>
-      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(tool.data, null, 2)}</pre>
+    {messages.map(message => <p key={message.id} className="whitespace-pre-wrap break-words text-support">{displayConflictContent(message.payload.data.content)}</p>)}
+    {tools.map(tool => <details key={tool.id} className="text-support"><summary>{typeof tool.payload.data.title === 'string' ? tool.payload.data.title : tool.id}</summary>
+      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{JSON.stringify(tool.payload.data, null, 2)}</pre>
     </details>)}
   </details>
 }

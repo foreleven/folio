@@ -5,10 +5,9 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { IntegrationContext, IntegrationError } from '../src/base/index.ts'
+import { IntegrationContext, IntegrationError, type IngestContext } from '../src/base/index.ts'
 import { lark } from '../src/lark/index.ts'
 import { findCli } from '../src/lark/cli.ts'
-import { readPrivateState } from '../src/lark/state.ts'
 
 const execute = promisify(execFile)
 const CliResult = Schema.Struct({
@@ -27,22 +26,19 @@ it.skipIf(process.env.FOLIO_LARK_LIVE !== '1')('reads IM and Email using the sav
     const directory = join(process.env.FOLIO_CONFIG_DIR || join(homedir(), '.folio'), 'integrations', 'lark')
     const result = yield* lark.inspect().pipe(Effect.provideService(IntegrationContext, { directory, writeState: () => Effect.void, registerResource: () => Effect.void }))
     expect(result.state, 'Complete Lark setup before running live verification').toBe('ready')
-    const { app, appAuth, userAuth: user } = yield* readPrivateState(directory)
+    yield* lark.check().pipe(Effect.provideService(IntegrationContext, { directory, writeState: () => Effect.void, registerResource: () => Effect.void }))
     const command = yield* findCli(directory)
-    if (!app || !appAuth || !user || !command) return yield* new IntegrationError({ message: 'Integration credentials are missing.' })
-    // Environment is scoped to each child process. The user's global CLI account is untouched.
-    const env = {
-      ...process.env,
-      LARKSUITE_CLI_APP_ID: app.clientId, LARKSUITE_CLI_APP_SECRET: app.clientSecret,
-      LARKSUITE_CLI_BRAND: app.brand, LARKSUITE_CLI_DEFAULT_AS: 'user',
-      LARKSUITE_CLI_USER_ACCESS_TOKEN: user.accessToken,
-      LARKSUITE_CLI_TENANT_ACCESS_TOKEN: appAuth.tenantAccessToken ?? appAuth.appAccessToken
-    }
+    if (!command) return yield* new IntegrationError({ message: 'Integration CLI is missing.' })
     const probes = [
       { id: 'im', args: ['im', '+chat-list', '--as', 'user', '--page-size', '1', '--types', 'p2p,group', '--json'] },
       { id: 'email', args: ['mail', 'user_mailbox.messages', 'list', '--as', 'user', '--user-mailbox-id', 'me', '--folder-id', 'INBOX', '--page-size', '1', '--json'] }
     ]
     for (const probe of probes) {
+      // Exercise the same credential injection as a real Task, rather than duplicating its environment.
+      const context: IngestContext = { integrationDirectory: directory, workspaceDirectory: directory,
+        skills: [], executableDirectories: [], instructions: [], workspaceFiles: [], env: {} }
+      yield* lark.resources.find(resource => resource.id === probe.id)!.onIngest(context)
+      const env = { ...process.env, ...context.env }
       const output = yield* Effect.tryPromise({
         try: (signal) => execute(command, probe.args, { env, signal, timeout: 30_000, maxBuffer: 1024 * 1024 }),
         catch: () => new IntegrationError({ message: `Lark ${probe.id} CLI read failed. Verify resource permissions and availability.` })

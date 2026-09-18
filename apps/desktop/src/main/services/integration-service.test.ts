@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node'
 import { IntegrationContext, IntegrationError, type Integration, type IntegrationResource } from '@folio/integrations/base'
-import { ConfigProvider, Deferred, Effect, Layer, ManagedRuntime, Option, Stream } from 'effect'
+import { ConfigProvider, Deferred, Effect, Layer, Logger, ManagedRuntime, Option, Stream } from 'effect'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -92,6 +92,39 @@ function rows() {
 }
 
 describe('desktop integration lifecycle', () => {
+  it('rejects a partially valid selection before invoking any resource hook', async () => {
+    const f = fixture()
+    const onIngest = vi.fn(() => Effect.void)
+    Object.assign(f.integration.resources[0]!, { onIngest })
+    try {
+      const service = await f.service()
+      await f.runtime.runPromise(service.install('notes'))
+      await f.settled('login_required')
+      await f.runtime.runPromise(f.publish('ready'))
+      await expect(f.runtime.runPromise(service.prepare(['notes'], directory, ['notes/im', 'notes/missing']))).rejects.toThrow()
+      expect(onIngest).not.toHaveBeenCalled()
+      expect((await f.runtime.runPromise(service.prepare(['notes'], directory, ['notes/im', 'notes/im']))).skillPaths).toEqual([])
+      expect(onIngest).toHaveBeenCalledTimes(1)
+    } finally { await f.runtime.dispose() }
+  })
+
+  it.each(['raws/shared.md', 'raws\\shared.md'])('rejects conflicting workspace assets at %s while deduplicating identical content', async path => {
+    const f = fixture()
+    let content = 'different'
+    Object.assign(f.integration.resources[0]!, { onIngest: (context: Parameters<IntegrationResource['onIngest']>[0]) => Effect.sync(() => {
+      context.workspaceFiles?.push({ path: 'raws/shared.md', content: 'original' }, { path, content })
+    }) })
+    try {
+      const service = await f.service()
+      await f.runtime.runPromise(service.install('notes'))
+      await f.settled('login_required')
+      await f.runtime.runPromise(f.publish('ready'))
+      await expect(f.runtime.runPromise(service.prepare(['notes'], directory))).rejects.toThrow()
+      content = 'original'
+      expect((await f.runtime.runPromise(service.prepare(['notes'], directory))).workspaceFiles).toEqual([{ path: 'raws/shared.md', content: 'original' }])
+    } finally { await f.runtime.dispose() }
+  })
+
   it('prepares installed resources without installation or ingestion and rejects stale or missing mounts', async () => {
     const f = fixture()
     const workspace = join(directory, 'workspace')
@@ -131,7 +164,16 @@ describe('desktop integration lifecycle', () => {
       expect(f.opened).toEqual([])
       f.state.failHealthCheck = true
       const previousCalls = hookCalls
-      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace))).rejects.toThrow()
+      const logs: unknown[] = []
+      const logger = Logger.make(({ message }) => { logs.push(message) })
+      await expect(f.runtime.runPromise(service.prepare(['notes'], workspace).pipe(
+        Effect.provide(Logger.layer([logger]))
+      ))).rejects.toThrow('The integration operation failed')
+      const diagnostic = JSON.stringify(logs)
+      expect(diagnostic).toContain('Integration resource preparation failed')
+      expect(diagnostic).toContain('"stage":"check-provider"')
+      expect(diagnostic).toContain('"integration":"notes"')
+      expect(diagnostic).toContain('health check error')
       expect(hookCalls).toBe(previousCalls)
     } finally { await f.runtime.dispose() }
   })

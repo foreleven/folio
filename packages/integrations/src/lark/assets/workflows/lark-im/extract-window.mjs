@@ -10,17 +10,32 @@ if (!start || !end) throw new Error('Usage: extract-window.mjs --start <ISO> --e
 const startTime = Date.parse(start); const endTime = Date.parse(end)
 if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) throw new Error('The extraction window must contain valid ISO timestamps with end after start.')
 const output = args.get('output') ?? join('raws', 'lark-im')
-const run = (argv) => new Promise((resolve, reject) => { const child = spawn('lark-cli', argv, { stdio: ['ignore', 'pipe', 'inherit'] }); let text = ''; child.stdout.on('data', chunk => { text += chunk }); child.on('error', reject); child.on('close', code => code === 0 ? resolve(JSON.parse(text)) : reject(new Error(`lark-cli exited with ${code}`))) })
+const run = (argv) => new Promise((resolve, reject) => {
+  const child = spawn('lark-cli', argv, { stdio: ['ignore', 'pipe', 'inherit'] })
+  let text = ''
+  child.stdout.on('data', chunk => { text += chunk })
+  child.on('error', reject)
+  child.on('close', code => {
+    if (code !== 0) return reject(new Error(`lark-cli exited with ${code}`))
+    try { resolve(JSON.parse(text)) } catch { reject(new Error('lark-cli returned invalid JSON')) }
+  })
+})
 const envelope = value => value?.data ?? value
-const chats = envelope(await run(['im', '+chat-list', '--as', 'user', '--types', 'p2p,group', '--sort', 'active_time', '--exclude-muted', '--page-size', '100', '--format', 'json']))?.chats ?? []
+const complete = (response, label) => {
+  const value = envelope(response)
+  if (value?.has_more === true || value?.meta?.pagination?.complete === false || response?.meta?.pagination?.complete === false) {
+    throw new Error(`Pagination did not complete for ${label}. Increase the page limit or retry the window.`)
+  }
+  return value
+}
+const chats = complete(await run(['im', '+chat-list', '--as', 'user', '--types', 'p2p,group', '--sort', 'active_time', '--exclude-muted', '--page-size', '100', '--page-all', '--page-limit', '1000', '--format', 'json']), 'chat list')?.chats ?? []
 const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true }); const updated = []
 const renderContent = content => typeof content === 'string' ? content : content == null ? '' : JSON.stringify(content, null, 2)
 const renderTime = value => { const parsed = typeof value === 'string' && !/^\d+$/.test(value) ? Date.parse(value) : Number(value); return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : 'unknown time' }
 for (const chat of chats) {
   const id = chat.chat_id
   if (!/^oc_[A-Za-z0-9_-]+$/.test(id ?? '')) continue
-  const result = envelope(await run(['im', '+chat-messages-list', '--as', 'user', '--chat-id', id, '--start', start, '--end', end, '--order', 'asc', '--page-all', '--page-limit', '1000', '--format', 'json']))
-  if (result?.has_more === true || result?.meta?.pagination?.complete === false) throw new Error(`Message pagination did not complete for ${id}. Increase the page limit or retry the window.`)
+  const result = complete(await run(['im', '+chat-messages-list', '--as', 'user', '--chat-id', id, '--start', start, '--end', end, '--order', 'asc', '--page-all', '--page-limit', '1000', '--format', 'json']), id)
   const rows = result?.messages ?? []
   if (!rows.length) continue
   const title = chat.name || chat.description || id

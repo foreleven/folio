@@ -2,89 +2,12 @@ import { SqliteMigrator } from '@effect/sql-sqlite-node'
 import { Effect } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 
-/** Versioned Vault-only schema. No migration moves content or rewrites native Agent histories. */
+/** Fresh-Vault baseline. Historical development schemas are intentionally unsupported. */
 export const migrateVault = SqliteMigrator.run({
   loader: SqliteMigrator.fromRecord({
-    '0001_harness_execution': Effect.gen(function* () {
+    '0001_vault': Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE tasks (
-        id TEXT PRIMARY KEY NOT NULL, goal TEXT NOT NULL, configuration TEXT NOT NULL,
-        branch TEXT NOT NULL UNIQUE, worktree TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'cancelled')),
-        created_at INTEGER NOT NULL
-      )`
-      yield* sql`CREATE TABLE sessions (
-        id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
-        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), adapter_version TEXT NOT NULL,
-        purpose TEXT NOT NULL CHECK(purpose IN ('task', 'conflict-resolution')),
-        sync_operation_id TEXT UNIQUE REFERENCES git_sync_operations(id),
-        acp_session_id TEXT UNIQUE, native_session_id TEXT, created_at INTEGER NOT NULL,
-        UNIQUE(id, task_id), UNIQUE(agent, native_session_id),
-        CHECK((purpose='task' AND sync_operation_id IS NULL)
-          OR (purpose='conflict-resolution' AND sync_operation_id IS NOT NULL))
-      )`
-      yield* sql`CREATE TABLE runs (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-        task_id TEXT NOT NULL REFERENCES tasks(id), session_id TEXT NOT NULL,
-        prompt TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('execution', 'recovery', 'conflict-resolution')),
-        resumes_run_id TEXT, baseline_commit TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('preparing', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled')),
-        sync_state TEXT NOT NULL CHECK(sync_state IN ('not-required', 'pending', 'syncing', 'conflict', 'completed', 'failed')),
-        created_at INTEGER NOT NULL, ended_at INTEGER, error TEXT,
-        UNIQUE(id, task_id),
-        FOREIGN KEY(session_id, task_id) REFERENCES sessions(id, task_id),
-        FOREIGN KEY(resumes_run_id, task_id) REFERENCES runs(id, task_id),
-        CHECK((purpose = 'recovery') = (resumes_run_id IS NOT NULL)),
-        CHECK((state IN ('preparing', 'running')) = (ended_at IS NULL))
-      )`
-      // SQL, rather than a renderer or process-local check, arbitrates competing Run reservations.
-      yield* sql`CREATE UNIQUE INDEX runs_one_active_per_task ON runs(task_id) WHERE state IN ('preparing', 'running')`
-      yield* sql`CREATE INDEX sessions_by_task ON sessions(task_id, created_at)`
-      yield* sql`CREATE INDEX runs_by_task ON runs(task_id, sequence)`
-    }),
-    '0002_messages': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // One session timeline owns raw ACP observations, protocol receipts and user-visible
-      // projections. `kind` is the discriminator; there are no parallel messages/tool_calls
-      // tables that can silently lose ordering.
-      yield* sql`CREATE TABLE messages (
-        session_id TEXT NOT NULL REFERENCES sessions(id),
-        id TEXT NOT NULL,
-        run_id TEXT,
-        kind TEXT NOT NULL CHECK(kind IN ('acp_update', 'protocol', 'diagnostic', 'message', 'tool_call')),
-        source_sequence INTEGER,
-        first_sequence INTEGER NOT NULL CHECK(first_sequence > 0),
-        last_sequence INTEGER NOT NULL CHECK(last_sequence >= first_sequence),
-        data TEXT NOT NULL,
-        received_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, kind, id)
-      )`
-      yield* sql`CREATE UNIQUE INDEX messages_by_source_sequence ON messages(session_id, source_sequence)
-        WHERE kind='acp_update' AND source_sequence IS NOT NULL`
-      yield* sql`CREATE INDEX messages_by_session_sequence ON messages(session_id, first_sequence, id)`
-      yield* sql`CREATE INDEX messages_by_run ON messages(session_id, run_id, first_sequence)`
-    }),
-    '0003_task_worktrees': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE tasks ADD COLUMN worktree_state TEXT NOT NULL DEFAULT 'pending'
-        CHECK(worktree_state IN ('pending', 'creating', 'ready', 'releasing', 'released'))`
-      yield* sql`ALTER TABLE tasks ADD COLUMN worktree_base TEXT`
-    }),
-    '0004_session_models': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE sessions ADD COLUMN model_profile TEXT`
-    }),
-    '0005_task_resources': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // SQL owns the expected bytes before filesystem publication. A missing snapshot cannot
-      // silently be replaced by a newer Integration installation after a crash or restart.
-      yield* sql`CREATE TABLE task_resource_snapshots (
-        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id), manifest TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('preparing', 'ready'))
-      )`
-    }),
-    '0006_routines': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+      // Routine definitions; execution windows live on Tasks.
       yield* sql`CREATE TABLE routines (
         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
         agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), model_provider_id TEXT,
@@ -93,27 +16,86 @@ export const migrateVault = SqliteMigrator.run({
         time_zone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
         revision INTEGER NOT NULL CHECK(revision > 0), next_trigger_at INTEGER,
         last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        resource_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(resource_ids)),
         CHECK(json_valid(skill_ids)), CHECK(json_valid(integration_ids)),
         CHECK((agent='pi') = (model_provider_id IS NOT NULL AND model_id IS NOT NULL AND thinking_level IS NOT NULL))
       )`
-      yield* sql`CREATE TABLE routine_executions (
-        id TEXT PRIMARY KEY NOT NULL, routine_id TEXT NOT NULL REFERENCES routines(id),
-        task_id TEXT REFERENCES tasks(id), routine_date TEXT NOT NULL,
-        trigger_time INTEGER NOT NULL, first_trigger_time INTEGER NOT NULL,
-        trigger_count INTEGER NOT NULL DEFAULT 1 CHECK(trigger_count > 0),
-        is_end INTEGER NOT NULL DEFAULT 0 CHECK(is_end IN (0, 1)),
-        window_start INTEGER, window_end INTEGER, routine_revision INTEGER NOT NULL CHECK(routine_revision > 0),
-        status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
-        started_at INTEGER, ended_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        CHECK(status='pending' OR task_id IS NOT NULL), CHECK(window_end IS NULL OR window_start IS NULL OR window_end >= window_start)
+
+      // Tasks, external Sessions and their durable Run ledger.
+      yield* sql`CREATE TABLE tasks (
+        id TEXT PRIMARY KEY NOT NULL, goal TEXT NOT NULL, configuration TEXT NOT NULL,
+        branch TEXT NOT NULL UNIQUE, worktree TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'cancelled')),
+        created_at INTEGER NOT NULL,
+        worktree_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(worktree_state IN ('pending', 'creating', 'ready', 'releasing', 'released')),
+        worktree_base TEXT,
+        routine_id TEXT REFERENCES routines(id),
+        routine_date TEXT,
+        trigger_time INTEGER,
+        first_trigger_time INTEGER,
+        trigger_count INTEGER CHECK(trigger_count > 0),
+        is_end INTEGER CHECK(is_end IN (0, 1)),
+        window_start INTEGER,
+        window_end INTEGER CHECK(window_end >= window_start),
+        routine_revision INTEGER CHECK(routine_revision > 0),
+        routine_model TEXT CHECK(routine_model IS NULL OR json_valid(routine_model)),
+        routine_time_zone TEXT,
+        routine_updated_at INTEGER
       )`
-      yield* sql`CREATE UNIQUE INDEX routine_one_pending_execution ON routine_executions(routine_id) WHERE status='pending'`
-      yield* sql`CREATE UNIQUE INDEX routine_one_end_execution ON routine_executions(routine_id, routine_date) WHERE is_end=1`
-      yield* sql`CREATE INDEX routine_executions_by_date ON routine_executions(routine_id, routine_date, trigger_time)`
-      yield* sql`CREATE INDEX routine_executions_by_task ON routine_executions(task_id) WHERE task_id IS NOT NULL`
-    }),
-    '0013_git_change_preparations': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+      yield* sql`CREATE TABLE sessions (
+        id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
+        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), adapter_version TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK(purpose IN ('task', 'conflict-resolution')),
+        sync_operation_id TEXT UNIQUE REFERENCES git_sync_operations(id),
+        acp_session_id TEXT UNIQUE, native_session_id TEXT, created_at INTEGER NOT NULL,
+        model_profile TEXT,
+        UNIQUE(id, task_id), UNIQUE(agent, native_session_id),
+        CHECK((purpose='task' AND sync_operation_id IS NULL)
+          OR (purpose='conflict-resolution' AND sync_operation_id IS NOT NULL))
+      )`
+      yield* sql`CREATE TABLE runs (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        task_id TEXT NOT NULL REFERENCES tasks(id), session_id TEXT NOT NULL,
+        prompt TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('execution', 'recovery', 'conflict-resolution')),
+        resumes_run_id TEXT, baseline_commit TEXT,
+        source TEXT NOT NULL CHECK(source IN ('manual', 'routine', 'recovery', 'conflict-resolution')),
+        owner TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
+        started_at INTEGER,
+        state TEXT NOT NULL CHECK(state IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled')),
+        sync_state TEXT NOT NULL CHECK(sync_state IN ('not-required', 'pending', 'syncing', 'conflict', 'completed', 'failed')),
+        created_at INTEGER NOT NULL, ended_at INTEGER, error TEXT,
+        UNIQUE(id, task_id),
+        FOREIGN KEY(session_id, task_id) REFERENCES sessions(id, task_id),
+        FOREIGN KEY(resumes_run_id, task_id) REFERENCES runs(id, task_id),
+        CHECK((purpose = 'recovery') = (resumes_run_id IS NOT NULL)),
+        CHECK((state IN ('queued', 'preparing', 'running')) = (ended_at IS NULL)),
+        CHECK(state NOT IN ('preparing', 'running') OR (owner IS NOT NULL AND started_at IS NOT NULL)),
+        CHECK(state<>'queued' OR (owner IS NULL AND started_at IS NULL)),
+        CHECK(state NOT IN ('running', 'succeeded') OR baseline_commit IS NOT NULL)
+      )`
+      // SQL, rather than a renderer or process-local check, arbitrates competing Run reservations.
+      yield* sql`CREATE UNIQUE INDEX runs_one_active_per_task ON runs(task_id) WHERE state IN ('preparing', 'running')`
+      yield* sql`CREATE INDEX sessions_by_task ON sessions(task_id, created_at)`
+      yield* sql`CREATE INDEX runs_by_task ON runs(task_id, sequence)`
+      yield* sql`CREATE INDEX runs_queue_order ON runs(state, sequence)`
+      yield* sql`CREATE UNIQUE INDEX task_one_routine_end ON tasks(routine_id, routine_date) WHERE is_end=1`
+      yield* sql`CREATE INDEX tasks_by_routine_date ON tasks(routine_id, routine_date, trigger_time)`
+
+      // Completed conversations and custom events share one Session sequence.
+      yield* sql`CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        run_id TEXT,
+        seq INTEGER NOT NULL CHECK(seq > 0),
+        type TEXT NOT NULL CHECK(type IN ('message', 'custom')),
+        timestamp INTEGER NOT NULL,
+        payload TEXT NOT NULL CHECK(json_valid(payload)),
+        UNIQUE(session_id, seq)
+      )`
+      yield* sql`CREATE INDEX messages_by_run ON messages(session_id, run_id, seq)`
+
+      // Immutable Git save intents and their Run ownership.
       // Expected commit bytes precede object/ref writes. Preparation is not a branch receipt.
       yield* sql`CREATE TABLE git_change_preparations (
         id TEXT PRIMARY KEY NOT NULL, task_id TEXT REFERENCES tasks(id),
@@ -155,9 +137,8 @@ export const migrateVault = SqliteMigrator.run({
         BEGIN SELECT RAISE(ABORT, 'Git change Run ownership is immutable'); END`
       yield* sql`CREATE TRIGGER git_change_preparation_run_retained BEFORE DELETE ON git_change_preparation_runs
         BEGIN SELECT RAISE(ABORT, 'Git change Run ownership must be retained'); END`
-    }),
-    '0014_git_change_applications': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+
+      // Applying a saved Git change reserves the checkout.
       yield* sql`CREATE TABLE git_change_applications (
         id TEXT PRIMARY KEY REFERENCES git_change_preparations(id), branch TEXT NOT NULL,
         before_index BLOB NOT NULL, after_index BLOB NOT NULL,
@@ -186,9 +167,8 @@ export const migrateVault = SqliteMigrator.run({
           SELECT 1 FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
           WHERE a.state='applying' AND p.task_id=NEW.task_id
         ) BEGIN SELECT RAISE(ABORT, 'Task has an unfinished Git save'); END`
-    }),
-    '0015_git_sync_operations': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+
+      // Canonical synchronization and its forward-only lifecycle.
       yield* sql`CREATE TABLE git_sync_operations (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
         task_id TEXT NOT NULL REFERENCES tasks(id), supersedes_id TEXT UNIQUE REFERENCES git_sync_operations(id), source_frontier TEXT NOT NULL,
@@ -298,9 +278,8 @@ export const migrateVault = SqliteMigrator.run({
             AND (pending.state<>'superseded' OR NOT EXISTS (
               SELECT 1 FROM git_sync_operations replacement WHERE replacement.supersedes_id=pending.id))
         ) BEGIN SELECT RAISE(ABORT, 'Task has unfinished synchronization'); END`
-    }),
-    '0016_task_agent_invariant': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+
+      // Cross-entity Agent and conflict target invariants.
       // Session creation cannot bypass the service-level fixed-Agent check through another writer.
       yield* sql`CREATE TRIGGER session_uses_task_agent BEFORE INSERT ON sessions
         WHEN NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=NEW.task_id
@@ -325,9 +304,8 @@ export const migrateVault = SqliteMigrator.run({
                   AND operation.state IN ('conflict', 'resolving')))
               OR (NEW.purpose<>'conflict-resolution' AND session.purpose='task'))
         ) BEGIN SELECT RAISE(ABORT, 'Run purpose does not match its Session target'); END`
-    }),
-    '0017_git_sync_resolution_replay': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
+
+      // Replayable conflict resolution inputs.
       // A conflict resolution is an immutable patch from the accepted canonical prefix to the
       // user's staged tree. Keeping the patch outside the coordinator lets a later operation
       // replay it after main advances without trusting an old checkout or index.
@@ -355,123 +333,6 @@ export const migrateVault = SqliteMigrator.run({
         BEGIN SELECT RAISE(ABORT, 'Git synchronization resolution input is immutable'); END`
       yield* sql`CREATE TRIGGER git_sync_resolution_input_retained BEFORE DELETE ON git_sync_resolution_inputs
         BEGIN SELECT RAISE(ABORT, 'Git synchronization resolution input must be retained'); END`
-
-      // Existing vaults already have the 0015 triggers. Recreate the two shape/state guards so
-      // conflict operations can be superseded while retaining their durable replay inputs.
-      yield* sql`DROP TRIGGER git_sync_state_forward_only`
-      yield* sql`CREATE TRIGGER git_sync_state_forward_only BEFORE UPDATE OF state ON git_sync_operations
-        WHEN NOT (
-          NEW.state=OLD.state
-          OR (OLD.state='preparing' AND NEW.state IN ('conflict', 'prepared'))
-          OR (OLD.state='conflict' AND NEW.state IN ('resolving', 'superseded', 'aborted'))
-          OR (OLD.state='resolving' AND NEW.state IN ('conflict', 'prepared', 'superseded', 'aborted'))
-          OR (OLD.state='prepared' AND NEW.state IN ('published', 'superseded'))
-          OR (OLD.state='published' AND NEW.state IN ('aligning', 'aligned'))
-          OR (OLD.state='aligning' AND NEW.state='aligned')
-        ) BEGIN SELECT RAISE(ABORT, 'Git synchronization state cannot move backwards'); END`
-      yield* sql`DROP TRIGGER git_sync_checkpoint_shape`
-      yield* sql`CREATE TRIGGER git_sync_checkpoint_shape BEFORE UPDATE ON git_sync_operations
-        WHEN (NEW.state='preparing' AND NEW.conflict_index IS NOT NULL)
-          OR (NEW.state='conflict' AND (NEW.conflict_index IS NULL OR json_array_length(NEW.canonical_commits)<>NEW.conflict_index))
-          OR (NEW.state='resolving' AND (NEW.conflict_index IS NULL OR json_array_length(NEW.canonical_commits)<=NEW.conflict_index))
-          OR (NEW.state IN ('prepared', 'published', 'aligning', 'aligned') AND (NEW.prepared_head IS NULL OR NEW.conflict_index IS NOT NULL))
-          OR (NEW.state='superseded' AND NEW.prepared_head IS NOT NULL AND NEW.conflict_index IS NOT NULL)
-          OR (NEW.state IN ('published', 'aligning', 'aligned') AND NEW.published_head IS NULL)
-          OR (NEW.state='aligning' AND (NEW.alignment_commit IS NULL OR NEW.alignment_data IS NULL))
-          OR (NEW.state='aligned' AND NEW.aligned_head IS NULL)
-        BEGIN SELECT RAISE(ABORT, 'Git synchronization checkpoint is incomplete'); END`
-    }),
-    '0018_protocol_diagnostics': Effect.void
-    ,
-    // Existing development vaults may already be at 0018 with the retired five-table
-    // Routine model. This intentionally destructive replacement is allowed because the
-    // new contract does not promise compatibility; fresh installs also converge here.
-    '0019_routines_simplified': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`DROP TABLE IF EXISTS routine_wakeups`
-      yield* sql`DROP TABLE IF EXISTS routine_triggers`
-      yield* sql`DROP TABLE IF EXISTS routine_schedules`
-      yield* sql`DROP TABLE IF EXISTS routine_executions`
-      yield* sql`DROP TABLE IF EXISTS routines`
-      yield* sql`CREATE TABLE routines (
-        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
-        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), model_provider_id TEXT,
-        model_id TEXT, thinking_level TEXT, skill_ids TEXT NOT NULL DEFAULT '[]', integration_ids TEXT NOT NULL DEFAULT '[]',
-        interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0), time_zone TEXT NOT NULL,
-        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)), revision INTEGER NOT NULL CHECK(revision > 0),
-        next_trigger_at INTEGER, last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        CHECK(json_valid(skill_ids)), CHECK(json_valid(integration_ids)),
-        CHECK((agent='pi') = (model_provider_id IS NOT NULL AND model_id IS NOT NULL AND thinking_level IS NOT NULL))
-      )`
-      yield* sql`CREATE TABLE routine_executions (
-        id TEXT PRIMARY KEY NOT NULL, routine_id TEXT NOT NULL REFERENCES routines(id), task_id TEXT REFERENCES tasks(id),
-        routine_date TEXT NOT NULL, trigger_time INTEGER NOT NULL, first_trigger_time INTEGER NOT NULL,
-        trigger_count INTEGER NOT NULL DEFAULT 1 CHECK(trigger_count > 0), is_end INTEGER NOT NULL DEFAULT 0 CHECK(is_end IN (0, 1)),
-        window_start INTEGER, window_end INTEGER, routine_revision INTEGER NOT NULL CHECK(routine_revision > 0),
-        status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
-        started_at INTEGER, ended_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        CHECK(status='pending' OR task_id IS NOT NULL), CHECK(window_end IS NULL OR window_start IS NULL OR window_end >= window_start)
-      )`
-      yield* sql`CREATE UNIQUE INDEX routine_one_pending_execution ON routine_executions(routine_id) WHERE status='pending'`
-      yield* sql`CREATE UNIQUE INDEX routine_one_end_execution ON routine_executions(routine_id, routine_date) WHERE is_end=1`
-      yield* sql`CREATE INDEX routine_executions_by_date ON routine_executions(routine_id, routine_date, trigger_time)`
-      yield* sql`CREATE INDEX routine_executions_by_task ON routine_executions(task_id) WHERE task_id IS NOT NULL`
-    }),
-    '0020_routine_resources': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`ALTER TABLE routines ADD COLUMN resource_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(resource_ids))`
-    }),
-    '0021_execution_queue': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      // Admission precedes resource preparation. Runs retain their stricter Git/ACP constraints.
-      yield* sql`CREATE TABLE execution_requests (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-        task_id TEXT NOT NULL REFERENCES tasks(id), session_id TEXT NOT NULL,
-        prompt TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('execution', 'recovery', 'conflict-resolution')),
-        resumes_run_id TEXT, source TEXT NOT NULL CHECK(source IN ('manual', 'routine', 'recovery', 'conflict-resolution')),
-        state TEXT NOT NULL CHECK(state IN ('queued', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
-        owner TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1)),
-        created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
-        FOREIGN KEY(session_id, task_id) REFERENCES sessions(id, task_id),
-        FOREIGN KEY(resumes_run_id, task_id) REFERENCES runs(id, task_id),
-        CHECK((purpose='recovery') = (resumes_run_id IS NOT NULL)),
-        CHECK((state IN ('queued', 'preparing', 'running')) = (ended_at IS NULL)),
-        CHECK(state NOT IN ('preparing', 'running') OR (owner IS NOT NULL AND started_at IS NOT NULL)),
-        CHECK(state<>'queued' OR (owner IS NULL AND started_at IS NULL))
-      )`
-      yield* sql`CREATE UNIQUE INDEX execution_one_worker_per_task ON execution_requests(task_id)
-        WHERE state IN ('preparing', 'running')`
-      yield* sql`CREATE INDEX execution_queue_order ON execution_requests(state, sequence)`
-      yield* sql`CREATE INDEX execution_task_history ON execution_requests(task_id, sequence)`
-    }),
-    '0022_execution_event_cursor': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE execution_event_cursor (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL)`
-      yield* sql`INSERT INTO execution_event_cursor VALUES (1, 0)`
-    }),
-    '0023_execution_processes': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE execution_processes (
-        request_id TEXT PRIMARY KEY REFERENCES execution_requests(id), pid INTEGER NOT NULL CHECK(pid>0),
-        stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
-      )`
-    }),
-    '0024_execution_workers': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE execution_workers (
-        request_id TEXT PRIMARY KEY REFERENCES execution_requests(id), owner_pid INTEGER NOT NULL,
-        thread_id INTEGER NOT NULL, stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1))
-      )`
-    }),
-    '0025_execution_process_groups': Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE execution_process_groups (
-        request_id TEXT NOT NULL REFERENCES execution_requests(id), pid INTEGER NOT NULL CHECK(pid>0),
-        stopped INTEGER NOT NULL DEFAULT 0 CHECK(stopped IN (0, 1)), PRIMARY KEY(request_id, pid)
-      )`
-      yield* sql`INSERT INTO execution_process_groups SELECT request_id, pid, stopped FROM execution_processes`
-      yield* sql`DROP TABLE execution_processes`
-      yield* sql`ALTER TABLE execution_process_groups RENAME TO execution_processes`
     })
   })
 })

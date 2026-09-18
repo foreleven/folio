@@ -29,7 +29,7 @@ export function TaskSessions({ task }: { task: TaskRecord }): React.JSX.Element 
   const choices = catalog._tag === 'Success' && settings._tag === 'Success' && task.configuration.agent === 'pi'
     ? catalog.value.models.filter(model => model.source === 'builtin' && settings.value.configuredProviders?.includes(model.providerId)) : []
   const routine = detail._tag === 'Success' ? detail.value.routine : null
-  const routineModelKey = ''
+  const routineModelKey = routine?.model ? JSON.stringify([routine.model.providerId, routine.model.modelId]) : ''
   // A user selection (including clearing it) takes precedence over the immutable Routine default.
   const selectedModelKey = modelKey ?? routineModelKey
   const model = choices.find(entry => JSON.stringify([entry.providerId, entry.modelId]) === selectedModelKey)
@@ -38,7 +38,8 @@ export function TaskSessions({ task }: { task: TaskRecord }): React.JSX.Element 
   async function initialize(session?: SessionRecord): Promise<void> {
     if (busy.current || (!session && task.configuration.agent === 'pi' && !model)) return
     const selection = !session && task.configuration.agent === 'pi' && model
-      ? { providerId: model.providerId, modelId: model.modelId, thinkingLevel: 'off' as const } : undefined
+      ? { providerId: model.providerId, modelId: model.modelId,
+        thinkingLevel: selectedModelKey === routineModelKey ? routine?.model?.thinkingLevel ?? 'off' : 'off' as const } : undefined
     const previous = submitted.current
     const input: OpenTaskSessionInput = session
       ? { taskId: task.id, sessionId: session.id, agent: session.agent }

@@ -36,7 +36,9 @@ describe('durable execution queue', () => {
       expect(yield* queue.submit(input('first'))).toEqual(submitted)
       expect(yield* queue.submit({ ...input('first'), prompt: 'Different' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       expect(yield* queue.submit({ ...input('other'), sessionId: 'missing' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
-      expect(yield* (yield* HarnessStore).runs('task')).toEqual([])
+      expect(yield* (yield* HarnessStore).runs('task')).toEqual([submitted])
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'`).toEqual([])
     }).pipe(Effect.provide(layer())))
     await Effect.runPromise(Effect.gen(function* () {
       const queue = yield* ExecutionQueue
@@ -59,6 +61,9 @@ describe('durable execution queue', () => {
       expect(claimed.filter(Boolean).map(row => row!.id).sort()).toEqual(['first', 'independent'])
       const first = yield* queue.get('first')
       expect(yield* queue.finish('first', 'obsolete-worker', 'succeeded').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      expect(yield* queue.running('first', first.owner!).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`UPDATE runs SET baseline_commit='verified-base' WHERE id='first'`
       yield* queue.running('first', first.owner!)
       yield* queue.finish('first', first.owner!, 'succeeded')
       expect(yield* queue.claim('d')).toMatchObject({ id: 'followup', owner: 'd' })

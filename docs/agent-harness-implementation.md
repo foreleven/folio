@@ -1,3 +1,5 @@
+> 2026-09-18 存储更新：执行请求已合并到 `runs`，运行所有权与结果回执使用 Vault 内的 `runtime/runs/.../state.json`，处理日志使用 `logs/runs/.../*.jsonl`。旧 execution 表、全局事件数据库和消费游标已移除。当前设计及验收记录见 [Execution 存储重构计划](./PLAN-execution-storage-refactor.md)。下文涉及旧执行账本的内容属于历史实现记录。
+
 # Agent Harness 实现进展
 
 依据：[Harness RFC](./RFC-agent-harness-execution-storage.md)。目标仍是完整推进 RFC 的执行和存储架构，以下探针不代表生产能力已经完成。
@@ -343,6 +345,8 @@
 本轮最终验证：Desktop 全量 207 项中 205 项通过，失败仍只有两项既有 GeneralSettings status 断言；报告 `/tmp/folio-desktop-integration-mount-tests.json`。全仓 typecheck、Desktop build 和 git diff --check 通过。本轮未重建 .app，未进行人工 Electron 界面或真实账户数据采集验收。
 
 ## 2026-09-10 — Task 资源内容快照与恢复检查点
+
+> 2026-09-18：以下为历史实现。已移除任务资源快照表、目录复制和哈希校验；所有 Task 在 Session 启动/恢复时直接使用当前 Integration 安装资源，允许升级影响旧任务。授权和资源可用性仍逐次检查，工作区 raws 文件仍按需生成。新 Vault 不再创建快照表，TaskResources 不再依赖数据库或配置目录，也不持久化凭证。
 
 - Task 首次 Session 装配时，将所选 Skill 完整目录（含相邻脚本和 references）及 CLI 目录复制到 Vault 的 `resources/{taskId}/`，保留安装内的相对路径关系。复制范围不包含 Integration 安装根，Lark 的 private.json 不进入快照。
 - 新增 task_resource_snapshots 表，以 Task ID 关联实际文件清单、SHA-256、可执行属性、路径映射和 preparing/ready 状态。先提交预期清单，再发布非空快照目录，最后记录 ready；文件系统和 SQL 不被当成共同事务。
@@ -847,3 +851,24 @@ Node typecheck 和 `git diff --check` 通过。Desktop Web typecheck 仍被仓�
 本轮验证仍不证明外部编辑器或逃逸进程在 clean preflight 后不会继续写入，也不把手动 writer-stopped
 开关当作生产停止证明；普通 Run 自动保存、真实外部 Agent 重放人工验收、Skill、`raws` 和 Agent
 切换继续保留在 RFC 后续范围。
+
+## 2026-09-18 — 数据库重构后的 DTO / Service 边界审查
+
+- 消息：SessionHistory 直接返回 MessageRecord（id/sessionId/runId/seq/type/timestamp/payload）。删除 ProjectionRow 及 JSON 字符串往返转换；协议 ID 和源序号只存在 payload 中。对话、工具调用都保持 type=message，流式读取仍来自内存，完成或中断才落库。Renderer、Run 工具状态检查同步消费 payload。
+- Run：TaskDetail 仅有 runs；队列和历史是同一组记录。移除 TaskService 完成检查中的重复查询、取消时回退旧路径、冲突重试中不可达的第二次历史查询。成功 Run 的重试仅在 conflict/resolving 状态继续 Git 后处理，不再次发送 Prompt；跨 Task 取消返回 not-found。
+- Routine：RoutineExecution 保留为日历/列表的查询视图，不代表另一份持久化实体。删除与 taskId 重复的 id。状态和时间由 Task 与最新普通 Run 推导，冲突解决 Run 不覆盖普通执行结果。模型数据库列不再泄漏到 RoutineRecord；TaskDetail.routine 明确返回对象或 null。
+- Session：外部 Agent 身份和模型快照继续归属 sessions；不复制到 Task 或 Run。Task 生命周期与 Run 结果仍各自独立。
+- 诊断：删除只有测试调用的协议帧/诊断 SQL 写入、查询接口和 DTO；生产执行诊断继续由 RunFiles 写 JSONL。测试辅助 Sink 同步移除旧入口。
+- 资源：TaskResources 直接使用 Integration 的当前安装路径，已无快照表、配置目录或数据库依赖。
+
+本次不把所有数据库列平铺到 DTO：Routine 查询视图服务于界面，进程恢复文件仅供主进程使用，均有独立的消费边界。历史章节中的旧 API 描述仅用于记录实现演进。
+
+## 2026-09-18 — 当前资源与消息完成语义
+
+- 新 Vault 不创建 task_resource_snapshots，不生成每 Task 的 resources 副本，也不保存资源哈希或版本锁。Session 启动和恢复使用当前安装的 Skill/CLI；升级允许影响已有 Task。已经运行的 Agent 是否重新读取文件取决于其运行时，不承诺热更新。
+- Integration 仍负责安装路径验证、授权检查和凭据刷新；工作区 raws 下的说明和工作流按需生成。凭据只通过运行环境传入，不加入 Task 资源副本。准备失败记录具体阶段和原因，不再报告“保留快照”。
+- 已安装 Gmail/Lark 的随应用分发资源按内容比较更新，通过临时文件原子替换；内容相同不重写，失败保留旧文件并允许重试。Gmail 未安装时不会因 setup 自动安装；私人授权配置不被覆盖。
+- Routine 预留 Task 保存当时的 prompt、Agent、资源引用、模型与时区；之后编辑 Routine 不改变既有 Task。这里冻结的是任务配置，不冻结资源文件内容。
+- Pi 的 error/aborted/length 完成消息保存 incomplete 标记；SDK 正常返回不再等同于成功。取消映射 cancelled，长度限制映射 max_tokens；自动重试后的最后结果决定该轮结果，先前不完整消息仍保留其标记。
+
+验证：Desktop 60 个文件 / 364 项、Agent 28 个文件 / 164 项通过；Integration 73 项通过、2 项真实服务测试跳过。全仓 typecheck、lint、生产构建和差异空白检查通过。仅支持新建 Vault，不迁移历史资源快照。

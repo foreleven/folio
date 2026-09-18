@@ -314,6 +314,22 @@ describe('ModelService', () => {
     })
   })
 
+  it('invalidates every managed profile sharing a rotated credential', async () => {
+    await withService(async (service) => {
+      const first = customProfile('shared-first')
+      const second = customProfile('shared-second', { provider: first.provider, modelId: 'second-model' })
+      const independent = customProfile('environment-profile', {
+        provider: first.provider, modelId: 'environment-model', credentialSource: 'environment', environmentVariable: 'MODEL_TEST_KEY'
+      })
+      for (const profile of [first, second, independent]) {
+        await Effect.runPromise(service.saveProfile(profile))
+        await Effect.runPromise(service.testConnection(profile.id))
+      }
+      const view = await Effect.runPromise(service.setCredential(first.id, Redacted.make('rotated-key')))
+      expect(view.profiles.map(({ connectionStatus }) => connectionStatus)).toEqual(['untested', 'untested', 'ready'])
+    }, makeRuntime(NodeFileSystem.layer, { MODEL_TEST_KEY: 'independent-key' }, runtimeAdapter()))
+  })
+
   it('reports environment credentials only as configured metadata', async () => {
     const profile = customProfile('environment', {
       credentialSource: 'environment',

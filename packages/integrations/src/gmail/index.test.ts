@@ -1,16 +1,16 @@
 import { NodeServices } from '@effect/platform-node'
-import { Effect, ManagedRuntime } from 'effect'
-import { Gaxios } from 'gaxios'
+import { Deferred, Effect, Fiber, ManagedRuntime } from 'effect'
 import { OAuth2Client } from 'google-auth-library'
+import { gmail_v1 } from 'googleapis/build/src/apis/gmail/v1.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { get as httpGet } from 'node:http'
+import { get as httpGet, Server } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { IntegrationContext } from '../base/index.ts'
+import { IntegrationContext, IntegrationError } from '../base/index.ts'
 import { gmail } from './index.ts'
-import { authorizeDesktop, requestDeviceAuthorization } from './oauth.ts'
+import { authorizeDesktop, gmailScope } from './oauth.ts'
 import { updatePrivateState } from './state.ts'
 
 let root: string | undefined
@@ -24,8 +24,42 @@ afterEach(async () => {
 })
 
 describe('Google Gmail integration', () => {
+  it.each(['expired', 'unverified', 'verified'] as const)('retries %s credentials after a transient check failure without browser OAuth', async mode => {
+    root = await mkdtemp(join(tmpdir(), 'folio-gmail-recovery-'))
+    const directory = root
+    const runtime = ManagedRuntime.make(NodeServices.layer)
+    const states: string[] = []
+    const context: IntegrationContext['Service'] = {
+      directory, writeState: state => Effect.sync(() => { states.push(state) }), registerResource: () => Effect.void
+    }
+    const refresh = vi.spyOn(OAuth2Client.prototype, 'getAccessToken').mockImplementation(function (this: OAuth2Client) {
+      this.setCredentials({ ...this.credentials, access_token: 'new-token', expiry_date: Date.now() + 3_600_000 })
+      return Promise.resolve({ token: 'new-token', res: null }) as never
+    })
+    vi.spyOn(gmail_v1.Resource$Users.prototype, 'getProfile')
+      .mockRejectedValueOnce(new Error('temporary connection failure'))
+      .mockResolvedValue({ data: { emailAddress: 'test@example.test' } } as never)
+    const authorize = vi.spyOn(OAuth2Client.prototype, 'generateAuthUrl')
+    try {
+      await runtime.runPromise(gmail.install().pipe(Effect.provideService(IntegrationContext, context)))
+      await runtime.runPromise(updatePrivateState(directory, { credentials: {
+        clientId: 'client', clientSecret: 'secret', accessToken: 'old-token', refreshToken: 'saved-refresh',
+        expiresAt: mode === 'expired' ? 1 : Date.now() + 3_600_000, scope: gmailScope, verified: mode !== 'unverified'
+      } }))
+      await expect(runtime.runPromise(gmail.check().pipe(Effect.provideService(IntegrationContext, context)))).rejects.toThrow()
+      const inspected = await runtime.runPromise(gmail.inspect().pipe(Effect.provideService(IntegrationContext, context)))
+      expect(inspected.state).toBe('recovering')
+      expect(inspected.actions).toContainEqual({ id: 'retry_check', type: 'callback', primary: true })
+      await runtime.runPromise(gmail.onActionCallback('retry_check').pipe(Effect.provideService(IntegrationContext, context)))
+      expect((await runtime.runPromise(gmail.inspect().pipe(Effect.provideService(IntegrationContext, context)))).state).toBe('ready')
+      expect(refresh).toHaveBeenCalledTimes(mode === 'expired' ? 1 : 0)
+      expect(authorize).not.toHaveBeenCalled()
+      expect(states).not.toContain('waiting_for_user')
+    } finally { await runtime.dispose() }
+  })
+
   it('declares a browser action for the Desktop OAuth authorization URL', () => {
-    expect(gmail.actions.map((action) => action.id)).toEqual(['open_authorization', 'install', 'open_client_setup', 'connect', 'retry_connect'])
+    expect(gmail.actions.map((action) => action.id)).toEqual(['open_authorization', 'install', 'open_client_setup', 'connect', 'retry_check', 'retry_connect'])
     expect(gmail.actions.find((action) => action.id === 'connect')?.fields?.map((field) => field.id)).toEqual(['clientId', 'clientSecret'])
     expect(gmail.actions.find((action) => action.id === 'open_client_setup')?.description).toMatchObject({
       'zh-CN': expect.stringContaining('console.cloud.google.com/auth/clients')
@@ -35,32 +69,44 @@ describe('Google Gmail integration', () => {
     })
   })
 
-  it('keeps the legacy device helper free of client secrets', async () => {
-    vi.stubEnv('HTTPS_PROXY', 'http://proxy.example.test:8080')
-    vi.stubEnv('HTTP_PROXY', '')
-    const request = vi.spyOn(Gaxios.prototype, 'request').mockResolvedValue({
-      status: 200,
-      data: {
-        device_code: 'device',
-        user_code: 'ABCD-EFGH',
-        verification_url: 'https://www.google.com/device',
-        expires_in: 600,
-        interval: 1
+  it.each(['failure', 'interruption'] as const)('closes the OAuth listener after %s', async mode => {
+    const listen = vi.spyOn(Server.prototype, 'listen')
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        const operation = authorizeDesktop('client.apps.googleusercontent.com', 'secret', () =>
+          mode === 'failure' ? Effect.fail(new IntegrationError({ message: 'publication failed' })) : Deferred.succeed(ready, undefined).pipe(Effect.asVoid))
+        if (mode === 'failure') expect(yield* operation.pipe(Effect.flip)).toMatchObject({ message: 'publication failed' })
+        else {
+          const fiber = yield* operation.pipe(Effect.forkChild)
+          yield* Deferred.await(ready)
+          yield* Fiber.interrupt(fiber)
+        }
+        const server = listen.mock.contexts[0]
+        expect(server).toBeInstanceOf(Server)
+        if (server instanceof Server) expect(server.listening).toBe(false)
+      }))
+    } finally {
+      for (const server of listen.mock.contexts) {
+        if (server instanceof Server) { server.closeAllConnections(); if (server.listening) server.close() }
       }
-    } as never)
-    const device = await Effect.runPromise(requestDeviceAuthorization('client', 'secret'))
-    expect(device.verificationUrl).toBe('https://www.google.com/device?user_code=ABCD-EFGH')
-    expect(request).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: 'https://oauth2.googleapis.com/device/code',
-        method: 'POST',
-        responseType: 'json',
-        timeout: 30_000,
-        data: expect.stringContaining('client_id=client'),
-        proxy: 'http://proxy.example.test:8080'
-      })
-    )
-    expect(request.mock.calls[0]?.[0]?.data).not.toContain('client_secret')
+    }
+  })
+
+  it('accepts a callback while the host is still publishing the authorization URL', async () => {
+    vi.spyOn(OAuth2Client.prototype, 'getToken').mockResolvedValue({ tokens: {
+      access_token: 'access', refresh_token: 'refresh', expiry_date: Date.now() + 3600000
+    }, res: null } as never)
+    const result = await Effect.runPromise(authorizeDesktop('client.apps.googleusercontent.com', 'secret', url =>
+      Effect.tryPromise(() => new Promise<void>((resolve, reject) => {
+        const authorization = new URL(url)
+        const redirect = new URL(authorization.searchParams.get('redirect_uri')!)
+        redirect.searchParams.set('code', 'code')
+        redirect.searchParams.set('state', authorization.searchParams.get('state')!)
+        httpGet(redirect, response => { response.resume(); response.on('end', resolve) }).on('error', reject)
+      })).pipe(Effect.mapError(() => new IntegrationError({ message: 'callback failed' })))
+    ).pipe(Effect.timeout('2 seconds')))
+    expect(result.accessToken).toBe('access')
   })
 
   it('exchanges a Desktop OAuth code through a temporary loopback callback', async () => {

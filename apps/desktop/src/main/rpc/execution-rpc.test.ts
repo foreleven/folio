@@ -16,6 +16,7 @@ it('aggregates unopened Vaults and marks unavailable Vaults without hiding healt
     get: Effect.succeed({ vaults: [{ id: 'a' }, { id: 'b' }, { id: 'offline' }], executionConcurrency: 3 })
   } as unknown as ConfigService['Service'])
   const runtimes = Layer.succeed(VaultRuntime)({
+      withClosed: (_id, operation) => operation,
     open: id => {
       opened.push(id)
       if (id === 'offline') return Effect.fail(new HarnessStoreError({ reason: 'storage', message: 'offline' }))

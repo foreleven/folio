@@ -1,6 +1,7 @@
 import { BrowserWindow, dialog } from 'electron'
 import { Context, Effect, Layer, Semaphore } from 'effect'
 import { VaultError, type Vault } from '../../shared/vault'
+import { VaultRuntime } from '../services/vault-runtime'
 import { VaultService } from '../services/vault-service'
 import { ConfigService } from '../services/config-service'
 import { MainWindow } from './MainWindow'
@@ -21,6 +22,7 @@ export class VaultLauncher extends Context.Service<
     VaultLauncher,
     Effect.gen(function* () {
       const vaults = yield* VaultService
+      const runtimes = yield* VaultRuntime
       const windows = yield* MainWindow
       const config = yield* ConfigService
       const lock = yield* Semaphore.make(1)
@@ -51,10 +53,12 @@ export class VaultLauncher extends Context.Service<
           // MainWindow waits for Electron's `closed` event. This guarantees the
           // renderer has released its resources before the registration disappears.
           yield* windows.closeVault(id)
-          yield* vaults.remove(vault)
-          const removed = yield* config.removeVault(id).pipe(Effect.mapError((cause) => new VaultError({ message: 'Could not remove the vault registration.', cause })))
-          if (removed === null) return yield* new VaultError({ message: 'This vault is no longer registered.', cause: id })
-          return removed
+          return yield* runtimes.withClosed(id, Effect.gen(function* () {
+            yield* vaults.remove(vault)
+            const removed = yield* config.removeVault(id).pipe(Effect.mapError((cause) => new VaultError({ message: 'Could not remove the vault registration.', cause })))
+            if (removed === null) return yield* new VaultError({ message: 'This vault is no longer registered.', cause: id })
+            return removed
+          })).pipe(Effect.mapError(cause => cause instanceof VaultError ? cause : new VaultError({ message: 'Could not close Vault background operations. Saved data has been retained.', cause })))
         },
         Effect.uninterruptible,
         lock.withPermit

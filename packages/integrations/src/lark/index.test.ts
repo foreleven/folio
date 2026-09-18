@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node'
 import { registerApp } from '@larksuiteoapi/node-sdk'
-import { ConfigProvider, Effect, Exit, Layer, Logger, ManagedRuntime, References, Scope, Sink, Stream } from 'effect'
+import { Clock, ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, ManagedRuntime, References, Scope, Sink, Stream } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { lark, LarkApplication } from './index.ts'
 import { TestClock } from 'effect/testing'
-import { releaseSession, larkScopes } from './auth.ts'
+import { LarkAuth, releaseSession, larkScopes } from './auth.ts'
 import { IntegrationContext, IntegrationError } from '../base/index.ts'
 import type { IntegrationResource } from '../base/index.ts'
 import { skillNames } from './skills.ts'
@@ -196,6 +196,42 @@ async function privateState(directory: string) {
 }
 
 describe('Lark integration lifecycle', () => {
+  it('keeps maintenance publication inside the installation lock', async () => {
+    const h = harness()
+    await seed(h.directory)
+    try {
+      await h.runtime.runPromise(Effect.gen(function* () {
+        const auth = yield* LarkAuth
+        const publishing = yield* Deferred.make<void>()
+        const resume = yield* Deferred.make<void>()
+        const order: string[] = []
+        const context: IntegrationContext['Service'] = {
+          ...h.context,
+          writeState: (state, data, actions) => Effect.gen(function* () {
+            if (state === 'ready') {
+              yield* Deferred.succeed(publishing, undefined)
+              yield* Deferred.await(resume)
+              order.push('published')
+            }
+            yield* h.context.writeState(state, data, actions)
+          })
+        }
+        yield* lark.setup!().pipe(Effect.provideService(IntegrationContext, context), Effect.forkScoped)
+        yield* Deferred.await(publishing)
+        // Connect and install use this same gate; run immediately to prove admission is blocked.
+        const next = yield* auth.exclusive(Effect.sync(() => { order.push('next-operation') })).pipe(
+          Effect.provideService(IntegrationContext, h.context), Effect.forkChild({ startImmediately: true }))
+        try {
+          expect(next.pollUnsafe()).toBeUndefined()
+        } finally {
+          yield* Deferred.succeed(resume, undefined)
+        }
+        yield* Fiber.join(next)
+        expect(order).toEqual(['published', 'next-operation'])
+      }).pipe(Effect.scoped, Effect.provide(LarkAuth.layer)))
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
   it('declares only selected Skill mounts and the managed CLI without performing ingestion', async () => {
     expect(lark.id).toBe('lark')
     expect(JSON.parse(JSON.stringify(lark.actions)).map((a: { id: string }) => a.id))
@@ -237,7 +273,11 @@ describe('Lark integration lifecycle', () => {
         executableDirectories: [], workspaceFiles: [] as Array<{ path: string; content: string }>, env: {}
       }
       await Effect.runPromise(lark.resources[0]!.onIngest(context))
-      expect(context.env).toEqual({ LARK_USER_ACCESS_TOKEN: 'saved-token' })
+      expect(context.env).toEqual({
+        LARKSUITE_CLI_APP_ID: app.clientId, LARKSUITE_CLI_APP_SECRET: app.clientSecret,
+        LARKSUITE_CLI_BRAND: app.brand, LARKSUITE_CLI_DEFAULT_AS: 'user',
+        LARKSUITE_CLI_USER_ACCESS_TOKEN: 'saved-token', LARKSUITE_CLI_TENANT_ACCESS_TOKEN: 'test-app-token'
+      })
       expect(context.workspaceFiles.map(file => file.path)).toEqual(['raws/lark-im/_workflow.md', 'raws/lark-im/extract-window.mjs'])
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -259,67 +299,50 @@ describe('Lark integration lifecycle', () => {
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it('checks structured CLI authentication, binds it to Folio state, and fails on a nonzero status', async () => {
-    const healthy = harness()
-    await seed(healthy.directory, { refreshToken: 'saved-refresh', refreshExpiresAt: Date.now() + 3600000 })
+  it('verifies Folio credentials without consulting a different global CLI account', async () => {
+    const h = harness({ authStatusExit: 2, authStatusBody: { appId: 'unrelated-global-app' } })
+    await seed(h.directory)
+    const before = await privateState(h.directory)
     try {
-      await healthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, healthy.context)))
-      expect(healthy.commands.map((command) => command.args)).toEqual([
-        ['--version'], ['auth', 'status', '--json', '--verify']
-      ])
-      const saved = await privateState(healthy.directory)
-      expect(saved.userAuth.verified).toBe(true)
-      expect(saved.userAuth.expiresAt).toBeGreaterThan(Date.now())
-      expect(saved.userAuth.refreshExpiresAt).toBeGreaterThan(saved.userAuth.expiresAt)
-    } finally { await healthy.stop(); await healthy.runtime.dispose() }
-
-    const unhealthy = harness({ authStatusExit: 3 })
-    await seed(unhealthy.directory)
-    try {
-      await expect(unhealthy.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, unhealthy.context))))
-        .rejects.toThrow()
-      expect(unhealthy.commands.at(-1)?.args).toEqual(['auth', 'status', '--json', '--verify'])
-    } finally { await unhealthy.stop(); await unhealthy.runtime.dispose() }
+      await h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context)))
+      expect(h.commands.map(command => command.args)).toEqual([['--version']])
+      expect(sdk.userInfo).toHaveBeenCalledWith({}, { token: 'saved-token' })
+      expect((await privateState(h.directory)).userAuth.expiresAt).toBe(before.userAuth.expiresAt)
+    } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it('refreshes and verifies an expiring CLI token atomically during check', async () => {
-    const h = harness({ authStatusBody: {
-      appId: app.clientId, brand: app.brand, identity: 'user', verified: true,
-      identities: { user: {
-        status: 'ready', available: true, verified: true, openId: 'test-user', tokenStatus: 'valid',
-        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 30_000).toISOString(),
-        refreshExpiresAt: new Date(Date.now() + 3_600_000).toISOString()
-      } }
-    } })
-    await seed(h.directory, { refreshToken: 'old-refresh', refreshExpiresAt: Date.now() + 3_600_000 })
+  it('refreshes and verifies an expiring Folio token atomically during check', async () => {
+    const h = harness()
+    await seed(h.directory, { expiresAt: Date.now() + 30_000, refreshToken: 'old-refresh', refreshExpiresAt: Date.now() + 3_600_000 })
     try {
       await h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context)))
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(sdk.userInfo).toHaveBeenCalledTimes(1)
+      expect(sdk.userInfo).toHaveBeenCalledWith({}, { token: 'test-user-token' })
       expect(await privateState(h.directory)).toMatchObject({ userAuth: {
         accessToken: 'test-user-token', refreshToken: 'test-refresh', openId: 'test-user', verified: true
       } })
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it.each([
-    { authStatusBody: '{broken-json', reason: 'invalid JSON' },
-    { authStatusBody: {
-      appId: 'another-app', identity: 'user', verified: true,
-      identities: { user: { available: true, verified: true, openId: 'test-user', tokenStatus: 'valid',
-        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 7200000).toISOString() } }
-    }, reason: 'another app' },
-    { authStatusBody: {
-      appId: app.clientId, identity: 'user', verified: true,
-      identities: { user: { available: true, verified: true, openId: 'another-user', tokenStatus: 'valid',
-        scope: larkScopes.join(' '), expiresAt: new Date(Date.now() + 7200000).toISOString() } }
-    }, reason: 'another user' }
-  ])('rejects CLI status from $reason', async ({ authStatusBody }) => {
-    const h = harness({ authStatusBody })
+  it.each([{ code: 0, data: { open_id: 'another-user' } }, { code: 99991663 }])(
+    'rejects a mismatched or revoked Folio token', async result => {
+      const h = harness()
+      await seed(h.directory)
+      sdk.userInfo.mockResolvedValue(result)
+      try {
+        await expect(h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context)))).rejects.toThrow()
+        expect((await privateState(h.directory)).userAuth.verified).toBe(false)
+      } finally { await h.stop(); await h.runtime.dispose() }
+    }
+  )
+
+  it('rejects unavailable verification without exposing transport credentials', async () => {
+    const h = harness()
     await seed(h.directory)
+    sdk.userInfo.mockRejectedValue(new Error('secret transport payload'))
     try {
       await expect(h.runtime.runPromise(lark.check().pipe(Effect.provideService(IntegrationContext, h.context))))
-        .rejects.toThrow()
+        .rejects.toThrow('Lark user verification is temporarily unavailable')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
@@ -539,14 +562,30 @@ describe('Lark integration lifecycle', () => {
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it('stops at device expiry without polling or overwriting saved auth', async () => {
+  it.each([false, true])('stops at device expiry without polling or overwriting saved auth (early timer: %s)', async earlyTimer => {
     const h = harness()
     await seed(h.directory, { expiresAt: 1 })
     fetchMock.mockResolvedValue(response({
       device_code: 'test-device', verification_uri: 'https://accounts.feishu.cn/oauth', expires_in: 0.05, interval: 1
     }))
     try {
-      const error = await h.runtime.runPromise(Effect.flip(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context))))
+      const error = await h.runtime.runPromise(Effect.gen(function* () {
+        const clock = yield* Clock.Clock
+        let now = 1000
+        const operation = lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context))
+        return yield* Effect.flip(earlyTimer ? operation.pipe(Effect.provideService(Clock.Clock, {
+          currentTimeMillisUnsafe: () => now,
+          currentTimeMillis: Effect.sync(() => now),
+          currentTimeNanosUnsafe: () => BigInt(now) * 1_000_000n,
+          currentTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
+          monotonicTimeNanosUnsafe: () => BigInt(now) * 1_000_000n,
+          monotonicTimeNanos: Effect.sync(() => BigInt(now) * 1_000_000n),
+          // Model an early wakeup deterministically; retain real timeout timers.
+          sleep: duration => Duration.toMillis(duration) < 1000
+            ? Effect.sync(() => { now += Math.max(1, Duration.toMillis(duration) - 1) })
+            : clock.sleep(duration)
+        })) : operation)
+      }))
       expect(error.message).toContain('expired')
       expect(fetchMock).toHaveBeenCalledTimes(1)
     } finally { await h.stop(); await h.runtime.dispose() }

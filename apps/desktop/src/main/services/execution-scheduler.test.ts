@@ -1,10 +1,10 @@
 import { Deferred, Effect, Layer } from 'effect'
 import { describe, expect, it } from 'vitest'
-import type { ExecutionRequest } from '../../shared/execution'
+import type { RunRecord } from '../../shared/execution'
 import { ExecutionNotifications, executionSchedulerLayer, type ExecutionSource } from './execution-scheduler'
 
-const request = (id: string, owner: string): ExecutionRequest => ({ id, sequence: 1, taskId: id, sessionId: id,
-  prompt: 'notes', purpose: 'execution', resumesRunId: null, source: 'manual', state: 'preparing', owner,
+const request = (id: string, owner: string): RunRecord => ({ id, sequence: 1, taskId: id, sessionId: id,
+  prompt: 'notes', purpose: 'execution', resumesRunId: null, source: 'manual', baselineCommit: null, syncState: 'not-required', state: 'preparing', owner,
   cancelRequested: false, createdAt: 0, startedAt: 0, endedAt: null, error: null })
 
 describe('global execution scheduler', () => {

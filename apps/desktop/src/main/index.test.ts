@@ -65,6 +65,7 @@ vi.mock('electron', () => {
       setApplicationMenu: vi.fn()
     },
     app: {
+      requestSingleInstanceLock: () => true,
       getAppPath: () => '/test/folio',
       getVersion: () => '0.1.0',
       isPackaged: false,

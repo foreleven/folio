@@ -1,5 +1,5 @@
 import { Context, Effect, FileSystem } from 'effect'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { IntegrationError } from '../base/index.ts'
 
@@ -17,32 +17,28 @@ export const hasAssets = Effect.fn('Gmail.hasAssets')(function* (directory: stri
   return (yield* fs.exists(join(directory, 'skills', skillName, 'SKILL.md'))) && (yield* fs.exists(join(directory, 'workflows', 'gmail', 'extract-window.mjs')))
 })
 
-/** Stages the credential-free Skill and extractor after explicit installation. */
+/** Publishes bundled assets atomically per file; retries and app upgrades preserve private auth state. */
 export const installAssets = Effect.fn('Gmail.installAssets')(function* (directory: string) {
   const fs = yield* FileSystem.FileSystem
   const source = yield* GmailAssetsDirectory
-  if (yield* hasAssets(directory)) return
-  yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
-  yield* fs.chmod(directory, 0o700)
-  const hasSkillsDirectory = yield* fs.exists(join(directory, 'skills'))
-  const hasWorkflowsDirectory = yield* fs.exists(join(directory, 'workflows'))
-  if (hasSkillsDirectory || hasWorkflowsDirectory) {
-    return yield* new IntegrationError({ message: 'Incomplete Gmail assets directory. Move it aside before retrying installation.' })
-  }
   if (!(yield* fs.exists(skillPath(source))) || !(yield* fs.exists(workflowPath(source)))) {
     return yield* new IntegrationError({ message: 'The bundled Gmail workflow is missing.' })
   }
-  const staging = join(directory, '.gmail-assets-staging')
-  yield* fs.remove(staging, { recursive: true, force: true })
-  yield* fs.makeDirectory(join(staging, 'skills', skillName), { recursive: true, mode: 0o700 })
-  yield* fs.makeDirectory(join(staging, 'workflows', 'gmail'), { recursive: true, mode: 0o700 })
-  yield* fs.copy(skillPath(source), skillPath(staging))
-  yield* fs.copy(workflowPath(source), workflowPath(staging))
-  yield* fs.rename(join(staging, 'skills'), join(directory, 'skills')).pipe(Effect.uninterruptible)
-  yield* fs.rename(join(staging, 'workflows'), join(directory, 'workflows')).pipe(Effect.uninterruptible)
-  yield* fs.remove(staging, { recursive: true, force: true })
-  if (!(yield* hasAssets(directory))) return yield* new IntegrationError({ message: 'The Gmail workflow could not be installed.' })
-})
+  yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 })
+  yield* fs.chmod(directory, 0o700)
+  const staging = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.gmail-assets-' })
+  for (const path of [skillPath, workflowPath]) {
+    const content = yield* fs.readFileString(path(source))
+    const current = yield* fs.readFileString(path(directory)).pipe(
+      Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(undefined)))
+    if (current === content) continue
+    const staged = path(staging)
+    yield* fs.makeDirectory(dirname(staged), { recursive: true, mode: 0o700 })
+    yield* fs.writeFileString(staged, content, { mode: 0o600 })
+    yield* fs.makeDirectory(dirname(path(directory)), { recursive: true, mode: 0o700 })
+    yield* fs.rename(staged, path(directory)).pipe(Effect.uninterruptible)
+  }
+}, Effect.scoped)
 
 export const installedSkillPath = (directory: string) => skillPath(directory)
 export const installedWorkflowPath = (directory: string) => workflowPath(directory)

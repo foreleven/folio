@@ -61,6 +61,10 @@ describe('Routine details', () => {
 
     render(<RoutinePanel />)
     fireEvent.click(screen.getByRole('button', { name: '打开 每日邮件整理 Routine 详情' }))
+    // Long-lived Routines must not mount every historical date at once.
+    expect(screen.getAllByRole('button').length).toBeLessThan(50)
+    fireEvent.click(screen.getByRole('button', { name: '显示更早日期' }))
+    expect(screen.getAllByRole('button').length).toBeLessThan(90)
     fireEvent.click(screen.getByRole('button', { name: '查看全部 Prompt' }))
 
     const dialog = screen.getByRole('dialog')

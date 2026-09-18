@@ -20,7 +20,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   if (method === "config/read") {
     let automatic = false;
-    try { automatic = JSON.parse(readFileSync('automatic-skills.json', 'utf8')); } catch {}
+    try { automatic = JSON.parse(readFileSync('automatic-skills.json', 'utf8')); } catch { /* Absent fixture configuration uses the default. */ }
     return send({ id, result: { config: { skills: { include_instructions: automatic } } } });
   }
   if (method === "skills/extraRoots/set") {

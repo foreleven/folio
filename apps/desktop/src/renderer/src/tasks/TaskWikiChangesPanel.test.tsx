@@ -7,7 +7,7 @@ import { TaskWikiChangesPanel } from './TaskWikiChangesPanel'
 const mocks = vi.hoisted(() => ({ save: vi.fn(), saveRun: vi.fn(), confirmRun: vi.fn(), sync: vi.fn(), reprepare: vi.fn(), startConflict: vi.fn(), resolveConflict: vi.fn(), abortConflict: vi.fn(), refresh: vi.fn(), query: vi.fn((method: string, payload: unknown) => ({ method, payload })),
   context: { files: ['wiki/one.md'], commonBase: 'a'.repeat(40), canonicalDiff: '-main', taskDiff: '+task' },
   detail: { sessions: [] as Array<{ id: string; purpose: string; syncOperationId?: string | null }>, runs: [] as Array<{ id: string; prompt: string; purpose: string; state: string; syncState: string; baselineCommit: string; sessionId?: string }> },
-  history: { messages: [] as Array<{ id: string; kind: 'message'; runId: string | null; data: { role: string; content: unknown } }>, tools: [] as Array<{ id: string; runId: string | null; data: Record<string, unknown> }> },
+  history: { messages: [] as Array<{ id: string; runId: string | null; payload: { kind: 'message'; data: { role: string; content: unknown } } }>, tools: [] as Array<{ id: string; runId: string | null; data: Record<string, unknown> }> },
   view: { head: 'a'.repeat(40), registered: true, files: [
     { path: 'wiki/one.md', status: 'modified', selectable: true }, { path: 'wiki/two.md', status: 'added', selectable: true }
   ], pending: [] } as WorkspaceChangesView,
@@ -224,7 +224,7 @@ it('shows conflict evidence and retries the fixed-Agent resolution Run with stab
   mocks.detail = { sessions: [{ id: 'source-session', purpose: 'task' }, { id: 'conflict-session', purpose: 'conflict-resolution', syncOperationId: 'conflict-sync' }], runs: [
     { id: 'conflict-run', sessionId: 'conflict-session', prompt: 'resolve', purpose: 'conflict-resolution', state: 'running', syncState: 'not-required', baselineCommit: 'a'.repeat(40) }
   ] }
-  mocks.history = { messages: [{ id: 'conflict-message', kind: 'message', runId: 'conflict-run', data: { role: 'assistant', content: [{ text: 'Resolved note' }] } }], tools: [] }
+  mocks.history = { messages: [{ id: 'conflict-message', runId: 'conflict-run', payload: { kind: 'message', data: { role: 'assistant', content: [{ text: 'Resolved note' }] } } }], tools: [] }
   mocks.operations = [{ id: 'conflict-sync', taskId: 'task', supersedesId: null, sourceFrontier: 'a'.repeat(40), sourceHead: 'b'.repeat(40),
     sourceChanges: ['change'], sourceCommits: ['b'.repeat(40)], mainBase: 'a'.repeat(40), canonicalCommits: [], conflictIndex: 0,
     preparedHead: null, publishedHead: null, alignedHead: null, alignmentCommit: null, state: 'conflict', createdAt: 1 }]

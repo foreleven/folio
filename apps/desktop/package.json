@@ -9,6 +9,8 @@
     "dev": "electron-vite dev",
     "build": "pnpm typecheck && electron-vite build",
     "package": "pnpm build && electron-builder",
+    "test:packaging": "node --test scripts/package-dependencies.check.mjs",
+    "package:smoke": "node scripts/package-smoke.mjs",
     "prototype:wiki-boundary": "node scripts/manual-wiki-boundary-prototype.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",

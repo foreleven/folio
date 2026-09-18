@@ -1,5 +1,4 @@
 import { ExecutionEventSink } from './execution-event-sink'
-import { ExecutionQueue } from './execution-queue'
 import { RecordedUpdate } from '../../shared/harness-events'
 import { randomUUID } from 'node:crypto'
 import { SessionUpdate } from '@agentclientprotocol/sdk/experimental/v2'
@@ -50,7 +49,6 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     const sessions = yield* HarnessSessions
     const events = yield* HarnessEventStore
     const sink = yield* ExecutionEventSink
-    const queue = yield* ExecutionQueue
     const worktrees = yield* TaskWorktrees
     const fs = yield* FileSystem.FileSystem
     const git = yield* makeVaultGit
@@ -75,11 +73,13 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         return pending.ready
       }
       const previous = (yield* store.runs(input.taskId)).find(run => run.id === input.id)
-      if (previous) {
+      if (previous && previous.state !== 'preparing') {
         if (!matches(previous, input)) return yield* failure('invalid-state')
         return yield* Deferred.make<RunRecord, HarnessStoreError>().pipe(
           Effect.tap(ready => Deferred.succeed(ready, previous)))
       }
+      if (!previous || previous.state !== 'preparing' || !previous.owner) return yield* failure('invalid-state')
+      const claim = { id: previous.id, owner: previous.owner }
       if ([...entries.values()].some(entry => entry.input.taskId === input.taskId)) return yield* failure('task-busy')
       const ready = yield* Deferred.make<RunRecord, HarnessStoreError>()
       const entry: Entry = { input, ready, cancelled: false, lifetime: undefined! }
@@ -100,7 +100,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
           baseline = prefix.at(-1)?.commit ?? target.mainBase
         } else {
           if (savedSession.purpose !== 'task') return yield* failure('invalid-state')
-          const checkout = yield* worktrees.ensure(input.taskId)
+          const checkout = yield* worktrees.ensure(input.taskId, claim)
           taskWorktree = checkout.path
           // Only completed save receipts extend the registered baseline; a prepared object is insufficient.
           baseline = (yield* git(checkout.path, ['rev-parse', 'HEAD'])).trim()
@@ -108,7 +108,7 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
             Effect.provideService(SqlClient.SqlClient, sql)))) return yield* failure('invalid-state')
         }
         opened = true
-        const session = yield* sessions.open(input.taskId, input.sessionId)
+        const session = yield* sessions.open(input.taskId, input.sessionId, claim)
         // Provider onIngest hooks can add a short-lived instruction file after
         // resource preparation. Prefix it at the ACP boundary so the Agent gets
         // the hook's prompt even when the caller supplied an unrelated message;
@@ -119,16 +119,16 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
             )
           : ''
         const agentPrompt = providerInstructions.trim() ? `${providerInstructions.trim()}\n\n${input.prompt}` : input.prompt
-        const pendingPrompt = session.prompt({ ...input, prompt: agentPrompt, baselineCommit: baseline }, async () => {
+        const pendingPrompt = session.prompt({ ...input, baselineCommit: baseline }, async () => {
           await Effect.runPromise(read(input.taskId, input.id).pipe(Effect.flatMap(value => Deferred.succeed(ready, value))))
-        })
+        }, agentPrompt)
         prompt = pendingPrompt
         const idle = yield* Effect.tryPromise({ try: () => pendingPrompt, catch: safeError })
         if (!SessionUpdate.isStateUpdate(idle.update) || idle.update.state !== 'idle') return yield* failure('invalid-state')
         yield* sink.flush
-        const tools = (yield* events.messages(input.sessionId)).filter(tool => tool.runId === input.id && tool.kind === 'tool_call')
+        const tools = (yield* events.messages(input.sessionId)).filter(tool => tool.runId === input.id && tool.payload.kind === 'tool_call')
         // An idle event cannot finish known tools whose terminal status has not been persisted.
-        if (tools.some(tool => !['completed', 'failed'].includes(String(tool.data.status)))) return yield* failure('invalid-state')
+        if (tools.some(tool => !['completed', 'failed'].includes(String(tool.payload.data.status)))) return yield* failure('invalid-state')
         const reason = idle.update.stopReason
         const outcome: RunOutcome = executionInterrupted(idle.update._meta) ? 'interrupted' : reason === 'end_turn' ? 'succeeded' : reason === 'cancelled'
           ? (entry.cancelled ? 'cancelled' : 'interrupted') : 'failed'
@@ -136,17 +136,16 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
       })
       entry.lifetime = yield* execute.pipe(
         Effect.onExit(exit => Effect.gen(function*() {
-          // Interruption of this worker ends only its wait. Close the actual client/process and
-          // await the underlying Prompt before finishing SQL, so a late ack cannot reopen the Run.
-          if (opened) {
-            yield* sessions.close(input.taskId, input.sessionId)
-            if (prompt) yield* Effect.promise(() => prompt!.catch(() => undefined))
-          }
-          const saved = opened ? (yield* store.runs(input.taskId)).find(run => run.id === input.id) : undefined
-          if (saved && (saved.state === 'preparing' || saved.state === 'running')) {
-            const outcome = Exit.isSuccess(exit) ? exit.value : entry.cancelled ? 'cancelled' : 'interrupted'
-            yield* sink.finishRun(input.id, outcome, Exit.isFailure(exit) ? 'Execution stopped before a confirmed terminal result.' : undefined)
-          }
+          const outcome = Exit.isSuccess(exit) ? exit.value : entry.cancelled ? 'cancelled' : prompt ? 'interrupted' : 'failed'
+          // Always reap the real processes, even if persisting the result fails.
+          yield* sink.finishRun(input.id, outcome, Exit.isFailure(exit) ? 'Execution stopped before a confirmed terminal result.' : undefined).pipe(
+            Effect.onExit(() => Effect.gen(function* () {
+              if (opened) {
+                yield* sessions.close(input.taskId, input.sessionId)
+                if (prompt) yield* Effect.promise(() => prompt!.catch(() => undefined))
+              }
+            }))
+          )
         })),
         Effect.catch(error => Deferred.fail(ready, safeError(error))),
         Effect.catchCause(() => Deferred.fail(ready, failure('storage'))),
@@ -177,7 +176,6 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
     /** Explicit crash reconciliation never infers success or dispatches a recovery Prompt. */
     const inspect = Effect.fn('HarnessRuns.inspect')(function*(taskId: string, runId: string) {
       const run = yield* read(taskId, runId)
-      const queued = (yield* queue.list(taskId)).some(request => request.id === runId && request.endedAt === null)
       if (run.state !== 'preparing' && run.state !== 'running') return run
       if (shuttingDown || [...entries.values()].some(entry => entry.input.taskId === taskId)) return yield* failure('task-busy')
       return yield* sessions.withStoppedSession(taskId, run.sessionId, history => Effect.gen(function*() {
@@ -193,13 +191,10 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
             const receipt = yield* Schema.decodeUnknownEffect(RecordedUpdate)({ sessionId: run.sessionId, runId: null, connectionId,
               notification: { sessionId: saved.acpSessionId!, update,
                 _meta: { 'folio/eventSequence': index + 1 } } }).pipe(Effect.mapError(safeError))
-            yield* (queued ? sink.appendUpdate(receipt) : events.appendUpdate(receipt))
+            yield* sink.appendUpdate(receipt)
           }
-          if (queued) {
-            yield* sink.flush
-            yield* sink.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
-            yield* sink.flush
-          } else yield* store.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
+          yield* sink.finishRun(runId, 'interrupted', 'Previous execution has stopped. Inspect saved progress before continuing.')
+          yield* sink.flush
         }
         return yield* read(taskId, runId)
       }))

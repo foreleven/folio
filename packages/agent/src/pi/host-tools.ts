@@ -19,9 +19,10 @@ export function makeHostToolDefinitions(cwd: string, execute: PiToolExecutor): T
 }
 
 /** Host-side SDK tools preserve normal output formatting, truncation and file mutation behavior. */
-export function makePiLocalToolExecutor(cwd: string, bash: import('@earendil-works/pi-coding-agent').BashOperations): PiToolExecutor {
+export function makePiLocalToolExecutor(cwd: string, bash: import('@earendil-works/pi-coding-agent').BashOperations,
+  spawn: NonNullable<import('@earendil-works/pi-coding-agent').FindToolOptions['spawn']>): PiToolExecutor {
   const tools = new Map([...createCodingTools(cwd, { bash: { operations: bash } }),
-    createGrepTool(cwd), createFindTool(cwd), createLsTool(cwd)].map(tool => [tool.name, tool]));
+    createGrepTool(cwd, { spawn }), createFindTool(cwd, { spawn }), createLsTool(cwd)].map(tool => [tool.name, tool]));
   return async (name, callId, params, signal, onUpdate) => {
     const tool = tools.get(name);
     if (!tool) throw new Error('Unknown Pi tool.');

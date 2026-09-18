@@ -1,7 +1,7 @@
 import { ModelProfile } from '@folio/agent/config/schema'
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { HarnessStoreError, NewRun, NewSession, NewTask, RunOutcome, RunRecord, SessionBinding, SessionRecord, TaskConfiguration, TaskRecord } from '../../shared/harness'
+import { HarnessStoreError, NewRun, NewSession, NewTask, RunRecord, SessionBinding, SessionRecord, TaskConfiguration, TaskRecord } from '../../shared/harness'
 
 const TaskRow = Schema.Struct({ ...TaskRecord.fields, configuration: Schema.fromJsonString(TaskConfiguration) })
 const SessionRow = Schema.Struct({ ...SessionRecord.fields, modelProfile: Schema.NullOr(Schema.fromJsonString(ModelProfile)) })
@@ -35,9 +35,7 @@ export class HarnessStore extends Context.Service<
     readonly createSession: (input: NewSession) => Effect.Effect<void, HarnessStoreError>
     readonly bindSession: (id: string, binding: SessionBinding) => Effect.Effect<void, HarnessStoreError>
     readonly sessions: (taskId: string) => Effect.Effect<readonly SessionRecord[], HarnessStoreError>
-    readonly reserveRun: (input: NewRun) => Effect.Effect<void, HarnessStoreError>
-    readonly markRunning: (id: string) => Effect.Effect<void, HarnessStoreError>
-    readonly finishRun: (id: string, outcome: RunOutcome, error?: string) => Effect.Effect<void, HarnessStoreError>
+    readonly reserveRun: (input: NewRun, claimOwner: string) => Effect.Effect<void, HarnessStoreError>
     readonly runs: (taskId: string) => Effect.Effect<readonly RunRecord[], HarnessStoreError>
   }
 >()('folio/services/HarnessStore') {
@@ -120,13 +118,14 @@ export class HarnessStore extends Context.Service<
       const runs = Effect.fn('HarnessStore.runs')(
         (taskId: string) =>
           sql`SELECT id, task_id AS taskId, session_id AS sessionId, prompt, purpose, resumes_run_id AS resumesRunId,
-        baseline_commit AS baselineCommit, state, sync_state AS syncState, created_at AS createdAt, ended_at AS endedAt, error
-        FROM runs WHERE task_id=${taskId} ORDER BY sequence`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(RunRecord)))),
+        baseline_commit AS baselineCommit, state, sync_state AS syncState, sequence, source, owner, cancel_requested AS cancelRequested,
+        started_at AS startedAt, created_at AS createdAt, ended_at AS endedAt, error
+        FROM runs WHERE task_id=${taskId} ORDER BY sequence`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({ ...RunRecord.fields, cancelRequested: Schema.Number })))), Effect.map(rows => rows.map(row => ({ ...row, cancelRequested: row.cancelRequested === 1 })))),
         Effect.mapError(storageError)
       )
 
-      /** Transactionally reserves one Task across all its Sessions before dispatch; recovery never rewrites the old Run. */
-      const reserveRun = Effect.fn('HarnessStore.reserveRun')(function* (input: NewRun) {
+      /** Verifies Git and Session readiness before filling the baseline of the already-claimed Run. */
+      const reserveRun = Effect.fn('HarnessStore.reserveRun')(function* (input: NewRun, claimOwner: string) {
         const value = yield* Schema.decodeUnknownEffect(NewRun)(input)
         yield* sql.withTransaction(
           Effect.gen(function* () {
@@ -157,7 +156,7 @@ export class HarnessStore extends Context.Service<
                 return yield* failure('task-busy')
               }
             }
-            const active = yield* sql`SELECT id FROM runs WHERE task_id=${value.taskId} AND state IN ('preparing', 'running')`
+            const active = yield* sql`SELECT id FROM runs WHERE task_id=${value.taskId} AND id<>${value.id} AND state IN ('preparing', 'running')`
             if (active.length) return yield* failure('task-busy')
             if (value.purpose === 'recovery') {
               const previous = yield* sql`SELECT id FROM runs WHERE id=${value.resumesRunId} AND task_id=${value.taskId}
@@ -166,28 +165,17 @@ export class HarnessStore extends Context.Service<
                 return yield* failure('invalid-state')
               }
             } else if (value.resumesRunId !== null) return yield* failure('invalid-state')
-            yield* sql`INSERT INTO runs (id, task_id, session_id, prompt, purpose, resumes_run_id, baseline_commit, state, sync_state, created_at)
-          VALUES (${value.id}, ${value.taskId}, ${value.sessionId}, ${value.prompt}, ${value.purpose}, ${value.resumesRunId},
-          ${value.baselineCommit}, 'preparing', ${value.purpose === 'conflict-resolution' ? 'not-required' : 'pending'}, ${yield* now})`
+            const changed = yield* sql`UPDATE runs SET baseline_commit=${value.baselineCommit},
+              sync_state=${value.purpose === 'conflict-resolution' ? 'not-required' : 'pending'}
+              WHERE id=${value.id} AND task_id=${value.taskId} AND session_id=${value.sessionId}
+                AND prompt=${value.prompt} AND purpose=${value.purpose} AND resumes_run_id IS ${value.resumesRunId}
+                AND owner=${claimOwner} AND state='preparing' AND (baseline_commit IS NULL OR baseline_commit=${value.baselineCommit}) RETURNING id`
+            if (!changed.length) return yield* failure('invalid-state')
           })
         )
       }, Effect.mapError(storageError))
 
-      /** Records confirmed dispatch; acceptance alone does not release the Task reservation. */
-      const markRunning = Effect.fn('HarnessStore.markRunning')(function* (id: string) {
-        const changed = yield* sql`UPDATE runs SET state='running' WHERE id=${id} AND state='preparing' RETURNING id`
-        if (!changed.length) return yield* failure('invalid-state')
-      }, Effect.mapError(storageError))
-
-      /** Caller must confirm execution stopped. Terminal records are immutable; sync stays pending for filesystem inspection. */
-      const finishRun = Effect.fn('HarnessStore.finishRun')(function* (id: string, input: RunOutcome, error?: string) {
-        const outcome = yield* Schema.decodeUnknownEffect(RunOutcome)(input)
-        const changed = yield* sql`UPDATE runs SET state=${outcome}, ended_at=${yield* now}, error=${error ?? null}
-        WHERE id=${id} AND state IN ('preparing', 'running') RETURNING id`
-        if (!changed.length) return yield* failure('invalid-state')
-      }, Effect.mapError(storageError))
-
-      return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, markRunning, finishRun, runs })
+      return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, runs })
     })
   )
 }

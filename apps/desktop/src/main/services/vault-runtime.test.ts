@@ -1,13 +1,13 @@
 import { AgentWorkerPool } from './agent-worker-pool'
 import { DatabaseSync } from 'node:sqlite'
-import { ExecutionEventLog } from './execution-event-log'
+import { RunFileStore } from './run-files'
 import { ExecutionNotifications } from './execution-scheduler'
 import { NodeServices } from '@effect/platform-node'
-import { ConfigProvider, Context, Effect, Fiber, Layer, ManagedRuntime, Stream } from 'effect'
+import { ConfigProvider, Context, Deferred, Effect, Fiber, Layer, ManagedRuntime, Stream } from 'effect'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { VaultRuntime } from './vault-runtime'
 import { VaultContext } from './vault-context'
 import { TaskService } from './task-service'
@@ -22,7 +22,6 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
     Layer.merge(VaultRuntime.layer, VaultService.layer).pipe(
       Layer.provide(AgentWorkerPool.layer),
       Layer.provide(ExecutionNotifications.layer),
-      Layer.provideMerge(ExecutionEventLog.layer),
       Layer.provide(agent),
       Layer.provide(ModelService.layer({ environment: {} })),
       Layer.provide(
@@ -41,6 +40,37 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
     )
   )
 }
+
+it('keeps Routine admission and retries on the reserved Task revision after edits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-routine-revision-'))
+  const runtime = createRuntime(root)
+  try {
+    await mkdir(join(root, 'wiki'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'wiki'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const input = { id: '11111111-1111-4111-8111-111111111111', expectedRevision: null,
+        name: 'Original', prompt: 'Original prompt', agent: 'codex' as const, model: null,
+        skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'UTC', enabled: true }
+      yield* tasks.saveRoutine(input)
+      const reserved = yield* tasks.prepareRoutine({ routineId: input.id })
+      yield* tasks.saveRoutine({ ...input, expectedRevision: 1, prompt: 'Edited prompt', agent: 'pi',
+        model: { providerId: 'different-provider', modelId: 'different-model', thinkingLevel: 'off' } })
+      const submitted = yield* tasks.runRoutine({ routineId: input.id })
+      expect(submitted.task).toEqual(reserved.task)
+      expect(submitted.execution.routineRevision).toBe(1)
+      expect(submitted.run.prompt).toMatch(/^Original prompt\n/)
+      expect((yield* tasks.get(reserved.task.id)).sessions).toMatchObject([{ agent: 'codex', modelProfile: null }])
+      expect((yield* tasks.runRoutine({ routineId: input.id })).run.id).toBe(submitted.run.id)
+      yield* tasks.cancelRun(reserved.task.id, submitted.run.id)
+      const retry = yield* tasks.runRoutine({ routineId: input.id })
+      expect(retry.task.id).toBe(reserved.task.id)
+      expect(retry.run.id).not.toBe(submitted.run.id)
+      expect(retry.run.prompt).toMatch(/^Original prompt\n/)
+      yield* tasks.cancelRun(reserved.task.id, retry.run.id)
+    }))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+})
 
 it('builds reusable isolated Vault services without starting an Agent', async () => {
   const root = await mkdtemp(join(tmpdir(), 'folio-vault-context-'))
@@ -86,7 +116,7 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         const admitted = yield* tasks.startRun(intent)
         expect(admitted.state).toBe('queued')
         expect(yield* tasks.startRun(intent)).toEqual(admitted)
-        expect((yield* tasks.get(taskId)).runs).toEqual([])
+        expect((yield* tasks.get(taskId)).runs).toHaveLength(1)
         expect((yield* tasks.get(taskId)).task.worktreeState).toBe('pending')
         expect(yield* tasks.complete(taskId).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
         expect(yield* Context.get(second, TaskService).claimExecution('b-worker')).toBeNull()
@@ -95,8 +125,8 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         yield* tasks.executeRequest(claimed!)
         // Runtime discovery fails only inside the Worker, leaving a visible execution failure.
         const failed = yield* tasks.get(taskId)
-        expect(failed.executions).toMatchObject([{ id: runId, state: 'failed', endedAt: expect.any(Number) }])
-        expect(failed.runs).toEqual([])
+        expect(failed.runs).toMatchObject([{ id: runId, state: 'failed', endedAt: expect.any(Number) }])
+        expect(failed.runs).toMatchObject([{ state: 'failed', baselineCommit: null }])
         expect(yield* tasks.claimExecution('next-worker')).toBeNull()
         const routine = (yield* tasks.routines)[0]!
         yield* tasks.saveRoutine({ id: routine.id, name: routine.name, prompt: routine.prompt, agent: routine.agent,
@@ -110,6 +140,8 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         const coalesced = yield* tasks.runRoutine({ routineId: routine.id })
         expect(coalesced.run.id).toBe(queuedRoutine.run.id)
         expect(coalesced.execution.windowEnd).toBe(queuedRoutine.execution.windowEnd)
+        expect(yield* tasks.cancelRun(taskId, queuedRoutine.run.id).pipe(Effect.flip)).toMatchObject({ reason: 'not-found' })
+        expect((yield* tasks.get(queuedRoutine.task.id)).runs[0]?.cancelRequested).toBe(false)
         yield* tasks.cancelRun(queuedRoutine.task.id, queuedRoutine.run.id)
         expect((yield* tasks.runRoutine(routineIntent)).run.state).toBe('cancelled')
         expect(yield* tasks.claimExecution('after-cancellation')).toBeNull()
@@ -145,28 +177,29 @@ it.skipIf(process.platform === 'win32')('executes queued requests through the re
       yield* tasks.startRun({ id: runId, taskId, sessionId, prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
       yield* tasks.executeRequest((yield* tasks.claimExecution('worker-success'))!)
       const success = yield* tasks.get(taskId)
-      expect(success.executions).toMatchObject([{ state: 'succeeded' }])
       expect(success.runs).toMatchObject([{ state: 'succeeded' }])
-      expect((yield* tasks.history(taskId, sessionId)).messages.some(message => message.kind === 'message')).toBe(true)
+      expect(success.runs).toMatchObject([{ state: 'succeeded' }])
+      expect((yield* tasks.history(taskId, sessionId)).messages.some(message => message.payload.kind === 'message')).toBe(true)
       const nextId = '99999999-9999-4999-8999-999999999999'
       yield* tasks.startRun({ id: nextId, taskId, sessionId, prompt: 'running', purpose: 'execution', resumesRunId: null })
       const worker = yield* tasks.executeRequest((yield* tasks.claimExecution('worker-cancel'))!).pipe(Effect.forkScoped)
-      while (!(yield* tasks.get(taskId)).executions?.some(request => request.id === nextId && request.state === 'running')) {
+      while (!(yield* tasks.get(taskId)).runs?.some(request => request.id === nextId && request.state === 'running')) {
         yield* Effect.sleep(20)
       }
       yield* tasks.cancelRun(taskId, nextId)
       yield* Fiber.join(worker)
       const cancelled = yield* tasks.get(taskId)
-      expect(cancelled.executions?.find(request => request.id === nextId)).toMatchObject({ state: 'cancelled', endedAt: expect.any(Number) })
+      expect(cancelled.runs?.find(request => request.id === nextId)).toMatchObject({ state: 'cancelled', endedAt: expect.any(Number) })
       expect(cancelled.runs.find(run => run.id === nextId)).toMatchObject({ state: 'cancelled' })
       expect(yield* tasks.claimExecution('after-cleanup')).toBeNull()
       const crashedId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
       yield* tasks.startRun({ id: crashedId, taskId, sessionId, prompt: 'crash', purpose: 'execution', resumesRunId: null })
       yield* tasks.executeRequest((yield* tasks.claimExecution('worker-crash'))!)
-      expect((yield* tasks.get(taskId)).executions?.find(request => request.id === crashedId)).toMatchObject({ state: 'interrupted' })
+      expect((yield* tasks.get(taskId)).runs?.find(request => request.id === crashedId)).toMatchObject({ state: 'interrupted' })
       expect(yield* tasks.recoverExecutionState).toBe(0)
       expect(yield* tasks.claimExecution('no-automatic-retry')).toBeNull()
-      expect(yield* (yield* ExecutionEventLog).unstoppedProcesses(vault.id)).toEqual([])
+      yield* Effect.promise(() => expect(readFile(join(root, 'config', 'execution-events.db'))).rejects.toMatchObject({ code: 'ENOENT' }))
+      expect(yield* Effect.promise(() => new RunFileStore(join(root, 'config', 'vaults', vault.id), vault.id).list())).toEqual([])
     }).pipe(Effect.scoped, Effect.timeout('20 seconds')))
   } finally {
     await runtime.dispose()
@@ -174,7 +207,7 @@ it.skipIf(process.platform === 'win32')('executes queued requests through the re
   }
 }, 25000)
 
-it('recovers a claim interrupted before process startup and preserves queued requests across application restart', async () => {
+it('retains a claim with a missing recovery file and preserves queued requests across restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'folio-queue-restart-'))
   let runtime = createRuntime(root)
   let vaultId = ''
@@ -198,13 +231,13 @@ it('recovers a claim interrupted before process startup and preserves queued req
     runtime = createRuntime(root)
     await runtime.runPromise(Effect.gen(function* () {
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
-      expect(yield* tasks.claimExecution('new-app')).toMatchObject({ id: queuedId })
+      expect(yield* tasks.claimExecution('new-app')).toBeNull()
       const detail = yield* tasks.get(taskId)
-      expect(detail.executions).toMatchObject([
-        { id: interruptedId, state: 'interrupted', owner: 'old-app' },
-        { id: queuedId, state: 'preparing', owner: 'new-app' }
+      expect(detail.runs).toMatchObject([
+        { id: interruptedId, state: 'preparing', owner: 'old-app' },
+        { id: queuedId, state: 'queued', owner: null }
       ])
-      expect(detail.runs).toEqual([])
+      expect(detail.runs).toHaveLength(2)
       expect(detail.task.worktreeState).toBe('pending')
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
@@ -225,9 +258,12 @@ it('retains unreconciled live process ownership after restart instead of redispa
       yield* tasks.create({ id: taskId, goal: 'Do not steal live ownership', agent: 'codex' })
       yield* tasks.openSession({ taskId, sessionId, agent: 'codex' })
       yield* tasks.startRun({ id: runId, taskId, sessionId, prompt: 'notes', purpose: 'execution', resumesRunId: null })
-      yield* tasks.claimExecution('old-app')
-      yield* (yield* ExecutionEventLog).append({ eventId: 'old-app:process-started', vaultId, taskId, sessionId,
-        runId, attemptId: 'old-app', payload: { _tag: 'process-started', pid: process.pid } })
+      const run = (yield* tasks.claimExecution('old-app'))!
+      const directory = Context.get(yield* (yield* VaultRuntime).open(vaultId), VaultContext).directory
+      const files = new RunFileStore(directory, vaultId)
+      yield* Effect.promise(() => files.begin(run))
+      yield* Effect.promise(() => files.update(run.id, 'old-app', state => ({ ...state,
+        processes: [{ pid: process.pid, stopped: false }] })))
     }))
     await runtime.dispose()
     runtime = createRuntime(root)
@@ -235,14 +271,14 @@ it('retains unreconciled live process ownership after restart instead of redispa
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
       expect(yield* tasks.recoverExecutionState).toBe(1)
       expect(yield* tasks.claimExecution('new-app')).toBeNull()
-      expect((yield* tasks.get(taskId)).executions).toMatchObject([{ id: runId, state: 'preparing', owner: 'old-app', endedAt: null }])
-      expect((yield* tasks.get(taskId)).runs).toEqual([])
+      expect((yield* tasks.get(taskId)).runs).toMatchObject([{ id: runId, state: 'preparing', owner: 'old-app', endedAt: null }])
+      expect((yield* tasks.get(taskId)).runs).toHaveLength(1)
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-it.skipIf(process.platform === 'win32').each(['run-finished', 'request-finished'] as const)(
-  'recovers a missing %s receipt after real process cleanup without another Agent dispatch', async lostReceipt => {
+it.skipIf(process.platform === 'win32')(
+  'recovers a failed terminal database commit after real process cleanup without another Agent dispatch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'folio-terminal-recovery-'))
     const fixture = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
     await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
@@ -263,12 +299,11 @@ it.skipIf(process.platform === 'win32').each(['run-finished', 'request-finished'
         yield* tasks.openSession({ taskId, sessionId, agent: 'codex' })
         yield* tasks.startRun({ id: runId, taskId, sessionId, prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
         const request = (yield* tasks.claimExecution('original-worker'))!
-        journal = new DatabaseSync(join(root, 'config', 'execution-events.db'))
-        // The fixed fixture tag is the only interpolated value; no user SQL enters this trigger.
-        journal.exec(`CREATE TRIGGER lose_terminal BEFORE INSERT ON execution_events
-          WHEN json_extract(NEW.payload, '$._tag')='${lostReceipt}' BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END`)
+        journal = new DatabaseSync(join(Context.get(yield* (yield* VaultRuntime).open(vaultId), VaultContext).directory, 'data.db'))
+        journal.exec(`CREATE TRIGGER lose_terminal BEFORE UPDATE OF state ON runs
+          WHEN NEW.state='succeeded' BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END`)
         expect(yield* tasks.executeRequest(request).pipe(Effect.exit)).toMatchObject({ _tag: 'Failure' })
-        expect((yield* tasks.get(taskId)).executions?.[0]?.endedAt).toBeNull()
+        expect((yield* tasks.get(taskId)).runs?.[0]?.endedAt).toBeNull()
       }).pipe(Effect.timeout('20 seconds')))
       await runtime.dispose()
       journal!.exec('DROP TRIGGER lose_terminal')
@@ -278,14 +313,130 @@ it.skipIf(process.platform === 'win32').each(['run-finished', 'request-finished'
         const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
         expect(yield* tasks.recoverExecutionState).toBe(0)
         const detail = yield* tasks.get(taskId)
-        const outcome = lostReceipt === 'run-finished' ? 'interrupted' : 'succeeded'
-        expect(detail.executions).toMatchObject([{ id: runId, state: outcome, endedAt: expect.any(Number) }])
+        const outcome = 'succeeded'
+        expect(detail.runs).toMatchObject([{ id: runId, state: outcome, endedAt: expect.any(Number) }])
         expect(detail.runs).toMatchObject([{ id: runId, state: outcome }])
         expect(yield* tasks.claimExecution('must-not-redispatch')).toBeNull()
-        const events = yield* (yield* ExecutionEventLog).after(vaultId, 0)
-        expect(events.filter(event => event.payload._tag === 'process-started')).toHaveLength(1)
-        expect(events.filter(event => event.payload._tag === 'run-reserved')).toHaveLength(1)
+        const directory = Context.get(yield* (yield* VaultRuntime).open(vaultId), VaultContext).directory
+        const log = yield* Effect.promise(() => readFile(join(directory, 'logs', 'runs', runId, 'original-worker.jsonl'), 'utf8'))
+        expect(log.split('\n').filter(line => line && JSON.parse(line).event === 'process-started')).toHaveLength(1)
       }).pipe(Effect.timeout('20 seconds')))
     } finally { journal?.close(); await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
   }, 30000
 )
+
+it('retires old services before deletion, allows other Vaults, and recovers from a failed deletion callback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-vault-retire-'))
+  const closedFiles: Array<string | null> = []
+  const originalClose = DatabaseSync.prototype.close
+  const closeDatabase = vi.spyOn(DatabaseSync.prototype, 'close').mockImplementation(function (this: DatabaseSync) {
+    closedFiles.push(this.location())
+    originalClose.call(this)
+  })
+  const runtime = createRuntime(root)
+  try {
+    await mkdir(join(root, 'a'))
+    await mkdir(join(root, 'b'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vaults = yield* VaultService
+      const registry = yield* VaultRuntime
+      const config = yield* ConfigService
+      const a = yield* vaults.register(join(root, 'a'))
+      const b = yield* vaults.register(join(root, 'b'))
+      const stale = Context.get(yield* registry.open(a.id), TaskService)
+      const other = Context.get(yield* registry.open(b.id), TaskService)
+      expect(yield* registry.withClosed(a.id, Effect.fail('fixture delete failure')).pipe(Effect.flip)).toBe('fixture delete failure')
+      expect(yield* stale.list.pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+      const fresh = Context.get(yield* registry.open(a.id), TaskService)
+      expect(fresh).not.toBe(stale)
+      const closedBefore = closedFiles.length
+      yield* registry.withClosed(a.id, Effect.gen(function* () {
+        expect(closedFiles.slice(closedBefore)).toContain(join(root, 'config/vaults', a.id, 'data.db'))
+        expect(closedFiles.slice(closedBefore)).not.toContain(join(root, 'config/vaults', b.id, 'data.db'))
+        expect(yield* fresh.list.pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+        expect(yield* other.list).toEqual([])
+        yield* vaults.remove(a)
+        yield* config.removeVault(a.id)
+      }))
+      expect(yield* registry.open(a.id).pipe(Effect.flip)).toMatchObject({ reason: 'not-found' })
+      expect(yield* other.list).toEqual([])
+    }))
+  } finally { await runtime.dispose(); closeDatabase.mockRestore(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+it('serializes reopening with deletion and rejects deletion while a claimed Run is unverified', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-vault-retire-race-'))
+  const runtime = createRuntime(root)
+  try {
+    await mkdir(join(root, 'a'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vaults = yield* VaultService
+      const registry = yield* VaultRuntime
+      const a = yield* vaults.register(join(root, 'a'))
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let reopened = false
+      const deletion = yield* registry.withClosed(a.id, Deferred.succeed(entered, undefined).pipe(
+        Effect.andThen(Deferred.await(release)))).pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
+      const opener = yield* registry.open(a.id).pipe(Effect.tap(() => Effect.sync(() => { reopened = true })), Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(reopened).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(deletion)
+      const tasks = Context.get(yield* Fiber.join(opener), TaskService)
+      const taskId = '22222222-2222-4222-8222-222222222222'
+      const sessionId = '33333333-3333-4333-8333-333333333333'
+      yield* tasks.create({ id: taskId, goal: 'read', agent: 'codex' })
+      yield* tasks.openSession({ taskId, sessionId, agent: 'codex' })
+      yield* tasks.startRun({ id: '44444444-4444-4444-8444-444444444444', taskId, sessionId, prompt: 'read', purpose: 'execution', resumesRunId: null })
+      yield* tasks.claimExecution('not-started')
+      let deleted = false
+      expect(yield* registry.withClosed(a.id, Effect.sync(() => { deleted = true })).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+      expect(deleted).toBe(false)
+      expect((yield* tasks.get(taskId)).runs[0]?.state).toBe('preparing')
+    }))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+it.skipIf(process.platform === 'win32')('stops a live Agent and joins its receipt before deleting Vault files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-delete-live-agent-'))
+  const fixture = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
+  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
+  const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+    entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex') }) }))
+  try {
+    await mkdir(join(root, 'wiki'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vaults = yield* VaultService
+      const registry = yield* VaultRuntime
+      const config = yield* ConfigService
+      const vault = yield* vaults.register(join(root, 'wiki'))
+      const context = yield* registry.open(vault.id)
+      const tasks = Context.get(context, TaskService)
+      const directory = Context.get(context, VaultContext).directory
+      const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const sessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const runId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+      yield* tasks.create({ id: taskId, goal: 'running', agent: 'codex' })
+      yield* tasks.openSession({ taskId, sessionId, agent: 'codex' })
+      yield* tasks.startRun({ id: runId, taskId, sessionId, prompt: 'running', purpose: 'execution', resumesRunId: null })
+      const request = (yield* tasks.claimExecution('deletion-worker'))!
+      const worker = yield* tasks.executeRequest(request).pipe(Effect.forkChild)
+      while ((yield* tasks.get(taskId)).runs[0]?.state !== 'running') yield* Effect.sleep(10)
+      const files = new RunFileStore(directory, vault.id)
+      const pids = (yield* Effect.promise(() => files.list())).flatMap(state => state.processes.map(native => native.pid))
+      expect(pids.length).toBeGreaterThan(0)
+      yield* registry.withClosed(vault.id, Effect.gen(function* () {
+        expect(yield* Effect.promise(() => files.list())).toEqual([])
+        for (const pid of pids) expect(() => process.kill(pid, 0)).toThrow()
+        yield* vaults.remove(vault)
+        yield* config.removeVault(vault.id)
+      }))
+      yield* Fiber.await(worker)
+      expect(yield* tasks.list.pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+      expect((yield* config.get).vaults).toEqual([])
+    }).pipe(Effect.timeout('20 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 30000)

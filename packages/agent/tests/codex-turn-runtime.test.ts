@@ -47,7 +47,7 @@ it("waits for both native completion and acknowledgement and replaces streamed o
       }
     }
     expect(tool?.content).toEqual([{ type: "content", content: { type: "text", text: "one two" } }]);
-    expect(input.updates).toContainEqual({ sessionUpdate: "agent_message", messageId: codexItemId(first.nativeTurnId, "message"),
+    expect(input.updates).toContainEqual({ sessionUpdate: "agent_message", messageId: codexItemId(first.nativeTurnId, "message"), _meta: { "folio/messageComplete": true },
       content: [{ type: "text", text: "final answer" }] });
     const second = yield* runtime.prompt("early-completion");
     expect(yield* second.completion).toBe("end_turn");

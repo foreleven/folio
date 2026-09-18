@@ -1,7 +1,8 @@
+import { reserveClaimedRun, finishClaimedRun } from './testing/claimed-run'
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
@@ -150,6 +151,34 @@ it('publishes one staged coordinator resolution and converges main with the Task
   )
 }, 15_000)
 
+it('keeps conflict evidence and staged validation limited to literal file names', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const { workspace, task, applications, sync, git } = yield* setup
+    const selected = 'wiki/[draft].md'
+    const unrelated = 'wiki/d.md'
+    yield* Effect.promise(() => writeFile(join(task.path, selected), 'task version\n'))
+    const source = yield* applications.save({ id: 'literal-task', taskId: 'task', expectedParent: task.baselineCommit, paths: [selected] })
+    yield* Effect.promise(async () => {
+      await writeFile(join(workspace.workspace, selected), 'main version\n')
+      await writeFile(join(workspace.workspace, unrelated), 'unrelated executable\n')
+      await chmod(join(workspace.workspace, unrelated), 0o755)
+    })
+    yield* applications.save({ id: 'literal-main', taskId: null, expectedParent: task.baselineCommit, paths: [selected, unrelated] })
+    const operation = yield* sync.prepare({ id: 'literal-conflict', taskId: 'task', expectedSourceHead: source.commit })
+    expect(operation.state).toBe('conflict')
+    const context = yield* sync.resolutionContext('task', operation.id)
+    expect(context.files).toEqual([selected])
+    expect(context.canonicalDiff).toContain('+main version')
+    expect(context.canonicalDiff).not.toContain('unrelated executable')
+    expect(context.taskDiff).toContain('+task version')
+    yield* Effect.promise(() => writeFile(join(context.directory, selected), 'resolved version\n'))
+    yield* git(context.directory, ['--literal-pathspecs', 'add', '--', selected])
+    expect((yield* sync.resolve(operation.id)).state).toBe('aligned')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, unrelated), 'utf8'))).toBe('unrelated executable\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, selected), 'utf8'))).toBe('resolved version\n')
+  }).pipe(Effect.provide(layer())))
+}, 15_000)
+
 it('accepts an ended conflict Run by staging its file-only coordinator result', async () => {
   await Effect.runPromise(
     Effect.gen(function* () {
@@ -169,9 +198,9 @@ it('accepts an ended conflict Run by staging its file-only coordinator result', 
       yield* store.createSession({ id: 'conflict-session', taskId: 'task', agent: 'pi', adapterVersion: 'fixture',
         purpose: 'conflict-resolution', syncOperationId: operation.id })
       yield* store.bindSession('conflict-session', { acpSessionId: 'conflict-acp', nativeSessionId: null })
-      yield* store.reserveRun({ id: 'conflict-run', taskId: 'task', sessionId: 'conflict-session', prompt: 'resolve',
+      yield* reserveClaimedRun({ id: 'conflict-run', taskId: 'task', sessionId: 'conflict-session', prompt: 'resolve',
         purpose: 'conflict-resolution', resumesRunId: null, baselineCommit: operation.mainBase })
-      yield* store.finishRun('conflict-run', 'succeeded')
+      yield* finishClaimedRun('conflict-run', 'succeeded')
       expect((yield* store.runs('task')).at(-1)).toMatchObject({ purpose: 'conflict-resolution', syncState: 'not-required' })
       expect(yield* sync.acceptAgentResolution('task', operation.id, 'unknown').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
 
@@ -201,9 +230,9 @@ it('retries conflict Run post-processing after a lost publish receipt', async ()
       yield* store.createSession({ id: 'terminal-retry-session', taskId: 'task', agent: 'pi', adapterVersion: 'fixture',
         purpose: 'conflict-resolution', syncOperationId: operation.id })
       yield* store.bindSession('terminal-retry-session', { acpSessionId: 'terminal-retry-acp', nativeSessionId: null })
-      yield* store.reserveRun({ id: 'terminal-retry-run', taskId: 'task', sessionId: 'terminal-retry-session', prompt: 'resolve',
+      yield* reserveClaimedRun({ id: 'terminal-retry-run', taskId: 'task', sessionId: 'terminal-retry-session', prompt: 'resolve',
         purpose: 'conflict-resolution', resumesRunId: null, baselineCommit: operation.mainBase })
-      yield* store.finishRun('terminal-retry-run', 'succeeded')
+      yield* finishClaimedRun('terminal-retry-run', 'succeeded')
 
       // Simulate a process loss after the canonical Git commit has moved main but before the
       // terminal acceptance receipt can be persisted. The Run itself stays durably succeeded.
@@ -239,9 +268,9 @@ it('retries conflict Run post-processing after a lost alignment receipt', async 
       yield* store.createSession({ id: 'alignment-retry-session', taskId: 'task', agent: 'pi', adapterVersion: 'fixture',
         purpose: 'conflict-resolution', syncOperationId: operation.id })
       yield* store.bindSession('alignment-retry-session', { acpSessionId: 'alignment-retry-acp', nativeSessionId: null })
-      yield* store.reserveRun({ id: 'alignment-retry-run', taskId: 'task', sessionId: 'alignment-retry-session', prompt: 'resolve',
+      yield* reserveClaimedRun({ id: 'alignment-retry-run', taskId: 'task', sessionId: 'alignment-retry-session', prompt: 'resolve',
         purpose: 'conflict-resolution', resumesRunId: null, baselineCommit: operation.mainBase })
-      yield* store.finishRun('alignment-retry-run', 'succeeded')
+      yield* finishClaimedRun('alignment-retry-run', 'succeeded')
 
       // Simulate a process loss after the Task checkout has advanced but before the final receipt.
       yield* sql`CREATE TRIGGER fail_terminal_align BEFORE UPDATE OF state ON git_sync_operations
@@ -880,10 +909,10 @@ it('blocks Run admission until an unfinished synchronization is aligned', async 
         resumesRunId: null,
         baselineCommit: source.commit
       }
-      expect(yield* store.reserveRun(run).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+      expect(yield* reserveClaimedRun(run).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
       yield* sync.publish(prepared.id)
       const aligned = yield* sync.align(prepared.id)
-      yield* store.reserveRun({ ...run, id: 'admitted-run', baselineCommit: aligned.alignedHead! })
+      yield* reserveClaimedRun({ ...run, id: 'admitted-run', baselineCommit: aligned.alignedHead! })
       expect(yield* store.runs('task')).toMatchObject([{ id: 'admitted-run', baselineCommit: aligned.alignedHead }])
     }).pipe(Effect.provide(layer()))
   )
@@ -896,8 +925,8 @@ it('projects one explicit wiki save and its synchronization checkpoints onto eve
       yield* store.createSession({ id: 'sync-session', taskId: 'task', agent: 'pi', adapterVersion: 'fixture', purpose: 'task', syncOperationId: null })
       yield* store.bindSession('sync-session', { acpSessionId: 'sync-acp', nativeSessionId: null })
       const finishRun = Effect.fn('fixture.finishRun')(function* (id: string, baselineCommit: string) {
-        yield* store.reserveRun({ id, taskId: 'task', sessionId: 'sync-session', prompt: id, purpose: 'execution', resumesRunId: null, baselineCommit })
-        yield* store.finishRun(id, 'succeeded')
+        yield* reserveClaimedRun({ id, taskId: 'task', sessionId: 'sync-session', prompt: id, purpose: 'execution', resumesRunId: null, baselineCommit })
+        yield* finishClaimedRun(id, 'succeeded')
       })
       const saveRunWiki = Effect.fn('fixture.saveRunWiki')(function* (id: string, runIds: readonly [string, ...string[]], parent: string, path: string, contents: string) {
         yield* Effect.promise(() => writeFile(join(task.path, path), contents))

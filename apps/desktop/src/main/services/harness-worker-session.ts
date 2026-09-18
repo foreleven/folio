@@ -39,7 +39,8 @@ export const openHarnessWorkerSession = Effect.fn('HarnessWorkerSession.open')(f
   let activeRun: string | null = null
   let lease: WorkerLease | undefined
   yield* Effect.addFinalizer(() => Effect.promise(async () => { await lease?.close() }))
-  const call = <A>(effect: Effect.Effect<A, HarnessStoreError>) => Effect.runPromise(effect.pipe(
+  const guard = yield* sink.guard(session.id)
+  const call = <A>(effect: Effect.Effect<A, HarnessStoreError>) => Effect.runPromise(guard(effect).pipe(
     // Interrupt and join failed storage operations before a later terminal receipt is published.
     Effect.timeout(10000), Effect.mapError(error => error instanceof HarnessStoreError ? error
       : new HarnessStoreError({ reason: 'storage', message: 'Worker event persistence timed out.' }))
@@ -55,6 +56,7 @@ export const openHarnessWorkerSession = Effect.fn('HarnessWorkerSession.open')(f
   return yield* Effect.tryPromise({ try: async () => {
     const environment = { ...process.env, ...options.environment,
       PATH: [...(options.executableDirectories ?? []), process.env.PATH ?? ''].join(delimiter) }
+    await call(sink.workerStarting(session.id))
     lease = await pool.acquire({ entrypoint: options.entrypoint, options: workerOptions, environment,
       onSessionBound: async nativeSessionId => {
         if (session.nativeSessionId && session.nativeSessionId !== nativeSessionId) throw new Error('Native Session identity changed.')
@@ -75,7 +77,7 @@ export const openHarnessWorkerSession = Effect.fn('HarnessWorkerSession.open')(f
     if (session.nativeSessionId && session.nativeSessionId !== binding.nativeSessionId) throw new Error('Native Session identity changed.')
     return {
       pid: binding.processId, connectionId,
-      prompt: async (input: NewRun, onReserved?: () => Promise<void>) => {
+      prompt: async (input: NewRun, onReserved?: () => Promise<void>, agentPrompt = input.prompt) => {
         if (activeRun) throw new Error('Worker already has an active execution.')
         if (input.taskId !== task.id || input.sessionId !== session.id) throw new Error('Execution does not belong to this Worker Session.')
         activeRun = input.id
@@ -83,7 +85,7 @@ export const openHarnessWorkerSession = Effect.fn('HarnessWorkerSession.open')(f
           await call(sink.reserveRun(input))
           await onReserved?.()
           await call(sink.markRunning(input.id))
-          return await lease!.client.execute(input.prompt)
+          return await lease!.client.execute(agentPrompt)
         } finally { activeRun = null }
       },
       cancel: () => lease!.client.cancel(),

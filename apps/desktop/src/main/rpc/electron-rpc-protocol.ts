@@ -1,7 +1,7 @@
 import { VaultWindowContexts } from '../services/vault-window-contexts'
 import { ipcMain, type IpcMainEvent, type WebContents, type WebContentsDidStartNavigationEventParams } from 'electron'
 import { Effect, Layer, Option, Queue } from 'effect'
-import { type RpcMessage, RpcSerialization, RpcServer } from 'effect/unstable/rpc'
+import { RpcSerialization, RpcServer } from 'effect/unstable/rpc'
 import { ELECTRON_RPC_REQUEST_CHANNEL, ELECTRON_RPC_RESPONSE_CHANNEL, type ElectronRpcFrame, isElectronRpcFrame } from '../../shared/rpc/electron-rpc'
 import { isElectronRpcClientMessage } from '../../shared/rpc/electron-rpc-message'
 

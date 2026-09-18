@@ -1,3 +1,4 @@
+import { reserveClaimedRun } from './testing/claimed-run'
 import { AgentWorkerPool } from './agent-worker-pool'
 import { protocolTestSink } from './testing/execution-event-sink'
 import { NodeServices } from '@effect/platform-node'
@@ -132,7 +133,7 @@ describe.skipIf(process.platform === 'win32')('application-owned Harness session
       await app.runPromise(Effect.gen(function*() {
         const store = yield* HarnessStore
         yield* store.bindSession('a', { acpSessionId: 'fixture', nativeSessionId: null })
-        yield* store.reserveRun({ id: 'uncertain', taskId: 'a', sessionId: 'a', prompt: 'may have run', purpose: 'execution', resumesRunId: null,
+        yield* reserveClaimedRun({ id: 'uncertain', taskId: 'a', sessionId: 'a', prompt: 'may have run', purpose: 'execution', resumesRunId: null,
           baselineCommit: (yield* store.task('a')).worktreeBase! })
         expect(yield* sessions.open('a', 'a').pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
         expect(yield* store.runs('a')).toMatchObject([{ id: 'uncertain', state: 'preparing', endedAt: null }])

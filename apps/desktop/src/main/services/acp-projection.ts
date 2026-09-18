@@ -11,7 +11,8 @@ const json = Schema.decodeUnknownSync(Schema.JsonObject)
 
 /**
  * Applies v2 patch semantics: omission preserves, null clears, chunks append, concrete arrays replace.
- * An upsert is not a completion signal; only foreground idle ends messages. Unmapped updates stay raw.
+ * An upsert alone is not completion. The store uses explicit adapter completion metadata
+ * or foreground idle to finalize the buffer; unmapped updates become custom records.
  */
 export function projectUpdate(input: Schema.JsonObject): DisplayChange {
   const update = Schema.decodeUnknownSync(Schema.Struct({ sessionUpdate: Schema.String }))(input, { onExcessProperty: 'preserve' })

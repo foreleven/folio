@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { Context, Effect, Layer, Queue } from 'effect'
-import type { ExecutionRequest } from '../../shared/execution'
+import type { RunRecord } from '../../shared/execution'
 import type { HarnessStoreError } from '../../shared/harness'
 
 /** Notifications are hints only. A periodic database sweep repairs missed notifications. */
@@ -18,9 +18,9 @@ export interface ExecutionSource {
   readonly vaultId: string
   /** Unreconciled previous-process workers consume capacity until their exit is proven. */
   readonly occupied?: number
-  readonly claim: (owner: string) => Effect.Effect<ExecutionRequest | null, HarnessStoreError>
+  readonly claim: (owner: string) => Effect.Effect<RunRecord | null, HarnessStoreError>
   /** Must finish process cleanup and persist the terminal receipt before returning. */
-  readonly execute: (request: ExecutionRequest) => Effect.Effect<void, HarnessStoreError>
+  readonly execute: (request: RunRecord) => Effect.Effect<void, HarnessStoreError>
 }
 
 /**

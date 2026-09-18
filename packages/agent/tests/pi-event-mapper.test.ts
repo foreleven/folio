@@ -31,7 +31,9 @@ describe("Pi AgentSessionEvent to ACP v2 mapper", () => {
       message: assistantMessage,
       assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " world", partial: assistantMessage },
     }));
-    expect(mapper.map(event({ type: "message_end", message: assistantMessage }))).toEqual([]);
+    expect(mapper.map(event({ type: "message_end", message: assistantMessage }))).toEqual([{
+      sessionUpdate: "agent_message", messageId: "message-1", _meta: { "folio/messageComplete": true },
+    }]);
     const next = mapper.map(event({
       type: "message_update",
       message: assistantMessage,
