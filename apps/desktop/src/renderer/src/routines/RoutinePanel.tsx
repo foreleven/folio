@@ -17,7 +17,7 @@ import {
   WorkflowIcon,
   ZapIcon
 } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { routineDateState, routineGapDates, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
@@ -84,6 +84,13 @@ export function RoutinePanel(): React.JSX.Element {
   const refreshExecutions = useAtomRefresh(executionsQuery)
   const [editing, setEditing] = useState<{ id: string; record?: RoutineRecord } | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+
+  // Runs advance in the main process after admission returns. Keep both views
+  // current even after a terminal result: the scheduler can start another run.
+  useEffect(() => {
+    const timer = setInterval(() => { refreshRoutines(); refreshExecutions() }, 1000)
+    return () => clearInterval(timer)
+  }, [refreshRoutines, refreshExecutions])
 
   const records = routines._tag === 'Success' ? routines.value : []
   const selected = records.find((record) => record.id === selectedId)

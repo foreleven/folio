@@ -21,13 +21,16 @@
     "@effect/atom-react": "4.0.0-rc.112",
     "@effect/platform-node": "4.0.0-rc.112",
     "@effect/sql-sqlite-node": "4.0.0-rc.112",
-    "@larksuiteoapi/node-sdk": "1.73.3",
     "@folio/agent": "workspace:*",
     "@folio/integrations": "workspace:*",
     "@folio/ui": "workspace:*",
+    "@larksuiteoapi/node-sdk": "1.73.3",
     "effect": "4.0.0-rc.112",
+    "html-to-text": "10.0.1",
+    "imapflow": "2.0.5",
     "jiti": "2.7.0",
     "lucide-react": "^1.42.0",
+    "mailparser": "3.9.28",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "uuid": "^14.0.2",
@@ -74,6 +77,10 @@
       {
         "from": "../../packages/integrations/src/gmail/assets",
         "to": "gmail-assets"
+      },
+      {
+        "from": "../../packages/integrations/src/imap/assets",
+        "to": "imap-assets"
       }
     ],
     "mac": {

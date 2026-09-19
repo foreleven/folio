@@ -263,3 +263,70 @@ app (GUI launches may not inherit the shell's environment). When an OAuth call f
 description, followed by `[Folio][Integration] operation failed` for failures
 that escape the provider. These diagnostics are deliberately omitted from the
 renderer and never include client secrets or tokens.
+
+## IMAP email behavior
+
+The `imap` integration uses [ImapFlow](https://imapflow.com/) 2.0.5 for the
+provider-independent IMAP connection and [MailParser](https://nodemailer.com/extras/mailparser/)
+3.9.28 for MIME decoding, character sets, and HTML-to-text conversion. ImapFlow
+provides Promise APIs, TypeScript declarations, UID operations, read-only folder
+selection, mandatory TLS/STARTTLS, and HTTP CONNECT/SOCKS proxies without a hosted
+service. MailParser is a mature parser in maintenance mode (security and critical
+fixes); we use its existing MIME/HTML support rather than implementing a parser.
+SMTP is not needed: this integration only reads email.
+
+### Connection
+
+Install **IMAP Mail**, then choose **Connect mailbox** and enter the email address
+and app password / IMAP authorization code. Gmail/Googlemail, QQ/Foxmail, 163, 126,
+Yeah, iCloud, Yahoo.com, AOL, and Fastmail.com infer their IMAP server. Gmail
+requires an eligible account with 2-Step Verification and an app password;
+QQ/NetEase require IMAP enabled and an authorization code from mailbox settings.
+A normal Google account password does not work.
+
+Use **Custom server / proxy** for custom domains, server/port overrides, another
+folder, or a proxy. Defaults are TLS on port 993 and the `INBOX` folder. Set
+`security` to `starttls` for servers requiring STARTTLS (default port 143).
+Certificate validation stays enabled and STARTTLS is mandatory when selected.
+Proxy URLs accept HTTP CONNECT or SOCKS, e.g. `http://127.0.0.1:7890` or
+`socks5://127.0.0.1:1080`. A blank proxy means a direct connection; HTTP proxy
+environment variables are not automatically applied to IMAP.
+
+This version supports one configured IMAP account and one folder, with password
+or app-password authentication. Microsoft accounts or organization policies that
+require OAuth cannot use this password-based connector. For Gmail All Mail,
+enter the server's exact folder path using the custom connection form; INBOX
+does not include archived mail. The existing Gmail API connector remains
+available and its authorization is not migrated automatically.
+
+### State, extraction, and packaging
+
+Connection details stay in `~/.folio/integrations/imap/private.json` (directory
+0700, file 0600), matching the existing integration storage pattern. This is
+local permission-restricted storage, not keychain encryption. A failed check
+retains the details for an explicit retry; Disconnect removes the saved details.
+Neither catalog snapshots nor workspace scripts contain credentials. Task
+processes receive connection details through their environment; unlike the
+Gmail API access token, an IMAP app password is a long-lived credential and is
+not restricted to read-only access by the server.
+
+Installation creates an `imap/email` resource and an idempotent daily review
+Routine. Extraction uses a read-only folder and ImapFlow's `BODY.PEEK` fetching,
+so messages are not marked read. It searches a covering date range, then filters
+`INTERNALDATE` by the exact half-open Routine window. UID metadata is fetched in
+batches of 100 with no total-message cap. Filenames include a hash of the server,
+account, folder, and UIDVALIDITY plus the UID, preventing collisions after a
+folder UID reset or account change. MailParser converts HTML-only messages to
+text. Attachments are not exported, and messages larger than 25 MiB fail the
+window explicitly rather than being silently skipped.
+
+`raws/imap/_updated.md` is removed before each attempt and published only after
+complete extraction. Partial files are not a successful window; callers must
+check the exit status before using the summary. SDK diagnostics are not printed
+because raw IMAP responses may contain private data. Successful Routine raws
+are persisted alongside the existing Gmail and Lark raws.
+
+The desktop app ships `imap-assets` and both runtime SDK dependencies. The
+provider resolves SDK entrypoints relative to the app and passes their absolute
+unpacked paths to the standalone extractor, so it also works from a Task
+worktree outside the repository without installing packages there.

@@ -24,6 +24,25 @@ const setup = Effect.gen(function* () {
 })
 
 describe('RoutineStore execution coalescing', () => {
+  it.each([
+    ['Asia/Shanghai', '2026-09-19T03:00:00Z', '2026-09-18T16:00:00Z'],
+    ['America/New_York', '2026-03-08T16:00:00Z', '2026-03-08T05:00:00Z'],
+    ['America/New_York', '2026-11-01T17:00:00Z', '2026-11-01T04:00:00Z']
+  ])('starts the first window at local midnight in %s (%s), retaining it on retry', async (timeZone, instant, midnight) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      yield* setup
+      const sql = yield* SqlClient.SqlClient
+      const at = Date.parse(instant)
+      yield* sql`UPDATE routines SET created_at=${at - 60_000}, time_zone=${timeZone} WHERE id=${routineId}`
+      const store = yield* RoutineStore
+      const first = yield* store.schedule(routineId, at)
+      expect(first.windowStart).toBe(Date.parse(midnight))
+      expect(first.windowEnd).toBe(at)
+      const retry = yield* store.schedule(routineId, at + 60_000)
+      expect(retry).toMatchObject({ taskId: first.taskId, windowStart: Date.parse(midnight), windowEnd: at + 60_000 })
+    }).pipe(Effect.provide(layer())))
+  })
+
   it('retains the reserved model and civil timezone when the Routine is edited', async () => {
     await Effect.runPromise(Effect.gen(function* () {
       const store = yield* RoutineStore

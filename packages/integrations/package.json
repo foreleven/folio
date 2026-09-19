@@ -9,7 +9,8 @@
     "./base": "./src/base/index.ts",
     "./protocol": "./src/base/protocol.ts",
     "./lark": "./src/lark/index.ts",
-    "./gmail": "./src/gmail/index.ts"
+    "./gmail": "./src/gmail/index.ts",
+    "./imap": "./src/imap/index.ts"
   },
   "scripts": {
     "test:lark:install": "vitest run --config vitest.live.config.ts tests/install-lark.test.ts",
@@ -22,7 +23,10 @@
     "@larksuiteoapi/node-sdk": "1.73.3",
     "effect": "4.0.0-rc.112",
     "google-auth-library": "10.5.0",
-    "googleapis": "171.1.0"
+    "googleapis": "171.1.0",
+    "html-to-text": "10.0.1",
+    "imapflow": "2.0.5",
+    "mailparser": "3.9.28"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile, rename, open, utimes } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, rename, open, symlink, utimes } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -85,4 +85,38 @@ it('rotates diagnostic files and enforces the per-Vault byte budget without dele
     expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(RUN_LOG_LIMITS.vaultBytes)
     expect(await files.read('run', 'owner')).not.toBeNull()
   } finally { Object.assign(RUN_LOG_LIMITS, previous) }
+})
+
+it('ignores Finder metadata and unrelated entries while writing and pruning owned logs', async () => {
+  const logRoot = join(root, 'logs/runs')
+  await mkdir(logRoot, { recursive: true })
+  await writeFile(join(logRoot, '.DS_Store'), 'Finder metadata')
+  await writeFile(join(logRoot, 'ordinary-file'), 'not a run directory')
+  await mkdir(join(logRoot, 'unrelated.folder'))
+  const state = await files.begin(run)
+  await files.log(state, 'committed')
+  const path = join(logRoot, 'run/owner.jsonl')
+  expect(readRunLog(await readFile(path, 'utf8'))).toHaveLength(1)
+  const old = new Date(Date.now() - RUN_LOG_LIMITS.retentionMs - 1000)
+  await utimes(path, old, old)
+  await files.prune(new Set(['run']))
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await readFile(join(logRoot, '.DS_Store'), 'utf8')).toBe('Finder metadata')
+  expect(await files.read('run', 'owner')).not.toBeNull()
+})
+
+it.skipIf(process.platform === 'win32')('does not follow symlinked log directories or log files during retention', async () => {
+  const outside = join(root, 'unrelated')
+  const logs = join(root, 'logs/runs')
+  await mkdir(outside)
+  await mkdir(join(logs, 'run'), { recursive: true })
+  const target = join(outside, 'owner.jsonl')
+  await writeFile(target, 'unrelated data')
+  const old = new Date(Date.now() - RUN_LOG_LIMITS.retentionMs - 1000)
+  await utimes(target, old, old)
+  await symlink(outside, join(logs, 'linked-run'))
+  await symlink(target, join(logs, 'run/owner.jsonl'))
+  await files.prune(new Set(['linked-run', 'run']))
+  expect(await readFile(target, 'utf8')).toBe('unrelated data')
+  expect(await readFile(join(logs, 'run/owner.jsonl'), 'utf8')).toBe('unrelated data')
 })

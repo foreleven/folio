@@ -147,7 +147,7 @@ export class VaultRuntime extends Context.Service<
         Stream.filter((snapshot) =>
           snapshot.some(
             (view) =>
-              (view.id === 'lark' || view.id === 'gmail') &&
+              (view.id === 'lark' || view.id === 'gmail' || view.id === 'imap') &&
               view.record?.error === null &&
               view.record.state !== 'checking' &&
               view.record.state !== 'installing' &&

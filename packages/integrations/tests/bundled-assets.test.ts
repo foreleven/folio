@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { GmailAssetsDirectory, installAssets } from '../src/gmail/assets.ts'
+import { ImapAssetsDirectory, installAssets as installImapAssets } from '../src/imap/assets.ts'
 import { ensureExtractor, LarkWorkflowsDirectory } from '../src/lark/workflows.ts'
 
 let root: string
@@ -12,24 +13,26 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-bundled-asse
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 describe('bundled asset upgrades', () => {
-  it.each(['gmail', 'lark'] as const)('refreshes %s scripts and preserves credentials and unchanged files', async provider => {
+  it.each(['gmail', 'imap', 'lark'] as const)('refreshes %s scripts and preserves credentials and unchanged files', async provider => {
     const directory = join(root, 'installed')
     const source = join(root, 'source')
-    const workflow = provider === 'gmail' ? 'gmail' : 'lark-im'
-    const sourceScript = provider === 'gmail' ? join(source, 'workflows', workflow) : join(source, workflow)
+    const workflow = provider === 'lark' ? 'lark-im' : provider
+    const sourceScript = provider === 'lark' ? join(source, workflow) : join(source, 'workflows', workflow)
     const installedScript = join(directory, 'workflows', workflow, 'extract-window.mjs')
     await mkdir(sourceScript, { recursive: true })
     await writeFile(join(sourceScript, 'extract-window.mjs'), 'new extractor')
     await mkdir(join(directory, 'workflows', workflow), { recursive: true })
     await writeFile(installedScript, 'old extractor')
     await writeFile(join(directory, 'private.json'), 'private authorization')
-    if (provider === 'gmail') {
-      await mkdir(join(source, 'skills/gmail-mail'), { recursive: true })
-      await writeFile(join(source, 'skills/gmail-mail/SKILL.md'), 'bundled skill')
+    if (provider !== 'lark') {
+      await mkdir(join(source, `skills/${provider}-mail`), { recursive: true })
+      await writeFile(join(source, `skills/${provider}-mail/SKILL.md`), 'bundled skill')
     }
     const install = provider === 'gmail'
       ? installAssets(directory).pipe(Effect.provideService(GmailAssetsDirectory, source))
-      : ensureExtractor(directory).pipe(Effect.provideService(LarkWorkflowsDirectory, source))
+      : provider === 'imap'
+        ? installImapAssets(directory).pipe(Effect.provideService(ImapAssetsDirectory, source))
+        : ensureExtractor(directory).pipe(Effect.provideService(LarkWorkflowsDirectory, source))
     const run = () => Effect.runPromise(install.pipe(Effect.provide(NodeServices.layer)))
     await run()
     expect(await readFile(installedScript, 'utf8')).toBe('new extractor')

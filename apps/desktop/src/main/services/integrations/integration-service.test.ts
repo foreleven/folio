@@ -12,6 +12,8 @@ import { IntegrationService } from './integration-service'
 import { IntegrationCatalog } from './integration-catalog'
 import { IntegrationStore } from './integration-store'
 import type { IntegrationView } from '../../../shared/integration'
+import { imap } from '@folio/integrations/imap'
+import { ImapFlow } from 'imapflow'
 
 let directory: string
 beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), 'folio-integration-desktop-')) })
@@ -92,6 +94,38 @@ function rows() {
 }
 
 describe('desktop integration lifecycle', () => {
+  it('prepares the real IMAP provider through the host environment boundary', async () => {
+    vi.spyOn(ImapFlow.prototype, 'connect').mockResolvedValue(undefined)
+    vi.spyOn(ImapFlow.prototype, 'mailboxOpen').mockResolvedValue({ path: 'INBOX' } as never)
+    vi.spyOn(ImapFlow.prototype, 'logout').mockResolvedValue(undefined)
+    vi.spyOn(ImapFlow.prototype, 'close').mockImplementation(() => {})
+    const runtime = ManagedRuntime.make(IntegrationService.layer.pipe(
+      Layer.provide(IntegrationStore.layer),
+      Layer.provide(Layer.succeed(IntegrationCatalog)([imap])),
+      Layer.provide(Layer.succeed(IntegrationBrowser)({ open: () => Effect.void })),
+      Layer.provide(ConfigService.layer), Layer.provide(NodeServices.layer),
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord({ FOLIO_CONFIG_DIR: directory })))
+    ))
+    try {
+      const service = await runtime.runPromise(IntegrationService)
+      const settled = (state: string) => vi.waitFor(async () => {
+        const [view] = await runtime.runPromise(service.list)
+        expect(view.busy).toBe(false)
+        expect(view.record?.state).toBe(state)
+      })
+      await runtime.runPromise(service.install('imap'))
+      await settled('login_required')
+      await runtime.runPromise(service.action('imap', 'connect', { user: 'test@126.com', password: 'fixture-password' }))
+      await settled('ready')
+      const mounted = await runtime.runPromise(service.prepare(['imap'], directory, ['imap/email']))
+      expect(mounted.workspaceFiles?.map(file => file.path)).toContain('raws/imap/extract-window.mjs')
+      expect(Object.keys(mounted.environment ?? {}).sort()).toEqual([
+        'IMAPFLOW_MODULE_PATH', 'IMAP_CONNECTION', 'IMAP_HTML_TO_TEXT_MODULE_PATH', 'IMAP_MAILPARSER_MODULE_PATH'
+      ])
+      expect(JSON.stringify(mounted.workspaceFiles)).not.toContain('fixture-password')
+    } finally { await runtime.dispose(); vi.restoreAllMocks() }
+  })
+
   it('rejects a partially valid selection before invoking any resource hook', async () => {
     const f = fixture()
     const onIngest = vi.fn(() => Effect.void)

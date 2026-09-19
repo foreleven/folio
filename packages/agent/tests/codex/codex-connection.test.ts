@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node";
-import { Effect, Fiber, Stream } from "effect";
+import { Effect, Fiber, Logger, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
@@ -60,13 +60,23 @@ it("delivers native server requests and preserves string IDs in responses", asyn
 });
 
 it("keeps protocol request failures secret-free without breaking subsequent requests", async () => {
+  const logs: unknown[] = [];
+  const logger = Logger.make(({ message }) => { logs.push(message); });
   await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
     const connection = yield* openFixture();
-    const error = yield* connection.request("error", {}).pipe(Effect.flip);
+    const error = yield* connection.request("error", { password: 'fixture-secret' }).pipe(Effect.flip);
     expect(error.reason).toBe("request_failed");
     expect(JSON.stringify(error)).not.toContain("private");
     expect(yield* connection.request("echo", "still connected")).toBe("still connected");
-  })).pipe(Effect.provide(NodeServices.layer)));
+  })).pipe(Effect.provide(NodeServices.layer), Effect.provide(Logger.layer([logger]))));
+  const text = JSON.stringify(logs);
+  expect(text).toContain('Codex request started');
+  expect(text).toContain('Codex request completed');
+  expect(text).toContain('Codex request failed');
+  expect(text).toContain('request_failed');
+  expect(text).toContain('elapsedMs');
+  expect(text).not.toContain('fixture-secret');
+  expect(text).not.toContain('private');
 });
 
 it.each([

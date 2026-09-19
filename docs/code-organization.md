@@ -18,7 +18,7 @@ pattern; do not add forwarding files at former paths.
   `runtime/` modules. `tests/` now mirrors these capabilities; `integration/`
   contains CLI, stdio, worktree and Git lifecycle scenarios. Shared fixtures and
   server support remain in `tests/fixtures/` and `tests/support/`.
-- `packages/integrations/src/`: existing provider modules (`lark/`, `gmail/`) and
+- `packages/integrations/src/`: existing provider modules (`lark/`, `gmail/`, `imap/`) and
   their shared contract in `base/`; assets stay with their provider.
 - `packages/ui/src/`: shared UI primitives, hooks and utilities. Primitives are
   intentionally flat under `components/ui/`, as they have no application domain.

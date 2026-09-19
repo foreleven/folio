@@ -48,6 +48,7 @@ export interface CodexSessionOptions extends CodexConnectionOptions {
  */
 export const openCodexSession = Effect.fn("CodexSession.open")(function*(options: CodexSessionOptions) {
   const connection = yield* openCodexConnection(options);
+  let stage = 'config-policy';
   return yield* Effect.gen(function*() {
     // Check the effective process/project config before creating or resuming native history.
     yield* connection.request("config/read", { cwd: options.cwd, includeLayers: false }).pipe(
@@ -55,6 +56,7 @@ export const openCodexSession = Effect.fn("CodexSession.open")(function*(options
     );
     const requestedId = options.nativeSessionId;
     if (requestedId !== undefined) {
+      stage = 'resume-identity';
       if (requestedId.length === 0) return yield* failure("invalid_session");
       const original = yield* connection.request("thread/read", { threadId: requestedId, includeTurns: false }).pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(ReadResult)),
@@ -64,9 +66,11 @@ export const openCodexSession = Effect.fn("CodexSession.open")(function*(options
       if (original.thread.ephemeral) return yield* failure("invalid_session");
       yield* sameDirectory(original.thread.cwd, options.cwd);
     }
+    stage = 'load-skills';
     const skills = yield* loadCodexSkills(connection, options.cwd, options.skillPaths ?? []).pipe(
       Effect.mapError(() => failure("invalid_session")),
     );
+    stage = requestedId === undefined ? 'thread-start' : 'thread-resume';
     const result = yield* connection.request(requestedId === undefined ? "thread/start" : "thread/resume", {
       ...(requestedId === undefined ? { ephemeral: false } : { threadId: requestedId }),
       cwd: options.cwd, sandbox: "danger-full-access", approvalPolicy: "never",
@@ -85,5 +89,7 @@ export const openCodexSession = Effect.fn("CodexSession.open")(function*(options
       model: result.model,
       provider: result.modelProvider,
     };
-  }).pipe(Effect.tapError(() => connection.close));
+  }).pipe(Effect.tapError(error => Effect.logWarning('Codex session initialization failed', {
+    stage, reason: error.reason, skillCount: options.skillPaths?.length ?? 0
+  })), Effect.tapError(() => connection.close));
 });

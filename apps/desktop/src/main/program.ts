@@ -5,6 +5,7 @@ import { RoutineSchedulerLive } from './services/routines/routine-scheduler'
 import * as NodeServices from '@effect/platform-node/NodeServices'
 import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
 import { gmail, GmailAssetsDirectory } from '@folio/integrations/gmail'
+import { imap, ImapAssetsDirectory } from '@folio/integrations/imap'
 import { app } from 'electron'
 import { join } from 'node:path'
 import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack'
@@ -21,6 +22,9 @@ const larkWorkflowsDirectory = app.isPackaged
 const gmailAssetsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'gmail-assets')
   : join(app.getAppPath(), '../../packages/integrations/src/gmail/assets')
+const imapAssetsDirectory = app.isPackaged
+  ? join(process.resourcesPath, 'imap-assets')
+  : join(app.getAppPath(), '../../packages/integrations/src/imap/assets')
 import { IntegrationService } from './services/integrations/integration-service'
 import { IntegrationCatalog } from './services/integrations/integration-catalog'
 import { IntegrationStore } from './services/integrations/integration-store'
@@ -72,6 +76,13 @@ const IntegrationsLive = IntegrationService.layer.pipe(
     install: () => gmail.install().pipe(Effect.provideService(GmailAssetsDirectory, gmailAssetsDirectory)),
     onActionCallback: (id, payload) => gmail.onActionCallback(id, payload).pipe(
       Effect.provideService(GmailAssetsDirectory, gmailAssetsDirectory)
+    )
+  }, {
+    ...imap,
+    setup: () => imap.setup!().pipe(Effect.provideService(ImapAssetsDirectory, imapAssetsDirectory)),
+    install: () => imap.install().pipe(Effect.provideService(ImapAssetsDirectory, imapAssetsDirectory)),
+    onActionCallback: (id, payload) => imap.onActionCallback(id, payload).pipe(
+      Effect.provideService(ImapAssetsDirectory, imapAssetsDirectory)
     )
   }])),
   Layer.provide(IntegrationBrowser.layer),

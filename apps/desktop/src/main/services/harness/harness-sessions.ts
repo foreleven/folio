@@ -73,18 +73,31 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
           return yield* failure('task-busy')
         }
         const ready = yield* Deferred.make<Session, HarnessStoreError>()
+        let stage = 'runtime-discovery'
+        const startedAt = Date.now()
+        const progress = () => Effect.logInfo('Agent Session startup', { taskId, sessionId, runId: claim?.id,
+          agent: saved.agent, stage, elapsedMs: Date.now() - startedAt })
         // The worker owns a private resource Scope and then stays alive until explicit close or Quit.
         // A failed startup remains in the registry until close; another request must not silently retry it.
         const lifetime = yield* Effect.gen(function*() {
+          yield* progress()
           // Runtime discovery stays lazy so a missing bundle does not prevent browsing saved Tasks.
           const runtimeOptions = yield* Effect.isEffect(options) ? options : Effect.succeed(options)
+          stage = 'prepare-resources'
+          yield* progress()
           const resources = saved.purpose === 'task' && prepareResources ? yield* prepareResources(task) : {}
+          stage = 'resolve-workspace'
+          yield* progress()
           const cwd = resolveDirectory
             ? yield* resolveDirectory(task, saved)
             : saved.purpose === 'task'
               ? task.worktree
               : yield* failure('invalid-state')
+          stage = 'open-worker-session'
+          yield* progress()
           const session = yield* openHarnessWorkerSession({ ...runtimeOptions, ...resources, taskId, sessionId, cwd })
+          stage = 'ready'
+          yield* progress()
           // Callers cannot close the private resource Scope without also releasing the registry slot.
           yield* Deferred.succeed(ready, { pid: session.pid, connectionId: session.connectionId,
             prompt: session.prompt, cancel: session.cancel })
@@ -92,7 +105,9 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
         }).pipe(
           Effect.scoped,
           Effect.provide(dependencies),
-          Effect.catch(error => Effect.logError('Agent Worker Session startup failed', { taskId, sessionId }, error).pipe(Effect.andThen(Deferred.fail(ready, error)))),
+          Effect.catch(error => Effect.logError('Agent Worker Session startup failed', {
+            taskId, sessionId, runId: claim?.id, stage, elapsedMs: Date.now() - startedAt, reason: error.reason
+          }).pipe(Effect.andThen(Deferred.fail(ready, error)))),
           Effect.onExit(() => Deferred.fail(ready, failure('invalid-state'))),
           Effect.asVoid,
           Effect.interruptible,

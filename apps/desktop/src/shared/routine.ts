@@ -50,6 +50,12 @@ export function routineDateAt(at: number, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`
 }
 
+/** First ingestion includes the entire civil day, even when a Routine is created midday. */
+export function routineDayStart(date: string, timeZone: string): number {
+  const [year, month, day] = date.split('-').map(Number)
+  return DateTime.toEpochMillis(DateTime.makeZonedUnsafe({ year, month, day, hour: 0, minute: 0, second: 0, millisecond: 0 }, { timeZone, adjustForTimeZone: true, disambiguation: 'compatible' }))
+}
+
 /** Returns the local end-of-day instant used by a day-closing execution. */
 export function routineDayEnd(date: string, timeZone: string): number {
   const [year, month, day] = date.split('-').map(Number)

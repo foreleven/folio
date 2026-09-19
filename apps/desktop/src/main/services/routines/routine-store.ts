@@ -3,7 +3,7 @@ import { SqlClient } from 'effect/unstable/sql'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { HarnessStoreError } from '../../../shared/harness'
-import { RoutineExecution, RoutineRecord, SaveRoutine, previousRoutineDate, routineDateAt, routineDayEnd } from '../../../shared/routine'
+import { RoutineExecution, RoutineRecord, SaveRoutine, previousRoutineDate, routineDateAt, routineDayEnd, routineDayStart } from '../../../shared/routine'
 import { TaskWorktrees } from '../tasks/task-worktrees'
 import { SessionModelSelection } from '../../../shared/model'
 
@@ -192,16 +192,16 @@ export class RoutineStore extends Context.Service<
           Effect.gen(function* () {
             const routine = yield* get(routineId)
             if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
-            // Each execution is a bounded ingestion window. The first run covers one
-            // configured interval; later runs begin at the previous trigger. A
+            // Each execution is a bounded ingestion window. The first run starts
+            // at its civil day's midnight; later runs begin at the previous boundary. A
             // pending execution keeps its original start while its end is coalesced.
             const today = routineDateAt(at, routine.timeZone)
             const previousDate = previousRoutineDate(today, routine.timeZone)
             const candidates = yield* executionRows(routineId)
             // Dispatch wall time can be later than a day-end window. Continue from
             // the last reserved data boundary so midnight-to-dispatch data is not lost.
-            const windowStartFor = (end: number) => Math.min(end, Math.max(routine.createdAt,
-              candidates[0]?.windowEnd ?? routine.lastTriggerAt ?? end - routine.intervalMinutes * 60_000))
+            const windowStartFor = (end: number) => Math.min(end,
+              candidates[0]?.windowEnd ?? routineDayStart(routineDateAt(end, routine.timeZone), routine.timeZone))
             const defaultWindowStart = windowStartFor(at)
             // An admitted prompt is immutable. Coalescing its time window would make the UI
             // describe different work from the queued request and could enqueue a second Task.

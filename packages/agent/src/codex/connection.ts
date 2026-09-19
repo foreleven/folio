@@ -146,13 +146,19 @@ export const openCodexConnection = Effect.fn("CodexConnection.open")(function*(o
   const request = Effect.fn("CodexConnection.request")(function*(method: string, params: unknown) {
     if (terminal !== undefined) return yield* terminal;
     const id = ++nextId;
+    const startedAt = Date.now();
+    yield* Effect.logInfo('Codex request started', { method, requestId: id, pid: child.pid });
     const deferred = yield* Deferred.make<unknown, CodexConnectionError>();
     pending.set(id, deferred);
     yield* send({ id, method, params }).pipe(Effect.tapError((error) => terminate(error)));
     return yield* Deferred.await(deferred).pipe(Effect.timeoutOrElse({
       duration: options.requestTimeoutMs ?? 10_000,
       orElse: () => onStreamFailure(failure("timeout")).pipe(Effect.andThen(Effect.fail(failure("timeout")))),
-    }));
+    }),
+      Effect.tap(() => Effect.logInfo('Codex request completed', { method, requestId: id, pid: child.pid, elapsedMs: Date.now() - startedAt })),
+      Effect.tapError(error => Effect.logWarning('Codex request failed', { method, requestId: id, pid: child.pid,
+        reason: error.reason, elapsedMs: Date.now() - startedAt }))
+    );
   });
 
   yield* Effect.gen(function*() {

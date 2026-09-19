@@ -119,6 +119,8 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
             )
           : ''
         const agentPrompt = providerInstructions.trim() ? `${providerInstructions.trim()}\n\n${input.prompt}` : input.prompt
+        yield* Effect.logInfo('Agent prompt dispatch', { taskId: input.taskId, sessionId: input.sessionId,
+          runId: input.id, purpose: input.purpose, promptCharacters: agentPrompt.length })
         const pendingPrompt = session.prompt({ ...input, baselineCommit: baseline }, async () => {
           await Effect.runPromise(read(input.taskId, input.id).pipe(Effect.flatMap(value => Deferred.succeed(ready, value))))
         }, agentPrompt)
@@ -130,6 +132,9 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         // An idle event cannot finish known tools whose terminal status has not been persisted.
         if (tools.some(tool => !['completed', 'failed'].includes(String(tool.payload.data.status)))) return yield* failure('invalid-state')
         const reason = idle.update.stopReason
+        yield* Effect.logInfo('Agent turn completed', { taskId: input.taskId, sessionId: input.sessionId,
+          runId: input.id, stopReason: reason, toolCount: tools.length,
+          failedToolCount: tools.filter(tool => tool.payload.data.status === 'failed').length })
         const outcome: RunOutcome = executionInterrupted(idle.update._meta) ? 'interrupted' : reason === 'end_turn' ? 'succeeded' : reason === 'cancelled'
           ? (entry.cancelled ? 'cancelled' : 'interrupted') : 'failed'
         return outcome

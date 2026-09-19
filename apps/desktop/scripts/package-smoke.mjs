@@ -25,6 +25,9 @@ try {
     const require = createRequire(root + '/package.json');
     require('@larksuiteoapi/node-sdk');
     require('googleapis/build/src/apis/gmail/v1.js');
+    require('imapflow');
+    require('mailparser');
+    require('html-to-text');
     const worker = new Worker(root + '/out/main/agent-worker.js', { execArgv: [] });
     let disposed = false;
     const timer = setTimeout(() => {

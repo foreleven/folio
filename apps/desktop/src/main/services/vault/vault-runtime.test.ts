@@ -16,8 +16,10 @@ import { VaultService } from './vault-service'
 import { AgentRuntime } from '../agent/agent-runtime'
 import { IntegrationService } from '../integrations/integration-service'
 import { ModelService } from '../models/model-service'
+import type { IntegrationView } from '../../../shared/integration'
+import { imap } from '@folio/integrations/imap'
 
-function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle'))) {
+function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle')), integrations: readonly IntegrationView[] = []) {
   return ManagedRuntime.make(
     Layer.merge(VaultRuntime.layer, VaultService.layer).pipe(
       Layer.provide(AgentWorkerPool.layer),
@@ -26,7 +28,7 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
       Layer.provide(ModelService.layer({ environment: {} })),
       Layer.provide(
         Layer.succeed(IntegrationService)({
-          list: Effect.succeed([]),
+          list: Effect.succeed(integrations),
           watch: Stream.empty,
           install: () => Effect.void,
           inspect: () => Effect.void,
@@ -40,6 +42,34 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
     )
   )
 }
+
+it('creates one daily IMAP Routine after installation and preserves user edits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-imap-routine-'))
+  const resources = imap.resources.map(({ id, type, name }) => ({ id, type, name }))
+  const runtime = createRuntime(root, undefined, [{ ...imap, resources, busy: false,
+    record: { id: 'imap', state: 'login_required', data: {}, actions: [], resources, error: null, createdAt: 1, updatedAt: 1 } }])
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const context = yield* (yield* VaultRuntime).open(vault.id)
+      const tasks = Context.get(context, TaskService)
+      yield* tasks.ensureDefaultRoutine
+      yield* tasks.ensureDefaultRoutine
+      const routines = yield* tasks.routines
+      expect(routines).toHaveLength(1)
+      expect(routines[0]).toMatchObject({ integrationIds: ['imap'], resourceIds: ['imap/email'], intervalMinutes: 1440 })
+      expect(routines[0]!.prompt).toContain('raws/imap/_workflow.md')
+      const routine = routines[0]!
+      yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: false, name: 'My mailbox',
+        prompt: routine.prompt, agent: routine.agent, model: routine.model, skillIds: routine.skillIds,
+        integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
+        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
+      yield* tasks.ensureDefaultRoutine
+      expect(yield* tasks.routines).toMatchObject([{ name: 'My mailbox', enabled: false }])
+    }))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+})
 
 it('keeps Routine admission and retries on the reserved Task revision after edits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'folio-routine-revision-'))

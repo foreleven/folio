@@ -22,12 +22,31 @@ export type RunFileState = typeof RunFileState.Type
 const decode = Schema.decodeUnknownSync(RunFileState)
 export const RUN_INSTANCE_ID = randomUUID()
 const instanceId = RUN_INSTANCE_ID
+const validSegment = (value: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(value)
 const segment = (value: string) => {
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error('Invalid execution path identity')
+  if (!validSegment(value)) throw new Error('Invalid execution path identity')
   return value
 }
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
 export const RUN_LOG_LIMITS = { fileBytes: 10 * 1024 * 1024, vaultBytes: 100 * 1024 * 1024, retentionMs: 7 * 24 * 60 * 60 * 1000 }
+
+/** Diagnostic directories may contain Finder metadata. Only enumerate owned file shapes;
+ * unlike recovery receipts, unrelated entries are harmless and must not block logging. */
+async function logFiles(root: string): Promise<Array<{ runId: string; path: string }>> {
+  const runs = await readdir(root, { withFileTypes: true }).catch(error => {
+    if (missing(error)) return []
+    throw error
+  })
+  const files: Array<{ runId: string; path: string }> = []
+  for (const run of runs) {
+    if (!run.isDirectory() || !validSegment(run.name)) continue
+    for (const file of await readdir(join(root, run.name), { withFileTypes: true })) {
+      if (!file.isFile() || !/^[a-zA-Z0-9_-]{1,128}(?:\.previous)?\.jsonl$/.test(file.name)) continue
+      files.push({ runId: run.name, path: join(root, run.name, file.name) })
+    }
+  }
+  return files
+}
 
 /** One main-process writer per Vault. State is a recovery receipt; JSONL is diagnostic only. */
 export class RunFileStore {
@@ -122,9 +141,7 @@ export class RunFileStore {
     // stop diagnostics rather than delete recovery state or grow without a bound.
     const root = join(this.directory, 'logs', 'runs')
     let total = 0
-    for (const run of await readdir(root)) for (const name of await readdir(join(root, segment(run)))) {
-      if (/^[a-zA-Z0-9_-]+(?:\.previous)?\.jsonl$/.test(name)) total += (await stat(join(root, run, name))).size
-    }
+    for (const file of await logFiles(root)) total += (await stat(file.path)).size
     if (total + bytes > RUN_LOG_LIMITS.vaultBytes) return
     const file = await open(path, 'a', 0o600)
     try { await file.writeFile(batch) } finally { await file.close() }
@@ -158,14 +175,10 @@ export class RunFileStore {
   prune(terminalRunIds: ReadonlySet<string>) {
     return this.serial(async () => {
       const root = join(this.directory, 'logs', 'runs')
-      let runs: string[]
-      try { runs = await readdir(root) } catch (error) { if (missing(error)) return; throw error }
       const files: { path: string; size: number; modified: number; terminal: boolean }[] = []
-      for (const run of runs) for (const name of await readdir(join(root, segment(run)))) {
-        if (!/^[a-zA-Z0-9_-]+(?:\.previous)?\.jsonl$/.test(name)) continue
-        const path = join(root, run, name)
+      for (const { runId, path } of await logFiles(root)) {
         const info = await stat(path)
-        files.push({ path, size: info.size, modified: info.mtimeMs, terminal: terminalRunIds.has(run) })
+        files.push({ path, size: info.size, modified: info.mtimeMs, terminal: terminalRunIds.has(runId) })
       }
       let total = files.reduce((sum, file) => sum + file.size, 0)
       for (const file of files.sort((a, b) => a.modified - b.modified)) {
