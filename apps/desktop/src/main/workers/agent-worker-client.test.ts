@@ -42,8 +42,8 @@ it.skipIf(process.platform === 'win32')('executes inside the built Worker, ackno
 
 it.skipIf(process.platform === 'win32')('pool reaps a native process and releases Session ownership after its thread crashes', async () => {
   const { ManagedRuntime } = await import('effect')
-  const { AgentWorkerPool } = await import('../services/agent-worker-pool')
-  const { hasExecutionProcess } = await import('../services/execution-recovery')
+  const { AgentWorkerPool } = await import('../services/agent/agent-worker-pool')
+  const { hasExecutionProcess } = await import('../services/execution/execution-recovery')
   const runtime = ManagedRuntime.make(AgentWorkerPool.layer)
   const root = await mkdtemp(join(tmpdir(), 'folio-worker-crash-'))
   const executable = join(root, 'codex.mjs')

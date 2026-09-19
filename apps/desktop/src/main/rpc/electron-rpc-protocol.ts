@@ -1,4 +1,4 @@
-import { VaultWindowContexts } from '../services/vault-window-contexts'
+import { VaultWindowContexts } from '../services/vault/vault-window-contexts'
 import { ipcMain, type IpcMainEvent, type WebContents, type WebContentsDidStartNavigationEventParams } from 'electron'
 import { Effect, Layer, Option, Queue } from 'effect'
 import { RpcSerialization, RpcServer } from 'effect/unstable/rpc'

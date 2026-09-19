@@ -12,8 +12,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ModelRpcs } from '../../shared/rpc/model-rpc'
-import { ConfigService } from '../services/config-service'
-import { ModelService } from '../services/model-service'
+import { ConfigService } from '../services/config/config-service'
+import { ModelService } from '../services/models/model-service'
 import { ModelRpcHandlersLive } from './model-rpc'
 
 const profile: ModelProfile = {

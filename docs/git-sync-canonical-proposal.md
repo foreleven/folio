@@ -44,7 +44,7 @@ Git 成功但收据丢失时，读取实际历史与操作记录进行验证，�
 
 ## 已有证据与未完成项
 
-`packages/agent/tests/git-sync-spike.test.ts` 使用临时真实仓库、main 和多个 worktree；11 项测试已通过。其中新增 5 项覆盖：
+`packages/agent/tests/integration/git-sync-spike.test.ts` 使用临时真实仓库、main 和多个 worktree；11 项测试已通过。其中新增 5 项覆盖：
 
 1. 单次冲突解决后树一致、保留源历史、重复收据恢复，以及第二轮不反向导出对齐提交。
 2. main 基线变化后重新准备，Task 有草稿或 HEAD 前进时拒绝旧对齐。

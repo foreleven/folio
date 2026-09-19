@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import { IntegrationRpcs } from '../../shared/rpc/integration-rpc'
-import { IntegrationService } from '../services/integration-service'
+import { IntegrationService } from '../services/integrations/integration-service'
 
 /** RPC acknowledges job scheduling; state changes continue over the shared watch stream. */
 export const IntegrationRpcHandlersLive = IntegrationRpcs.toLayer(Effect.gen(function*() {

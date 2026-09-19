@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import { VaultRpcs } from '../../shared/rpc/vault-rpc'
-import { VaultContext } from '../services/vault-context'
+import { VaultContext } from '../services/vault/vault-context'
 import { VaultLauncher } from '../electron/VaultLauncher'
 
 /** Routes vault operations through the application-owned window and selection services. */

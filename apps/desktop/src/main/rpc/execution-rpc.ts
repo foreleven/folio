@@ -1,9 +1,9 @@
 import { Context, Effect } from 'effect'
 import { ExecutionRpcs } from '../../shared/rpc/execution-rpc'
 import { emptyExecutionCounts, type ExecutionCounts } from '../../shared/execution'
-import { ConfigService } from '../services/config-service'
-import { VaultRuntime } from '../services/vault-runtime'
-import { TaskService } from '../services/task-service'
+import { ConfigService } from '../services/config/config-service'
+import { VaultRuntime } from '../services/vault/vault-runtime'
+import { TaskService } from '../services/tasks/task-service'
 
 /** Read committed queue counts for all registered Vaults, including those without windows. */
 export const ExecutionRpcHandlersLive = ExecutionRpcs.toLayer(Effect.gen(function* () {

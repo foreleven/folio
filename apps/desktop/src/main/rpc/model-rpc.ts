@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import { ModelRpcs } from '../../shared/rpc/model-rpc'
-import { ModelService } from '../services/model-service'
+import { ModelService } from '../services/models/model-service'
 
 /** Routes renderer model commands through the main-process credential and config boundary. */
 export const ModelRpcHandlersLive = ModelRpcs.toLayer(Effect.gen(function*() {

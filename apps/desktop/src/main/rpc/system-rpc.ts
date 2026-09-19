@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import { GetSystemInfo, SystemRpcs } from '../../shared/rpc/system-rpc'
-import { SystemService } from '../services/system-service'
+import { SystemService } from '../services/system/system-service'
 
 /** Main-process handlers for the shared system RPC interface. */
 export const SystemRpcHandlersLive = SystemRpcs.toLayer(

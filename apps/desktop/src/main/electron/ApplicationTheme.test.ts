@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ConfigService } from '../services/config-service'
+import { ConfigService } from '../services/config/config-service'
 import { ApplicationThemeLive } from './ApplicationTheme'
 
 const mocks = vi.hoisted(() => ({

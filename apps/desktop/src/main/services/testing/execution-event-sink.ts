@@ -1,10 +1,10 @@
 import { reserveClaimedRun, markClaimedRunning, finishClaimedRun } from './claimed-run'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { ExecutionEventSink } from '../execution-event-sink'
+import { ExecutionEventSink } from '../execution/execution-event-sink'
 import { HarnessStoreError } from '../../../shared/harness'
-import { HarnessStore } from '../harness-store'
-import { HarnessEventStore } from '../harness-event-store'
+import { HarnessStore } from '../harness/harness-store'
+import { HarnessEventStore } from '../harness/harness-event-store'
 
 /** Protocol-only fixtures predate queue admission; production uses claimed Runs and recovery files. */
 export const protocolTestSink = Layer.effect(ExecutionEventSink, Effect.gen(function* () {

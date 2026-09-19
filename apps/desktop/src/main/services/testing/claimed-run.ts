@@ -1,8 +1,8 @@
 import { Effect } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { HarnessStoreError, type NewRun, type RunOutcome } from '../../../shared/harness'
-import { ExecutionQueue } from '../execution-queue'
-import { HarnessStore } from '../harness-store'
+import { ExecutionQueue } from '../execution/execution-queue'
+import { HarnessStore } from '../harness/harness-store'
 
 /** Storage fixtures use the same admission/claim boundary as the scheduler before Git preparation. */
 export const reserveClaimedRun = Effect.fn('testing.reserveClaimedRun')(function* (input: NewRun) {

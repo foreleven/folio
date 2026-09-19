@@ -2,7 +2,7 @@ import { Effect, Layer } from 'effect'
 import { RpcTest } from 'effect/unstable/rpc'
 import { describe, expect, it } from 'vitest'
 import { SystemRpcs } from '../../shared/rpc/system-rpc'
-import { SystemService } from '../services/system-service'
+import { SystemService } from '../services/system/system-service'
 import { SystemRpcHandlersLive } from './system-rpc'
 
 describe('System Effect RPC interface', () => {

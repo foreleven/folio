@@ -1,6 +1,6 @@
 import { TaskService } from '../../shared/task-service'
 import { VaultMiddleware } from '../../shared/rpc/vault-middleware'
-import { VaultContext, makeVaultContext } from '../services/vault-context'
+import { VaultContext, makeVaultContext } from '../services/vault/vault-context'
 import { Effect, Layer } from 'effect'
 import { RpcTest } from 'effect/unstable/rpc'
 import { describe, expect, it } from 'vitest'

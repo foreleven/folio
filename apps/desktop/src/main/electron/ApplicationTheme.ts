@@ -1,6 +1,6 @@
 import { BrowserWindow, nativeTheme } from 'electron'
 import { Effect, Layer, Schedule, Stream } from 'effect'
-import { ConfigService } from '../services/config-service'
+import { ConfigService } from '../services/config/config-service'
 import { getRendererBackgroundColor } from './renderer-window'
 
 /** Applies persisted appearance before windows are created and keeps native surfaces in sync. */

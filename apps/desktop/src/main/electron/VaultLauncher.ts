@@ -1,9 +1,9 @@
 import { BrowserWindow, dialog } from 'electron'
 import { Context, Effect, Layer, Semaphore } from 'effect'
 import { VaultError, type Vault } from '../../shared/vault'
-import { VaultRuntime } from '../services/vault-runtime'
-import { VaultService } from '../services/vault-service'
-import { ConfigService } from '../services/config-service'
+import { VaultRuntime } from '../services/vault/vault-runtime'
+import { VaultService } from '../services/vault/vault-service'
+import { ConfigService } from '../services/config/config-service'
 import { MainWindow } from './MainWindow'
 
 /** Shared native Open action used by the menu and renderer RPC. */

@@ -1,13 +1,13 @@
 import { Effect, Layer, ManagedRuntime, Stream } from 'effect'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { VaultLauncher } from './VaultLauncher'
-import { VaultRuntime } from '../services/vault-runtime'
-import { VaultService } from '../services/vault-service'
+import { VaultRuntime } from '../services/vault/vault-runtime'
+import { VaultService } from '../services/vault/vault-service'
 import { MainWindow } from './MainWindow'
 import { HarnessStoreError } from '../../shared/harness'
 import { VaultError } from '../../shared/vault'
 import { RendererLoadError } from './renderer-window'
-import { ConfigService } from '../services/config-service'
+import { ConfigService } from '../services/config/config-service'
 import { ConfigStoreError, type GlobalConfig } from '../../shared/config'
 
 const mocks = vi.hoisted(() => ({ parent: { id: 1, isDestroyed: () => false }, focused: vi.fn(), select: vi.fn() }))

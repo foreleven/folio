@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect'
 import { HarnessStoreError } from '../../shared/harness'
 import { VaultMiddleware } from '../../shared/rpc/vault-middleware'
-import { VaultWindowContexts } from '../services/vault-window-contexts'
+import { VaultWindowContexts } from '../services/vault/vault-window-contexts'
 
 /** Resolves identity from the transport's native sender binding, ignoring payload and headers. */
 export const VaultMiddlewareLive = Layer.effect(

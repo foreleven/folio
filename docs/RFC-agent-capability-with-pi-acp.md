@@ -457,7 +457,7 @@ Models
 新增：
 
 ```text
-apps/desktop/src/main/services/model-service.ts
+apps/desktop/src/main/services/models/model-service.ts
 apps/desktop/src/main/rpc/model-rpc.ts
 apps/desktop/src/shared/rpc/model-rpc.ts
 apps/desktop/src/shared/model.ts

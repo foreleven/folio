@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigRpcs } from '../../shared/rpc/config-rpc'
-import { ConfigService } from '../services/config-service'
+import { ConfigService } from '../services/config/config-service'
 import { ConfigRpcHandlersLive } from './config-rpc'
 
 describe('Configuration RPC', () => {

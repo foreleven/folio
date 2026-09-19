@@ -14,7 +14,7 @@ import { RpcSerialization, RpcServer } from 'effect/unstable/rpc'
 import { SystemRpcs } from '../../shared/rpc/system-rpc'
 import { ConfigRpcs } from '../../shared/rpc/config-rpc'
 import { ConfigRpcHandlersLive } from './config-rpc'
-import { SystemService } from '../services/system-service'
+import { SystemService } from '../services/system/system-service'
 import { ElectronRpcServerProtocolLive } from './electron-rpc-protocol'
 import { SystemRpcHandlersLive } from './system-rpc'
 

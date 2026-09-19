@@ -20,7 +20,7 @@
 
 ### Git 证据
 
-命令：`npm test --workspace=@folio/agent -- tests/git-sync-spike.test.ts`
+命令：`npm test --workspace=@folio/agent -- tests/integration/git-sync-spike.test.ts`
 
 测试使用独立临时仓库和真实 worktree；不修改开发仓库，不加载用户 Git 配置、签名或 hooks。
 
@@ -51,7 +51,7 @@
 
 ### Pi 原生 Session 证据
 
-命令：`npm test --workspace=@folio/agent -- tests/pi-session-persistence-spike.test.ts`
+命令：`npm test --workspace=@folio/agent -- tests/pi/pi-session-persistence-spike.test.ts`
 
 - 使用真实 Pi SDK，第一进程创建并保存会话，第二进程恢复相同原生 ID、cwd 和消息；无需模型请求。
 - 首条 Assistant 消息出现前，SessionManager.create 的原生文件尚未落盘，即使已 append 用户消息。

@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import { TaskRpcs } from '../../shared/rpc/task-rpc'
-import { TaskService } from '../services/task-service'
+import { TaskService } from '../services/tasks/task-service'
 
 /** Task storage and worktree operations remain in the application service, beyond renderer lifetimes. */
 export const TaskRpcHandlersLive = TaskRpcs.toLayer(

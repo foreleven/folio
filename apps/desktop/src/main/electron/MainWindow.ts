@@ -1,5 +1,5 @@
-import { VaultRuntime } from '../services/vault-runtime'
-import { VaultWindowContexts } from '../services/vault-window-contexts'
+import { VaultRuntime } from '../services/vault/vault-runtime'
+import { VaultWindowContexts } from '../services/vault/vault-window-contexts'
 import type { BrowserWindow } from 'electron'
 import { Context, Effect, Layer, Semaphore } from 'effect'
 import { createRendererWindow, loadRenderer, RendererLoadError } from './renderer-window'
