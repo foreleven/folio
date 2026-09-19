@@ -229,7 +229,8 @@ export const TaskServiceLive = Layer.effect(
     }, gate.withPermit)
     /** Receipt RPCs stay truthful when the independent worktree cleanup needs a later retry. */
     const completeRoutineAfterReceipt = (taskId: string) =>
-      completeRoutineIfSettled(taskId).pipe(Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.')))
+      completeRoutineIfSettled(taskId).pipe(Effect.catch(error => Effect.logWarning(
+        'Settled Routine Task could not be released; its worktree is retained for inspection.', { vaultId: vault.id, taskId }, error)))
     /** Allocates identity before native startup; model choice is never invented by this storage/lifecycle endpoint. */
     const prepareSession = Effect.fn('TaskService.prepareSession')(function* (input: OpenTaskSessionInput) {
       const task = yield* store.task(input.taskId)
@@ -524,7 +525,7 @@ export const TaskServiceLive = Layer.effect(
       // A crash may land after the final Run receipt but before worktree release. Reconcile
       // durable Routine state before admitting another batch; one dirty Task cannot stop peers.
       for (const task of yield* store.tasks) {
-        yield* completeRoutineIfSettled(task.id).pipe(Effect.catch(() => Effect.logWarning('Settled Routine Task could not be released; its worktree is retained for inspection.')))
+        yield* completeRoutineAfterReceipt(task.id)
       }
       const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
       for (const routine of yield* routines.list) {

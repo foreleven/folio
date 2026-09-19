@@ -1,24 +1,17 @@
-import { Separator } from '@folio/ui'
 import { SidebarTrigger, useSidebar } from '@folio/ui/components/ui/sidebar'
-import { cn } from '@folio/ui/lib/utils'
-import { ArrowLeft, ArrowRight } from 'lucide-react'
 
-export const WorkspaceHeader = ({ label }: { label: string }) => {
-  const { state } = useSidebar()
+/** Aligns the native titlebar with the shared sidebar; reserves space for macOS window controls. */
+export const WorkspaceHeader = ({ label, vaultName }: { label: string; vaultName?: string }) => {
+  const { state, isMobile } = useSidebar()
+  const expanded = !isMobile && state === 'expanded'
   return (
-    <header className="flex w-full h-9 shrink-0 items-center gap-2 border-b [-webkit-app-region:drag] group-data-[state=collapsed]:px-3">
-      <div className={cn('flex justify-end p-2 border-r', state === 'expanded' ? 'w-[220px]' : 'w-0')}>
-        <ArrowLeft className="size-4 text-secondary-foreground" />
-        <ArrowRight className="size-4 text-secondary-foreground" />
-      </div>
-      <div className={cn('flex items-center px-2', state === 'expanded' ? '' : 'pl-20')}>
-        <SidebarTrigger className="[-webkit-app-region:no-drag]" />
-        <Separator orientation="vertical" className="h-4" />
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-ui font-semibold" title={label}>
-            {label}
-          </h1>
-        </div>
+    <header className="flex h-9 w-full shrink-0 items-center border-b [-webkit-app-region:drag]">
+      {expanded && <div className="flex h-full w-(--sidebar-width) shrink-0 items-center border-r bg-sidebar pr-3 pl-20">
+        <span className="truncate text-xs font-medium text-sidebar-foreground" title={vaultName}>{vaultName || 'Folio'}</span>
+      </div>}
+      <div className={`flex min-w-0 items-center gap-2 pr-3 ${expanded ? 'pl-2' : 'pl-20'}`}>
+        <SidebarTrigger className="shrink-0 [-webkit-app-region:no-drag]" />
+        <h1 className="truncate text-ui font-medium" title={label}>{label}</h1>
       </div>
     </header>
   )

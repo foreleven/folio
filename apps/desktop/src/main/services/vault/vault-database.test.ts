@@ -18,7 +18,7 @@ describe('vaultDatabaseLayer', () => {
         WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'effect_sql_migrations' ORDER BY name`
       expect(tables.map(row => row.name)).toEqual([
         'git_change_applications', 'git_change_preparation_runs', 'git_change_preparations',
-        'git_sync_operations', 'git_sync_resolution_inputs', 'messages', 'routines', 'runs', 'sessions', 'tasks'
+        'git_sync_operations', 'git_sync_resolution_inputs', 'messages', 'routines', 'runs', 'sessions', 'tasks', 'wiki_object_types', 'wiki_pages'
       ])
       expect(yield* sql`SELECT migration_id, name FROM effect_sql_migrations`).toEqual([{ migration_id: 1, name: 'vault' }])
       yield* sql`INSERT INTO tasks (id, goal, configuration, branch, worktree, state, created_at)

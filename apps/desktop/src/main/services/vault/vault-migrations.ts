@@ -7,6 +7,16 @@ export const migrateVault = SqliteMigrator.run({
   loader: SqliteMigrator.fromRecord({
     '0001_vault': Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
+      // Markdown is authoritative; these tables contain rebuildable metadata only.
+      yield* sql`CREATE TABLE wiki_object_types (
+        id TEXT PRIMARY KEY NOT NULL, definition TEXT NOT NULL CHECK(json_valid(definition))
+      )`
+      yield* sql`CREATE TABLE wiki_pages (
+        id TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, object_type TEXT NOT NULL,
+        parent_id TEXT, title TEXT NOT NULL, metadata TEXT NOT NULL CHECK(json_valid(metadata)), frontmatter TEXT NOT NULL CHECK(json_valid(frontmatter)), version TEXT NOT NULL
+      )`
+      yield* sql`CREATE INDEX wiki_pages_by_type ON wiki_pages(object_type)`
+      yield* sql`CREATE INDEX wiki_pages_by_parent ON wiki_pages(parent_id)`
       // Routine definitions; execution windows live on Tasks.
       yield* sql`CREATE TABLE routines (
         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,

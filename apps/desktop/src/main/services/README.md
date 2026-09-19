@@ -18,6 +18,7 @@ RPC contracts, layer ownership, or resource lifetimes.
 | `system/`       | Application/system information                                                                     |
 | `tasks/`        | Task use cases, resource preparation, worktrees, synchronization and operation lifetime            |
 | `vault/`        | Vault registration, workspace initialization, database migrations, context and runtime composition |
+| `wiki/`        | Markdown Page files, ObjectType definitions, metadata indexing and editor saves                   |
 | `testing/`      | Shared test-only execution fixtures                                                                |
 
 `program.ts` composes application-scoped services. `vault/vault-runtime.ts`

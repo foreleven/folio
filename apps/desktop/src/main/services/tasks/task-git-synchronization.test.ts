@@ -49,6 +49,34 @@ const setup = Effect.gen(function* () {
   }
 })
 
+it.each([false, true])('releases a settled Task after main advances, previously synchronized=%s', async (synchronized) => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const { workspace, task, worktrees, applications, sync, git, store } = yield* setup
+    let published = task.baselineCommit
+    let retained = task.baselineCommit
+    if (synchronized) {
+      yield* Effect.promise(() => writeFile(join(task.path, 'wiki/task.md'), 'published task knowledge\n'))
+      const source = yield* applications.save({ id: 'before-release', taskId: 'task', expectedParent: retained, paths: ['wiki/task.md'] })
+      const receipt = yield* sync.synchronize({ id: 'before-release-sync', taskId: 'task', expectedSourceHead: source.commit })
+      published = receipt.publishedHead!
+      retained = receipt.alignedHead!
+    }
+    yield* Effect.promise(() => writeFile(join(workspace.wiki, 'new-page.md'), 'new user page\n'))
+    const mainSave = yield* applications.save({ id: 'new-user-page', taskId: null, expectedParent: published, paths: ['wiki/new-page.md'] })
+    // Execution still requires synchronization; cleanup must not inherit that requirement.
+    expect(yield* worktrees.ensure('task').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki/unsaved.md'), 'retain this draft'))
+    expect(yield* worktrees.complete('task').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+    expect(yield* Effect.promise(() => readFile(join(task.path, 'wiki/unsaved.md'), 'utf8'))).toBe('retain this draft')
+    yield* Effect.promise(() => rm(join(task.path, 'wiki/unsaved.md')))
+    yield* worktrees.complete('task')
+    expect(yield* store.task('task')).toMatchObject({ state: 'completed', worktreeState: 'released' })
+    expect((yield* git(workspace.workspace, ['rev-parse', 'HEAD'])).trim()).toBe(mainSave.commit)
+    expect((yield* git(workspace.workspace, ['rev-parse', task.branch])).trim()).toBe(retained)
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'new-page.md'), 'utf8'))).toBe('new user page\n')
+  }).pipe(Effect.provide(layer())))
+})
+
 /** Manual writes stand in for a stopped Agent; this test intentionally does not claim writer quiescence. */
 it('publishes a manually saved wiki change and keeps later rounds on the aligned frontier', async () => {
   await Effect.runPromise(
@@ -1135,4 +1163,24 @@ it('retains a conflicted coordinator unchanged across restart and retry', async 
       expect(yield* Effect.promise(() => readFile(join(root, 'sync-worktrees/restart-conflict-sync/wiki/restart-conflict.md'), 'utf8'))).toBe(conflict.contents)
     }).pipe(Effect.provide(layer()))
   )
+}, 15_000)
+
+it('indexes a Task Page only after Wiki publication, keeping its body on disk', async () => {
+  const { WikiService, wikiServiceLayer } = await import('../wiki/wiki-service')
+  await Effect.runPromise(Effect.gen(function* () {
+    const { task, applications, sync } = yield* setup
+    const wiki = yield* WikiService
+    const source = '---\nid: published-page\ntitle: Routine findings\nobjectType: note\nproperties:\n  tags: [research]\n---\n# Evidence\n\nSource-backed knowledge.\n'
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki/findings.md'), source))
+    expect((yield* wiki.snapshot).pages).toHaveLength(0)
+    const saved = yield* applications.save({ id: 'page-save', taskId: 'task', expectedParent: task.baselineCommit, paths: ['wiki/findings.md'] })
+    expect((yield* wiki.snapshot).pages).toHaveLength(0)
+    yield* sync.synchronize({ id: 'page-sync', taskId: 'task', expectedSourceHead: saved.commit })
+    const snapshot = yield* wiki.snapshot
+    expect(snapshot.pages).toHaveLength(1)
+    expect(snapshot.pages[0]).toMatchObject({ id: 'published-page', title: 'Routine findings', objectType: 'note', properties: { tags: ['research'] } })
+    expect((yield* wiki.read('published-page')).body).toContain('Source-backed knowledge.')
+    const sql = yield* SqlClient.SqlClient
+    expect(JSON.stringify(yield* sql`SELECT * FROM wiki_pages`)).not.toContain('Source-backed knowledge.')
+  }).pipe(Effect.provide(wikiServiceLayer(root).pipe(Layer.provideMerge(layer())))))
 }, 15_000)

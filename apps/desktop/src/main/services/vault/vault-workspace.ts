@@ -1,3 +1,4 @@
+import { defaultObjectTypes } from '../../../shared/wiki'
 import { Effect, FileSystem, Schema } from 'effect'
 import { lstat, rmdir, symlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
@@ -14,7 +15,14 @@ const instructions = `# Vault workspace
 - Folio owns Git commits, branches and synchronization. Use Git only for reading status and diffs.
 - Keep original source material under raws/ unchanged. Call the provided Integration scripts to obtain new source material.
 - Do not leave background processes writing this workspace after a turn ends.
-- Place curated user content under wiki/.
+- Place curated user content under wiki/ as Markdown Pages with YAML frontmatter.
+- Read wiki/_types.json before writing Pages. Use the declared objectType and its property keys.
+- Page frontmatter: id (stable UUID), title, objectType, parentId (Page ID or null), icon, cover,
+  favorite (boolean), trashed (boolean), createdAt and updatedAt (ISO timestamps), properties (mapping).
+- Keep the body after the closing frontmatter delimiter. Preserve existing Page IDs and metadata.
+- Use wiki/<id>.md for new Pages. Use parentId for hierarchy and Page IDs for relation properties.
+- Do not duplicate IDs. Link to related Pages with relative Markdown links and cite raw sources.
+- Do not change wiki/_types.json unless the task explicitly calls for changing the knowledge schema.
 `
 
 /**
@@ -36,10 +44,11 @@ export const initializeVaultWorkspace = Effect.fn('VaultWorkspace.initialize')(
       yield* fs.makeDirectory(staged)
       yield* fs.makeDirectory(join(staged, 'wiki'))
       yield* fs.makeDirectory(join(staged, 'raws'))
+      yield* fs.writeFileString(join(staged, 'wiki/_types.json'), JSON.stringify(defaultObjectTypes, null, 2) + '\n')
       yield* fs.writeFileString(join(staged, 'AGENTS.md'), instructions)
       yield* fs.writeFileString(join(staged, '.gitignore'), '.DS_Store\n')
       yield* git(staged, ['init', '--initial-branch=main', '--template='])
-      yield* git(staged, ['add', '--', 'AGENTS.md', '.gitignore'])
+      yield* git(staged, ['add', '--', 'AGENTS.md', '.gitignore', 'wiki/_types.json'])
       yield* git(staged, ['commit', '-m', 'Initialize Folio vault workspace'])
       const initialCommit = (yield* git(staged, ['rev-parse', 'HEAD'])).trim()
       yield* fs.writeFileString(

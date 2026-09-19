@@ -1,3 +1,4 @@
+import { WikiPanel } from '../wiki/WikiPanel'
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { FolderIcon, GitBranchIcon, ListTodoIcon, WorkflowIcon } from 'lucide-react'
@@ -17,7 +18,7 @@ export function VaultWorkspace(): React.JSX.Element {
   const result = useAtomValue(query)
   const refresh = useAtomRefresh(query)
   const name = result._tag === 'Success' ? result.value?.name : undefined
-  const [section, setSection] = useState<WorkspaceSection>('overview')
+  const [section, setSection] = useState<WorkspaceSection>('wiki')
 
   // The HTML document title otherwise overrides Electron's initial native window title.
   useEffect(() => {
@@ -57,8 +58,10 @@ export function VaultWorkspace(): React.JSX.Element {
 
   const vault = result.value
   return (
-    <VaultWorkspaceLayout chinese={chinese} vault={vault} section={section} onSectionChange={setSection}>
-      {section === 'overview' ? (
+    <WikiPanel key={vault.id} active={section === 'wiki'} onActivate={() => setSection('wiki')}>
+      {({ navigation, content }) => <VaultWorkspaceLayout chinese={chinese} vault={vault} section={section} onSectionChange={setSection} wikiNavigation={navigation}>
+      <div hidden={section !== 'wiki'}>{content}</div>
+      {section === 'wiki' ? null : section === 'overview' ? (
         <OverviewContent chinese={chinese} vaultName={vault.name} vaultPath={vault.path} onNavigate={setSection} />
       ) : section === 'changes' ? (
         <WorkspaceChangesPanel key={`changes:${vault.id}`} />
@@ -67,7 +70,8 @@ export function VaultWorkspace(): React.JSX.Element {
       ) : (
         <TaskPanel key={vault.id} />
       )}
-    </VaultWorkspaceLayout>
+      </VaultWorkspaceLayout>}
+    </WikiPanel>
   )
 }
 

@@ -145,7 +145,7 @@ export class TaskWorktrees extends Context.Service<
             return yield* store.task(taskId)
           }
           const base = yield* Schema.decodeUnknownEffect(Commit)(task.worktreeBase).pipe(Effect.mapError(invalid))
-          const synchronized = yield* sql<{ alignedHead: string }>`SELECT aligned_head AS alignedHead FROM git_sync_operations
+          const synchronized = yield* sql<{ alignedHead: string; publishedHead: string }>`SELECT aligned_head AS alignedHead, published_head AS publishedHead FROM git_sync_operations
             WHERE task_id=${taskId} AND state='aligned' ORDER BY sequence DESC LIMIT 1`
           const expectedHead = synchronized[0]?.alignedHead ?? base
           if (task.state === 'completed' && task.worktreeState === 'released') {
@@ -158,12 +158,21 @@ export class TaskWorktrees extends Context.Service<
             return task
           }
           if (task.state === 'active' && task.worktreeState === 'ready') {
-            yield* ensureLocked(taskId)
+            const publishedHead = synchronized[0]?.publishedHead ?? base
+            const mainHead = (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim()
+            const marker = yield* fs.readFileString(join(main, '.git', 'folio-workspace.json')).pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({ version: Schema.Literal(1), initialCommit: Commit })))))
+            // Cleanup consumes the Task's settled checkpoint. Later registered main edits
+            // do not create unpublished Task work and must not force another synchronization.
+            if (!(yield* isRegisteredGitCommit('main', mainHead, marker.initialCommit).pipe(Effect.provideService(SqlClient.SqlClient, sql))) ||
+              (yield* git(main, ['merge-base', publishedHead, mainHead])).trim() !== publishedHead)
+              return yield* invalid()
+            yield* ensureLocked(taskId, { taskHead: expectedHead, mainHead })
             if (
               (yield* sql`SELECT id FROM runs WHERE task_id=${taskId} AND state='succeeded'
                 AND sync_state NOT IN ('completed', 'not-required')`).length ||
               (yield* git(path, ['status', '--porcelain', '--untracked-files=all'])).trim() ||
-              (yield* git(path, ['rev-parse', 'HEAD^{tree}'])).trim() !== (yield* git(main, ['rev-parse', 'HEAD^{tree}'])).trim()
+              (yield* git(path, ['rev-parse', 'HEAD^{tree}'])).trim() !== (yield* git(main, ['rev-parse', `${publishedHead}^{tree}`])).trim()
             )
               return yield* invalid()
             // The SQL predicate closes the cross-process gap after the preflight: either an

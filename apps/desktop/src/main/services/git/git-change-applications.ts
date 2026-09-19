@@ -1,6 +1,7 @@
 import { Context, Effect, FileSystem, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { ChildProcessSpawner } from 'effect/unstable/process'
+import { randomUUID } from 'node:crypto'
 import { link, lstat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import {
@@ -60,6 +61,8 @@ export const isRegisteredGitCommit = Effect.fn('GitChange.isRegisteredCommit')(f
 export class GitChangeApplications extends Context.Service<
   GitChangeApplications,
   {
+    /** Runs a trusted editor mutation and saves only its reported files under one main-checkout gate. */
+    readonly editWorkspace: <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) => Effect.Effect<A, HarnessStoreError>
     readonly save: (input: SaveGitFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly saveRunWiki: (input: SaveRunWikiFilesValue) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly confirmRunWikiUnchanged: (input: ConfirmRunWikiUnchangedValue) => Effect.Effect<RunRecord, HarnessStoreError>
@@ -290,6 +293,21 @@ export class GitChangeApplications extends Context.Service<
           lock.withLock
         )
 
+        // The editor's filesystem write and Git snapshot share this gate with Task publication.
+        // Other dirty files are deliberately excluded from the saved path set.
+        const editWorkspace = <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) =>
+          Effect.gen(function* () {
+            const source = yield* checkout({ taskId: null, branch: 'main' })
+            if ((yield* sql`SELECT id FROM git_change_applications WHERE branch='main' AND state='applying'`).length) return yield* invalid()
+            const expectedParent = (yield* git(source.path, ['rev-parse', 'HEAD'])).trim()
+            if (!(yield* isRegisteredGitCommit('main', expectedParent, source.base))) return yield* invalid()
+            const { value, paths } = yield* edit
+            const input = yield* Schema.decodeUnknownEffect(SaveGitFiles)({ id: randomUUID(), taskId: null, expectedParent, paths })
+            if ((yield* git(source.path, ['status', '--porcelain', '--untracked-files=all', '--', ...input.paths])).trim())
+              yield* saveLocked({ ...input, kind: 'user', runIds: [] })
+            return value
+          }).pipe(Effect.provide(dependencies), Effect.mapError(storage), lock.withLock)
+
         /** User-triggered Run save records Agent provenance without inferring filesystem ownership. */
         const saveRunWiki = Effect.fn('GitChangeApplications.saveRunWiki')(
           function* (input: SaveRunWikiFilesValue) {
@@ -362,7 +380,7 @@ export class GitChangeApplications extends Context.Service<
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(GitChangeApplication))),
           Effect.mapError(storage)
         )
-        return GitChangeApplications.of({ save, saveRunWiki, confirmRunWikiUnchanged, apply, recover, pending })
+        return GitChangeApplications.of({ editWorkspace, save, saveRunWiki, confirmRunWikiUnchanged, apply, recover, pending })
       }).pipe(Effect.mapError(storage))
     ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
   }

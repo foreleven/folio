@@ -1,3 +1,4 @@
+import type { WikiService } from '../../../shared/wiki-service'
 import { Deferred, Effect, Fiber } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { emptyExecutionCounts } from '../../../shared/execution'
@@ -11,6 +12,22 @@ const service = (patch: Partial<TaskService['Service']> = {}) => ({
 }) as TaskService['Service']
 
 describe('Vault Task operation lifetime', () => {
+  it('drains Wiki writes and rejects stale editor callbacks before Vault deletion', async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      let cleaned = false
+      const wiki = { save: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never),
+        Effect.ensuring(Effect.sync(() => { cleaned = true }))) } as unknown as WikiService['Service']
+      const lifetime = yield* makeTaskOperationLifetime(service(), Effect.void, wiki)
+      const running = yield* lifetime.wiki!.save({} as never).pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      yield* lifetime.quiesce
+      expect(cleaned).toBe(true)
+      expect((yield* Fiber.await(running))._tag).toBe('Failure')
+      expect(yield* lifetime.wiki!.save({} as never).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+    }).pipe(Effect.scoped))
+  })
+
   it('joins in-flight cleanup before retirement and rejects stale callers', async () => {
     await Effect.runPromise(Effect.gen(function* () {
       const started = yield* Deferred.make<void>()

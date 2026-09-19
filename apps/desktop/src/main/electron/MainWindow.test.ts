@@ -1,3 +1,4 @@
+import { WikiService } from '../../shared/wiki-service'
 import { VaultRuntime } from '../services/vault/vault-runtime'
 import { VaultContext, makeVaultContext } from '../services/vault/vault-context'
 import { VaultWindowContexts } from '../services/vault/vault-window-contexts'
@@ -11,7 +12,7 @@ const windowLayer = MainWindow.layer.pipe(
     Layer.succeed(VaultRuntime)({
       withClosed: (_id, operation) => operation,
       open: (id) =>
-        Effect.succeed(Context.make(VaultContext, makeVaultContext({ id, name: 'wiki', path: '/wiki' }, '/config')).pipe(Context.add(TaskService, {} as TaskService['Service'])))
+        Effect.succeed(Context.make(VaultContext, makeVaultContext({ id, name: 'wiki', path: '/wiki' }, '/config')).pipe(Context.add(TaskService, {} as TaskService['Service']), Context.add(WikiService, {} as WikiService['Service'])))
     })
   ),
   Layer.provide(VaultWindowContexts.layer)

@@ -1,3 +1,5 @@
+import { WikiRpcs } from '../../shared/rpc/wiki-rpc'
+import { WikiRpcHandlersLive, WikiMiddlewareLive } from './wiki-rpc'
 import { ExecutionRpcs } from '../../shared/rpc/execution-rpc'
 import { ExecutionRpcHandlersLive } from './execution-rpc'
 import { VaultMiddlewareLive } from './vault-middleware'
@@ -24,6 +26,7 @@ const ElectronRpcProtocolLive = ElectronRpcServerProtocolLive.pipe(Layer.provide
 
 const RpcDependenciesLive = Layer.mergeAll(
   SystemHandlersLive,
+  WikiRpcHandlersLive,
   ExecutionRpcHandlersLive,
   ConfigRpcHandlersLive,
   ModelRpcHandlersLive,
@@ -34,7 +37,7 @@ const RpcDependenciesLive = Layer.mergeAll(
 )
 
 /** Complete main-process Effect RPC server Layer. */
-export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ExecutionRpcs, ConfigRpcs, ModelRpcs, VaultRpcs, IntegrationRpcs, TaskRpcs)).pipe(
+export const MainRpcLive = RpcServer.layer(SystemRpcs.merge(ExecutionRpcs, ConfigRpcs, ModelRpcs, VaultRpcs, IntegrationRpcs, TaskRpcs, WikiRpcs)).pipe(
   Layer.provide(RpcDependenciesLive),
-  Layer.provide(VaultMiddlewareLive)
+  Layer.provide(Layer.merge(VaultMiddlewareLive, WikiMiddlewareLive))
 )

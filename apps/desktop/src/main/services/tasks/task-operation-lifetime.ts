@@ -1,3 +1,4 @@
+import type { WikiService } from '../../../shared/wiki-service'
 import { Effect, Fiber, FiberSet } from 'effect'
 import { HarnessStoreError } from '../../../shared/harness'
 import type { TaskService } from '../../../shared/task-service'
@@ -5,10 +6,10 @@ import type { TaskService } from '../../../shared/task-service'
 const unavailable = () => new HarnessStoreError({ reason: 'task-busy', message: 'This Vault is closing. Wait for deletion to finish.' })
 
 /**
- * Every public Task operation, including calls through an old window/scheduler reference,
+ * Every public Task and Wiki operation, including calls through an old window/scheduler reference,
  * belongs to the Vault lifetime. Draining joins cleanup before SQLite or files can disappear.
  */
-export const makeTaskOperationLifetime = (raw: TaskService['Service'], verifyStopped: Effect.Effect<void, HarnessStoreError> = Effect.void) => Effect.gen(function* () {
+export const makeTaskOperationLifetime = (raw: TaskService['Service'], verifyStopped: Effect.Effect<void, HarnessStoreError> = Effect.void, wiki?: WikiService['Service']) => Effect.gen(function* () {
   const fibers = yield* FiberSet.make<unknown, HarnessStoreError>()
   let closing = false
   const track = <A>(operation: Effect.Effect<A, HarnessStoreError>) => Effect.uninterruptibleMask(restore => Effect.gen(function* () {
@@ -43,5 +44,5 @@ export const makeTaskOperationLifetime = (raw: TaskService['Service'], verifySto
       reason: 'task-busy', message: 'Vault execution ownership could not be released. Stop or inspect its tasks before deleting.'
     })
   }).pipe(Effect.uninterruptible, Effect.onError(() => Effect.sync(() => { closing = false })))
-  return { service, quiesce }
+  return { service, quiesce, wiki: wiki ? wrap(wiki) as WikiService['Service'] : undefined }
 })

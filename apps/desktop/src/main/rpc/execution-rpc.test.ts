@@ -1,3 +1,4 @@
+import { WikiService } from '../../shared/wiki-service'
 import { Context, Effect, Layer } from 'effect'
 import { RpcTest } from 'effect/unstable/rpc'
 import { expect, it } from 'vitest'
@@ -22,7 +23,7 @@ it('aggregates unopened Vaults and marks unavailable Vaults without hiding healt
       if (id === 'offline') return Effect.fail(new HarnessStoreError({ reason: 'storage', message: 'offline' }))
       return Effect.succeed(Context.make(TaskService, {
         executionCounts: Effect.succeed({ ...emptyExecutionCounts(), queued: id === 'a' ? 2 : 1, running: 1 })
-      } as unknown as TaskService['Service']).pipe(Context.add(VaultContext, { id, vault: { id, name: id, path: '/test' }, directory: '/test' })))
+      } as unknown as TaskService['Service']).pipe(Context.add(VaultContext, { id, vault: { id, name: id, path: '/test' }, directory: '/test' }), Context.add(WikiService, {} as WikiService['Service'])))
     }
   })
   const result = await Effect.runPromise(Effect.gen(function* () {

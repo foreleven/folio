@@ -1,8 +1,9 @@
+import type { WikiService } from '../../../shared/wiki-service'
 import { Context, Effect, Layer } from 'effect'
 import type { TaskService } from '../tasks/task-service'
 import type { VaultContext } from './vault-context'
 
-export type VaultServices = Context.Context<VaultContext | TaskService>
+export type VaultServices = Context.Context<VaultContext | TaskService | WikiService>
 
 /** Binds native WebContents and server-assigned RPC clients; renderer payloads never select a Vault. */
 export class VaultWindowContexts extends Context.Service<

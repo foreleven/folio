@@ -1,3 +1,4 @@
+import { WikiService } from '../../shared/wiki-service'
 import { VaultMiddleware } from '../../shared/rpc/vault-middleware'
 import { VaultMiddlewareLive } from './vault-middleware'
 import { VaultContext, makeVaultContext } from '../services/vault/vault-context'
@@ -334,7 +335,7 @@ it('injects the native window Vault, ignoring forged identities and denying unbo
           calls.push(id)
           return []
         })
-      } as unknown as TaskService['Service'])
+      } as unknown as TaskService['Service']), Context.add(WikiService, {} as WikiService['Service'])
     )
   try {
     const bindings = await runtime.runPromise(VaultWindowContexts)

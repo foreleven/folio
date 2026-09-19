@@ -1,3 +1,4 @@
+import { WikiService, wikiServiceLayer } from '../wiki/wiki-service'
 import { makeTaskOperationLifetime } from '../tasks/task-operation-lifetime'
 import { AgentWorkerPool } from '../agent/agent-worker-pool'
 import { RunFiles, RunFileStore, fileEffect } from '../execution/run-files'
@@ -33,7 +34,7 @@ const safeError = (error: unknown) => (error instanceof HarnessStoreError ? erro
 export class VaultRuntime extends Context.Service<
   VaultRuntime,
   {
-    readonly open: (id: string) => Effect.Effect<Context.Context<TaskService | VaultContext>, HarnessStoreError>
+    readonly open: (id: string) => Effect.Effect<Context.Context<TaskService | VaultContext | WikiService>, HarnessStoreError>
     /** Retires cached callers and closes all resources before the destructive callback. */
     readonly withClosed: <A, E, R>(id: string, operation: Effect.Effect<A, E, R>) => Effect.Effect<A, E | HarnessStoreError, R>
   }
@@ -68,6 +69,7 @@ export class VaultRuntime extends Context.Service<
               if ((yield* fs.realPath(directory)) !== directory || !(yield* fs.exists(join(directory, 'data.db')))) return yield* failure('not-found')
               const services = TaskServiceLive.pipe(
                 Layer.provide(WorkspaceChanges.layer(directory)),
+                Layer.provideMerge(wikiServiceLayer(directory)),
                 Layer.provide(GitChangeApplications.layer(directory)),
                 Layer.provide(GitChangeJournal.layer(directory)),
                 Layer.provide(HarnessRuns.layer),
@@ -115,9 +117,9 @@ export class VaultRuntime extends Context.Service<
                   if ((yield* fileEffect(() => files.list())).length) return yield* new HarnessStoreError({
                     reason: 'task-busy', message: 'Vault recovery files still own execution resources. Inspect them before deleting.'
                   })
-                }))
+                }), Context.get(built, WikiService))
                 lifetimes.set(id, lifetime.quiesce)
-                return Context.add(built, TaskService, lifetime.service)
+                return built.pipe(Context.add(TaskService, lifetime.service), Context.add(WikiService, lifetime.wiki!))
               }))
             })
           ),
@@ -127,12 +129,12 @@ export class VaultRuntime extends Context.Service<
       const open = (id: string) =>
         Effect.gen(function* () {
           if (!(yield* config.get).vaults.some((vault) => vault.id === id)) return yield* failure('not-found')
-          return yield* Effect.context<TaskService | VaultContext>().pipe(Effect.provide(resources.get(id)))
+          return yield* Effect.context<TaskService | VaultContext | WikiService>().pipe(Effect.provide(resources.get(id)))
         }).pipe(lockFor(id).withPermit, Effect.mapError(safeError))
       const withClosed = <A, E, R>(id: string, operation: Effect.Effect<A, E, R>) => Effect.gen(function* () {
         // Acquire unopened Vaults too: a previous process may have left recovery receipts.
         if (!lifetimes.has(id) && (yield* fs.exists(join(config.directory, 'vaults', id, 'data.db')).pipe(Effect.mapError(safeError)))) {
-          yield* Effect.context<TaskService | VaultContext>().pipe(Effect.provide(resources.get(id)), Effect.mapError(safeError))
+          yield* Effect.context<TaskService | VaultContext | WikiService>().pipe(Effect.provide(resources.get(id)), Effect.mapError(safeError))
         }
         const quiesce = lifetimes.get(id)
         if (quiesce) yield* quiesce

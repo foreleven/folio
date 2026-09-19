@@ -149,6 +149,23 @@ describe('Task Git worktree creation checkpoints', () => {
     }).pipe(Effect.provide(layer())))
   })
 
+  it.each(['main', 'task'])('retains a checkout when %s contains an unregistered commit at release', async (target) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const main = yield* initialize
+      const worktrees = yield* TaskWorktrees
+      const checkout = yield* worktrees.create(draft('unregistered'))
+      const path = target === 'main' ? main.workspace : checkout.path
+      const git = yield* makeVaultGit
+      yield* Effect.promise(() => writeFile(join(path, 'wiki/external.md'), 'external knowledge'))
+      yield* git(path, ['add', '--', 'wiki/external.md'])
+      yield* git(path, ['commit', '-m', 'Unregistered change'])
+      expect(yield* worktrees.complete('unregistered').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      expect(yield* (yield* HarnessStore).task('unregistered')).toMatchObject({ state: 'active', worktreeState: 'ready' })
+      expect(yield* Effect.promise(() => readFile(join(checkout.path, '.git'), 'utf8'))).toContain('gitdir:')
+      expect(yield* Effect.promise(() => readFile(join(path, 'wiki/external.md'), 'utf8'))).toBe('external knowledge')
+    }).pipe(Effect.provide(layer())))
+  })
+
   it('reopens a released Task from current main while retaining its prior branch head', async () => {
     await Effect.runPromise(Effect.gen(function* () {
       const main = yield* initialize
