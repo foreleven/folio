@@ -3,7 +3,7 @@ import { SqlClient } from 'effect/unstable/sql'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { HarnessStoreError } from '../../../shared/harness'
-import { RoutineExecution, RoutineRecord, SaveRoutine, previousRoutineDate, routineDateAt, routineDayEnd, routineDayStart } from '../../../shared/routine'
+import { RoutineExecution, RoutineRecord, SaveRoutine, routineDateAt, routineDayStart } from '../../../shared/routine'
 import { TaskWorktrees } from '../tasks/task-worktrees'
 import { SessionModelSelection } from '../../../shared/model'
 
@@ -41,6 +41,8 @@ const DbRoutine = Schema.Struct({
 const DbExecution = Schema.Struct({
   routineId: RoutineExecution.fields.routineId,
   taskId: RoutineExecution.fields.taskId,
+  runId: RoutineExecution.fields.runId,
+  cancelRequested: Schema.Number,
   routineDate: RoutineExecution.fields.routineDate,
   triggerTime: RoutineExecution.fields.triggerTime,
   firstTriggerTime: RoutineExecution.fields.firstTriggerTime,
@@ -65,7 +67,7 @@ function decodeRoutine(row: typeof DbRoutine.Type): RoutineRecord {
 }
 
 function decodeExecution(row: typeof DbExecution.Type): RoutineExecution {
-  return { ...row, isEnd: row.isEnd === true || row.isEnd === 1 }
+  return { ...row, cancelRequested: row.cancelRequested === 1, isEnd: row.isEnd === true || row.isEnd === 1 }
 }
 
 /** Owns Routine configuration and scheduling metadata on Tasks. Execution receipts remain in runs. */
@@ -75,7 +77,7 @@ export class RoutineStore extends Context.Service<
     readonly list: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
     readonly get: (id: string) => Effect.Effect<RoutineRecord, HarnessStoreError>
     readonly save: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
-    readonly schedule: (routineId: string, at?: number) => Effect.Effect<RoutineExecution, HarnessStoreError>
+    readonly schedule: (routineId: string, at?: number, mode?: 'check' | 'settled') => Effect.Effect<RoutineExecution | null, HarnessStoreError>
     readonly allExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly executions: (routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly executionForTask: (taskId: string) => Effect.Effect<RoutineExecution | null, HarnessStoreError>
@@ -102,7 +104,7 @@ export class RoutineStore extends Context.Service<
       // A Routine execution is a read projection of its Task and latest normal request.
       // Resolution requests must not overwrite the outcome of the Routine's actual work.
       const readExecutionRows = (routineId?: string, taskId?: string) =>
-        sql`SELECT t.routine_id AS routineId, t.id AS taskId, t.routine_date AS routineDate,
+        sql`SELECT t.routine_id AS routineId, t.id AS taskId, r.id AS runId, COALESCE(r.cancel_requested, 0) AS cancelRequested, t.routine_date AS routineDate,
           t.trigger_time AS triggerTime, t.first_trigger_time AS firstTriggerTime, t.trigger_count AS triggerCount,
           t.is_end AS isEnd, t.window_start AS windowStart, t.window_end AS windowEnd,
           t.routine_model AS model, t.routine_time_zone AS timeZone,
@@ -187,83 +189,60 @@ export class RoutineStore extends Context.Service<
         return (yield* readExecutionRows(undefined, taskId)).at(0) ?? null
       }, Effect.mapError(safe))
 
-      const schedule = Effect.fn('RoutineStore.schedule')(function* (routineId: string, at = Date.now()) {
+      const schedule = Effect.fn('RoutineStore.schedule')(function* (routineId: string, at = Date.now(), mode: 'check' | 'settled' = 'check') {
         return yield* sql.withTransaction(
           Effect.gen(function* () {
             const routine = yield* get(routineId)
             if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
-            // Each execution is a bounded ingestion window. The first run starts
-            // at its civil day's midnight; later runs begin at the previous boundary. A
-            // pending execution keeps its original start while its end is coalesced.
-            const today = routineDateAt(at, routine.timeZone)
-            const previousDate = previousRoutineDate(today, routine.timeZone)
             const candidates = yield* executionRows(routineId)
-            // Dispatch wall time can be later than a day-end window. Continue from
-            // the last reserved data boundary so midnight-to-dispatch data is not lost.
-            const windowStartFor = (end: number) => Math.min(end,
-              candidates[0]?.windowEnd ?? routineDayStart(routineDateAt(end, routine.timeZone), routine.timeZone))
-            const defaultWindowStart = windowStartFor(at)
-            // An admitted prompt is immutable. Coalescing its time window would make the UI
-            // describe different work from the queued request and could enqueue a second Task.
+            const today = routineDateAt(at, routine.timeZone)
+            const todayStart = routineDayStart(today, routine.timeZone)
+            const time = yield* now
+            // An actual admitted Run owns the Routine across midnight. An old
+            // unsubmitted reservation or failed window belongs to manual repair.
             const admitted = (yield* sql<{ taskId: string }>`SELECT r.task_id AS taskId FROM runs r
               JOIN tasks t ON t.id=r.task_id WHERE t.routine_id=${routineId}
-                AND r.state IN ('queued', 'preparing', 'running') ORDER BY r.sequence LIMIT 1`)[0]
-            if (admitted) {
-              yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
-              return candidates.find(candidate => candidate.taskId === admitted.taskId)!
+              AND r.state IN ('queued', 'preparing', 'running') ORDER BY r.sequence LIMIT 1`)[0]
+            if (mode === 'check') {
+              yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000},
+                last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
             }
-            const pending =
-              candidates.find((execution) => execution.status === 'pending') ?? candidates.find((execution) => ['failed', 'interrupted', 'cancelled'].includes(execution.status))
-            const time = yield* now
-            if (pending) {
-              // Editing the Routine does not reinterpret an already reserved civil day.
-              const pendingToday = routineDateAt(at, pending.timeZone)
-              const pendingPreviousDate = previousRoutineDate(pendingToday, pending.timeZone)
-              // A day-end remains bounded to its civil day, even after repeated failures.
-              if (pending.isEnd) {
-                yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000} WHERE id=${routineId}`
-                return pending
-              }
-              if (pending.routineDate === pendingToday && !pending.isEnd) {
-                yield* sql`UPDATE tasks SET trigger_time=${at}, window_end=${at}, trigger_count=trigger_count+1,
-              window_start=COALESCE(window_start, ${defaultWindowStart}), routine_updated_at=${time} WHERE id=${pending.taskId}`
-              } else if (pending.routineDate === pendingPreviousDate && !pending.isEnd) {
-                const end = routineDayEnd(pendingPreviousDate, pending.timeZone)
-                yield* sql`UPDATE tasks SET trigger_time=${end}, window_end=${end}, is_end=1,
-              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, routine_updated_at=${time} WHERE id=${pending.taskId}`
-              } else {
-                // A missed execution is still one logical window: later ticks update its
-                // latest trigger rather than creating a queue of catch-up rows. We only
-                // mark the previous civil day as ended when this is the first tick of the
-                // following day; older gaps remain visible in the derived calendar.
-                yield* sql`UPDATE tasks SET trigger_time=${at}, window_end=${at},
-              window_start=COALESCE(window_start, ${defaultWindowStart}), trigger_count=trigger_count+1, routine_updated_at=${time} WHERE id=${pending.taskId}`
-              }
-              yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
-              return (yield* executionRows(routineId)).find((execution) => execution.taskId === pending.taskId)!
+            if (admitted) return mode === 'check' ? candidates.find(row => row.taskId === admitted.taskId)! : null
+            const current = candidates.filter(row => row.routineDate === today)
+            const currentRetry = [...current]
+              .filter(row => ['pending', 'failed', 'interrupted'].includes(row.status) || row.status === 'cancelled' && !row.cancelRequested)
+              .sort((a, b) => (b.windowEnd ?? b.triggerTime) - (a.windowEnd ?? a.triggerTime))[0]
+            if (currentRetry) {
+              return mode === 'check' ? currentRetry : null
             }
-            const previousEnd = candidates.some(execution =>
-              execution.routineDate === previousDate && execution.isEnd && execution.status === 'succeeded')
-            const unresolvedEnd = (yield* executionRows(routineId)).find(
-              (execution) => execution.routineDate === previousDate && execution.isEnd && execution.status !== 'succeeded'
-            )
-            // A failed/interrupted day-end keeps its identity for an explicit retry; the
-            // unique end index forbids creating a second end row for the same date.
-            if (unresolvedEnd) return unresolvedEnd
-            const createdDate = routineDateAt(routine.createdAt, routine.timeZone)
-            const date = !previousEnd && createdDate < today ? previousDate : today
-            const isEnd = date === previousDate && !previousEnd
-            const triggerTime = isEnd ? routineDayEnd(date, routine.timeZone) : at
+            // Terminal boundaries are the cursor even when the last window
+            // crossed midnight. Failed or abandoned windows from prior days
+            // are deliberately excluded and are repaired separately.
+            const latest = [...candidates]
+              .filter(row => row.status === 'succeeded' || row.status === 'cancelled' && row.cancelRequested)
+              .sort((a, b) => (b.windowEnd ?? 0) - (a.windowEnd ?? 0))[0]
+            // Only proven success or an explicit user stop advances the cursor.
+            // Engine-originated cancellation is retried like any other failure.
+            const boundary = Math.max(todayStart, latest?.windowEnd ?? todayStart)
+            const delta = at - boundary
+            if (delta <= 0) return null
+            if (mode === 'settled') {
+              if (!latest) return null
+              const threshold = latest.status === 'cancelled' ? routine.intervalMinutes * 60_000 : 3_600_000
+              if (delta < threshold) return null
+            }
+            const windowStart = boundary
+            const windowEnd = Math.min(at, windowStart + 3_600_000)
+            const date = today
             const taskId = randomUUID()
-            // Reserve the normal Task and its window in the same transaction. No orphan
-            // execution or second identity can survive a failed reservation.
+            // Reserve the normal Task and its frozen window in the same transaction.
             yield* worktrees.reserve({ id: taskId, goal: routine.prompt, configuration: {
               agent: routine.agent, skillIds: [],
               integrationIds: routine.integrationIds, resourceIds: routine.resourceIds ?? []
             } })
-            yield* sql`UPDATE tasks SET routine_id=${routineId}, routine_date=${date}, trigger_time=${triggerTime},
-              first_trigger_time=${triggerTime}, trigger_count=1, is_end=${isEnd ? 1 : 0},
-              window_start=${windowStartFor(triggerTime)}, window_end=${triggerTime}, routine_revision=${routine.revision},
+            yield* sql`UPDATE tasks SET routine_id=${routineId}, routine_date=${date}, trigger_time=${at},
+              first_trigger_time=${at}, trigger_count=1, is_end=0,
+              window_start=${windowStart}, window_end=${windowEnd}, routine_revision=${routine.revision},
               routine_model=${routine.model ? JSON.stringify(routine.model) : null}, routine_time_zone=${routine.timeZone},
               routine_updated_at=${time} WHERE id=${taskId}`
             yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000}, last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`

@@ -13,6 +13,7 @@ import {
   Maximize2Icon,
   PlayIcon,
   RefreshCwIcon,
+  StopCircleIcon,
   TimerIcon,
   WorkflowIcon,
   ZapIcon
@@ -363,7 +364,11 @@ function RoutineDetail({
   const save = useAtomSet(TaskRpcClient.saveRoutine, { mode: 'promise' })
   const run = useAtomSet(TaskRpcClient.runRoutine, { mode: 'promise' })
   const prepare = useAtomSet(TaskRpcClient.prepareRoutine, { mode: 'promise' })
+  const cancel = useAtomSet(TaskRpcClient.cancelRun, { mode: 'promise' })
   const [busy, setBusy] = useState(false)
+  const stopInFlight = useRef(false)
+  const [stopRequestedTaskId, setStoppingTaskId] = useState<string | null>(null)
+  const stoppingTaskId = executions.some(row => row.taskId === stopRequestedTaskId && (row.status === 'preparing' || row.status === 'running')) ? stopRequestedTaskId : null
   const [message, setMessage] = useState('')
   const [promptOpen, setPromptOpen] = useState(false)
   const runRequest = useRef<{ routineId: string; requestId: string } | null>(null)
@@ -427,6 +432,23 @@ function RoutineDetail({
     }
   }
 
+  async function stopExecution(execution: RoutineExecution): Promise<void> {
+    if (!execution.runId || execution.cancelRequested || stoppingTaskId !== null || stopInFlight.current) return
+    stopInFlight.current = true
+    setStoppingTaskId(execution.taskId)
+    setMessage('')
+    try {
+      await cancel({ payload: { taskId: execution.taskId, runId: execution.runId } })
+      setMessage(chinese ? '已请求停止 Agent，正在等待退出。' : 'Stop requested. Waiting for the Agent to exit.')
+      refresh()
+    } catch {
+      setMessage(chinese ? '停止请求未确认，请重试。' : 'The stop request was not confirmed. Retry.')
+      setStoppingTaskId(null)
+    } finally {
+      stopInFlight.current = false
+    }
+  }
+
   return (
     <section className="flex flex-col gap-5" aria-labelledby="routine-detail-title">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -470,11 +492,11 @@ function RoutineDetail({
               <span className="text-support text-muted-foreground">{chinese ? '状态' : 'Status'}</span>
               <Badge variant={record.enabled ? 'success' : 'outline'}>{record.enabled ? (chinese ? '运行中' : 'Active') : chinese ? '已暂停' : 'Paused'}</Badge>
             </div>
-            <DetailItem label={chinese ? '执行频率' : 'Frequency'} value={`${record.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
+            <DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
             <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.timeZone} />
             <DetailItem label="Agent" value={record.agent} />
             {record.model ? <DetailItem label={chinese ? '模型' : 'Model'} value={`${record.model.providerId} / ${record.model.modelId}`} /> : null}
-            <DetailItem label={chinese ? '下一次执行' : 'Next run'} value={formatNextTrigger(record, chinese)} />
+            <DetailItem label={chinese ? '下次检查' : 'Next check'} value={formatNextTrigger(record, chinese)} />
           </div>
           <div className="border-b p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -543,7 +565,7 @@ function RoutineDetail({
             ) : null}
           </div>
           {activeDate && activeRows.length ? (
-            <ExecutionProcess rows={activeRows} chinese={chinese} />
+            <ExecutionProcess rows={activeRows} chinese={chinese} stoppingTaskId={stoppingTaskId} onStop={(row) => void stopExecution(row)} />
           ) : (
             <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
               {activeDate ? (
@@ -593,7 +615,12 @@ function DetailItem({ label, value }: { label: string; value: string }): React.J
   )
 }
 
-function ExecutionProcess({ rows, chinese }: { rows: readonly RoutineExecution[]; chinese: boolean }): React.JSX.Element {
+function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop }: {
+  rows: readonly RoutineExecution[]
+  chinese: boolean
+  stoppingTaskId: string | null
+  onStop: (row: RoutineExecution) => void
+}): React.JSX.Element {
   return (
     <ol className="relative space-y-4 before:absolute before:bottom-4 before:left-3 before:top-4 before:w-px before:bg-border">
       {rows.map((row) => (
@@ -610,13 +637,27 @@ function ExecutionProcess({ rows, chinese }: { rows: readonly RoutineExecution[]
                   <Badge variant={statusVariant(row.status)}>{statusLabel(row.status, chinese)}</Badge>
                 </div>
                 <p className="mt-1 text-support text-muted-foreground">
-                  {formatTime(row.triggerTime, row.timeZone, chinese)} · {row.triggerCount} {chinese ? '次触发合并' : 'trigger(s) coalesced'}
+                  {formatTime(row.windowStart, row.timeZone, chinese)} → {formatTime(row.windowEnd, row.timeZone, chinese)}
                 </p>
               </div>
               {row.taskId ? (
-                <span className="font-mono text-support text-muted-foreground" title={row.taskId}>
-                  Task {row.taskId.slice(0, 8)}
-                </span>
+                <div className="flex items-center gap-2">
+                  {(row.status === 'preparing' || row.status === 'running') && row.runId ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={stoppingTaskId !== null || row.cancelRequested}
+                      onClick={() => onStop(row)}
+                    >
+                      <StopCircleIcon aria-hidden="true" />
+                      {stoppingTaskId === row.taskId || row.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : chinese ? '停止 Agent' : 'Stop Agent'}
+                    </Button>
+                  ) : null}
+                  <span className="font-mono text-support text-muted-foreground" title={row.taskId}>
+                    Task {row.taskId.slice(0, 8)}
+                  </span>
+                </div>
               ) : null}
             </div>
             <div className="mt-4 grid gap-3 border-t pt-3 sm:grid-cols-3">

@@ -32,7 +32,7 @@ export type RoutineExecutionStatus = typeof RoutineExecutionStatus.Type
 
 /** Read projection of a Routine Task and its latest Run; taskId is its only identity. */
 export const RoutineExecution = Schema.Struct({
-  routineId: Id, taskId: Id, routineDate: RoutineDate, triggerTime: Schema.Number,
+  routineId: Id, taskId: Id, runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean, routineDate: RoutineDate, triggerTime: Schema.Number,
   firstTriggerTime: Schema.Number, triggerCount: Schema.Int.check(Schema.isGreaterThan(0)), isEnd: Schema.Boolean,
   windowStart: Schema.NullOr(Schema.Number), windowEnd: Schema.NullOr(Schema.Number),
   model: Schema.NullOr(SessionModelSelection), timeZone: RoutineRecord.fields.timeZone,

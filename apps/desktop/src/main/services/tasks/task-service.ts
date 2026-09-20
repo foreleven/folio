@@ -10,7 +10,7 @@ import { SqlClient } from 'effect/unstable/sql'
 import type { RunRecord } from '../../../shared/execution'
 import { TaskService } from '../../../shared/task-service'
 import { RoutineStore } from '../routines/routine-store'
-import type { RunRoutine, SaveRoutine } from '../../../shared/routine'
+import { routineDateAt, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
 import { HarnessRuns } from '../harness/harness-runs'
 import { ModelService } from '../models/model-service'
 import { Cause, DateTime, Effect, Exit, Fiber, Layer, Semaphore } from 'effect'
@@ -439,8 +439,9 @@ export const TaskServiceLive = Layer.effect(
           .pipe(Effect.catchTag('HarnessStoreError', (error) => (error.reason === 'invalid-state' ? Effect.void : Effect.fail(error))))
     }, gate.withPermit)
     /** Creates or coalesces one current execution, then optionally starts its Task Run. */
-    const prepareRoutine = Effect.fn('TaskService.prepareRoutine')(function* (input: RunRoutine) {
-      const execution = yield* routines.schedule(input.routineId)
+    const prepareRoutine = Effect.fn('TaskService.prepareRoutine')(function* (input: RunRoutine, mode: 'check' | 'settled' = 'check') {
+      const execution = yield* routines.schedule(input.routineId, yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)), mode)
+      if (!execution) return null
       yield* Effect.logInfo('Routine extraction window reserved', {
         routineId: input.routineId, taskId: execution.taskId, timeZone: execution.timeZone,
         windowStart: execution.windowStart === null ? null : new Date(execution.windowStart).toISOString(),
@@ -453,7 +454,7 @@ export const TaskServiceLive = Layer.effect(
       const task = yield* store.task(execution.taskId)
       return { execution, task }
     })
-    const runRoutine = Effect.fn('TaskService.runRoutine')(function* (input: RunRoutine) {
+    const submitRoutine = Effect.fn('TaskService.submitRoutine')(function* (input: RunRoutine, mode: 'check' | 'settled' = 'check') {
       if (input.requestId) {
         const previous = yield* queue.get(input.requestId).pipe(Effect.catchTag('HarnessStoreError', error => error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error)))
         if (previous) {
@@ -462,7 +463,9 @@ export const TaskServiceLive = Layer.effect(
           return { execution, task: yield* store.task(previous.taskId), run: previous }
         }
       }
-      const { execution, task } = yield* prepareRoutine(input)
+      const prepared = yield* prepareRoutine(input, mode)
+      if (!prepared) return null
+      const { execution, task } = prepared
       const pending = (yield* queue.list(task.id)).find(request => request.endedAt === null)
       if (pending) return { execution, task, run: pending }
       const sessionId = randomUUID()
@@ -473,8 +476,10 @@ export const TaskServiceLive = Layer.effect(
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
       return { execution: (yield* routines.executionForTask(task.id))!, task, run }
     }, sql.withTransaction,
-      (effect, input) => effect.pipe(Effect.tapError(error => Effect.logWarning('Routine submission failed', { vaultId: vault.id, routineId: input.routineId }, error))),
+      (effect, input, _mode: 'check' | 'settled' = 'check') => effect.pipe(Effect.tapError(error => Effect.logWarning('Routine submission failed', { vaultId: vault.id, routineId: input.routineId }, error))),
       Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
+    const runRoutine = (input: RunRoutine) => submitRoutine(input).pipe(Effect.flatMap(result => result
+      ? Effect.succeed(result) : Effect.fail(new HarnessStoreError({ reason: 'invalid-state', message: 'No unprocessed time window is available.' }))))
     /** Replayable post-processing is derived from durable requests, never an in-memory callback. */
     const settleSuccessfulExecution = (request: RunRecord) => Effect.gen(function* () {
       if (request.purpose === 'conflict-resolution') {
@@ -485,7 +490,22 @@ export const TaskServiceLive = Layer.effect(
           yield* synchronization.acceptAgentResolution(request.taskId, session.syncOperationId, request.id)
         }
       }
+      const execution = yield* routines.executionForTask(request.taskId)
       yield* completeRoutineAfterReceipt(request.taskId)
+      if (execution) {
+        // A completed window may have accumulated a full hour of backlog while
+        // the Agent was running. schedule() caps this follow-up to one window.
+        yield* submitRoutine({ routineId: execution.routineId }, 'settled').pipe(Effect.catch(error => Effect.logWarning('Routine catch-up admission will be retried.', error)))
+      }
+    })
+    /** A user stop intentionally abandons the current window as a repair gap. */
+    const settleCancelledRoutine = (taskId: string) => Effect.gen(function* () {
+      const execution = yield* routines.executionForTask(taskId)
+      if (!execution) return
+      // Keep the stopped worktree and partial output for inspection/repair.
+      // schedule() decides whether the stopped boundary is old enough to start one
+      // follow-up window. A short delta intentionally waits for the regular check.
+      yield* submitRoutine({ routineId: execution.routineId }, 'settled').pipe(Effect.catch(error => Effect.logWarning('Routine catch-up admission will be retried.', error)))
     })
     /** A global slot is held until Run cleanup and the durable terminal receipt both complete. */
     const executeRequest = (request: RunRecord) => Effect.uninterruptibleMask(restore => Effect.gen(function* () {
@@ -515,11 +535,13 @@ export const TaskServiceLive = Layer.effect(
       if (executionError) yield* Effect.logError('Task Worker execution failed', { vaultId: vault.id, taskId: request.taskId, runId: request.id }, executionError)
       yield* sink.finishRequest(request, fallback, executionError)
       if ((yield* queue.get(request.id)).state === 'succeeded') yield* settleSuccessfulExecution(request)
+      else if ((yield* queue.get(request.id)).state === 'cancelled') yield* settleCancelledRoutine(request.taskId)
     })).pipe(Effect.ensuring(Effect.sync(() => { ownedExecutions.delete(request.id) })))
     const dispatchRoutine = Effect.fn('TaskService.dispatchRoutine')(function* (id: string) {
-      return yield* runRoutine({ routineId: id })
+      return yield* submitRoutine({ routineId: id })
     })
-    // Collect a bounded page first. No batch is dispatched while missed dates remain uncollected.
+    const checkedDates = new Map<string, string>()
+    // Startup and a new civil day check immediately, regardless of a stale future cursor.
     const tickRoutines = Effect.gen(function* () {
       yield* ensureDefaultRoutines()
       // A crash may land after the final Run receipt but before worktree release. Reconcile
@@ -529,11 +551,18 @@ export const TaskServiceLive = Layer.effect(
       }
       const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
       for (const routine of yield* routines.list) {
-        if (!routine.enabled || (routine.nextTriggerAt !== null && routine.nextTriggerAt > current)) continue
-        // A failed/uncertain execution needs an explicit retry; a timer must not replay its
-        // prompt after an Agent may already have produced external effects.
-        if ((yield* routines.executions(routine.id)).some(execution => ['failed', 'interrupted', 'cancelled'].includes(execution.status))) continue
-        yield* dispatchRoutine(routine.id).pipe(Effect.catch(error => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.', { vaultId: vault.id, routineId: routine.id }, error)))
+        if (!routine.enabled) continue
+        const today = routineDateAt(current, routine.timeZone)
+        const due = checkedDates.get(routine.id) !== today || routine.nextTriggerAt === null || routine.nextTriggerAt <= current
+        // A normal scheduler tick is only a check. Settled execution is handled
+        // once by the terminal receipt path; re-evaluating it on every tick
+        // would turn a short post-success gap into an unintended one-hour
+        // catch-up once wall clock time advances.
+        if (due) {
+          yield* submitRoutine({ routineId: routine.id }, 'check').pipe(
+            Effect.tap(() => Effect.sync(() => { checkedDates.set(routine.id, today) })),
+            Effect.catch(error => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.', { vaultId: vault.id, routineId: routine.id }, error)))
+        }
       }
     }).pipe(Effect.mapError(safeError))
     /** Returns only this Task's actionable operation after proving the Task belongs to the Vault. */
@@ -571,7 +600,7 @@ export const TaskServiceLive = Layer.effect(
         if (request) ownedExecutions.add(request.id)
         return request
       }).pipe(gate.withPermit, Effect.uninterruptible, Effect.mapError(safeError)),
-      prepareRoutine: (input) => prepareRoutine(input).pipe(sql.withTransaction, Effect.mapError(safeError), gate.withPermit),
+      prepareRoutine: (input) => prepareRoutine(input).pipe(Effect.flatMap(result => result ? Effect.succeed(result) : Effect.fail(failure('invalid-state'))), sql.withTransaction, Effect.mapError(safeError), gate.withPermit),
       routineExecutions: routines.executions,
       allRoutineExecutions: routines.allExecutions,
       routines: ensureDefaultRoutines().pipe(Effect.andThen(routines.list)),
@@ -616,6 +645,9 @@ export const TaskServiceLive = Layer.effect(
         if (request.taskId !== taskId) return yield* failure('not-found')
         const cancelled = yield* queue.cancel(runId)
         yield* sink.cancellation(cancelled).pipe(Effect.catch(() => Effect.logWarning('Cancellation was saved but its diagnostic log could not be written.')))
+        // Only a queued request terminates here. Active requests settle in the
+        // Worker exit path, and repeated stop RPCs must not advance again.
+        if (request.state === 'queued' && cancelled.state === 'cancelled') yield* settleCancelledRoutine(taskId)
         yield* notifications.wake
         return cancelled
       })

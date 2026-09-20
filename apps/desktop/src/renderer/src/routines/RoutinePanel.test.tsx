@@ -8,12 +8,13 @@ const mocks = vi.hoisted(() => ({
   executionsQuery: { kind: 'executions' },
   routines: [] as unknown[],
   executions: [] as unknown[],
-  refresh: vi.fn()
+  refresh: vi.fn(),
+  cancel: vi.fn()
 }))
 
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
-  useAtomSet: () => vi.fn(),
+  useAtomSet: (atom: unknown) => atom === 'cancel' ? mocks.cancel : vi.fn(),
   useAtomValue: (query: { kind?: string }) => ({
     _tag: 'Success',
     value: query.kind === 'routines' ? mocks.routines : mocks.executions
@@ -24,7 +25,8 @@ vi.mock('../rpc/task-rpc', () => ({
     query: (name: string) => (name === 'routines.list' ? mocks.routinesQuery : mocks.executionsQuery),
     saveRoutine: {},
     runRoutine: {},
-    prepareRoutine: {}
+    prepareRoutine: {},
+    cancelRun: 'cancel'
   }
 }))
 vi.mock('../preferences', () => ({ useLocale: () => 'zh-CN' }))
@@ -44,6 +46,7 @@ describe('Routine details', () => {
       skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 1440, timeZone: 'UTC',
       enabled: true, revision: 1, nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
     const execution = { routineId: 'imap', taskId: 'task', routineDate: '2026-09-19', triggerTime: 1,
+      runId: '33333333-3333-4333-8333-333333333333',
       firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
       timeZone: 'UTC', routineRevision: 1, model: null, startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }
     mocks.executions = [{ ...execution, status: 'preparing' }]
@@ -64,6 +67,20 @@ describe('Routine details', () => {
     mocks.refresh.mockClear()
     act(() => { vi.advanceTimersByTime(1000) })
     expect(mocks.refresh).not.toHaveBeenCalled()
+  })
+
+  it('shows a stop action for an active Agent execution', () => {
+    mocks.routines = [{ id: 'imap', name: 'IMAP', prompt: 'Review mail', agent: 'codex', model: null,
+      skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'UTC', enabled: true, revision: 1,
+      nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
+    mocks.executions = [{ routineId: 'imap', taskId: 'task', runId: '33333333-3333-4333-8333-333333333333', routineDate: '2026-09-19',
+      triggerTime: 1, firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
+      timeZone: 'UTC', routineRevision: 1, model: null, status: 'running', startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }]
+    render(<RoutinePanel />)
+    fireEvent.click(screen.getByRole('button', { name: '打开 IMAP Routine 详情' }))
+    expect(screen.getByRole('button', { name: '停止 Agent' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '停止 Agent' }))
+    expect(mocks.cancel).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: '33333333-3333-4333-8333-333333333333' } })
   })
 
   it('opens the full prompt in a dialog from the detail page', () => {
