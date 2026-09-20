@@ -167,6 +167,16 @@ starts or state next changes. Files use atomic replacement with mode `0600` insi
 `0700` directory. They are not encrypted. Vault linkage and ingestion are outside
 this change. The historical `lark-im` directory is not automatically migrated.
 
+The Lark IM `extract-window.mjs` writes each changed chat to a Markdown file
+with YAML frontmatter: `source`, `chat_id`, `chat_name`, `chat_description`,
+`chat_mode`, `owner_id`, `p2p_target_type`, `p2p_target_id`, `window_start`,
+`window_end`, and `message_count`. Chat fields come from the CLI chat list;
+missing fields are `null`. Values are JSON-quoted YAML to preserve names and
+descriptions containing punctuation or newlines. The body contains the chat
+heading and one line per message: `- <ISO time> | <sender name> (<sender ID>) | <content>`.
+Message line breaks become `↵`; rich text and resource placeholders use the CLI's
+readable rendering. Original JSON payloads are not repeated in the body.
+
 ## Verification
 
 ```sh

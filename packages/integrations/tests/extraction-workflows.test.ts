@@ -43,7 +43,7 @@ async function runGmail(repeatedCursor = false) {
   })
 }
 
-async function runLark(mode: 'complete' | 'chat-truncated' | 'messages-truncated' | 'invalid-json') {
+async function runLark(mode: 'complete' | 'chat-truncated' | 'messages-truncated' | 'invalid-json', chat: Record<string, unknown> = { chat_id: 'oc_fixture', name: 'Fixture' }, messages: readonly Record<string, unknown>[] = [{ create_time: Date.parse(start), content: 'hello' }]) {
   const cli = join(root, 'lark-cli')
   await writeFile(cli, `#!/usr/bin/env node
     import assert from 'node:assert/strict'
@@ -51,10 +51,10 @@ async function runLark(mode: 'complete' | 'chat-truncated' | 'messages-truncated
     assert.ok(process.argv.includes('--page-all'))
     if (mode === 'invalid-json') process.stdout.write('{bad')
     else if (process.argv.includes('+chat-list')) {
-      process.stdout.write(JSON.stringify({ data: { chats: [{ chat_id: 'oc_fixture', name: 'Fixture' }] },
+      process.stdout.write(JSON.stringify({ data: { chats: [${JSON.stringify(chat)}] },
         meta: { pagination: { complete: mode !== 'chat-truncated' } } }))
     } else {
-      process.stdout.write(JSON.stringify({ data: { messages: [{ create_time: ${Date.parse(start)}, content: 'hello' }] },
+      process.stdout.write(JSON.stringify({ data: { messages: ${JSON.stringify(messages)} },
         meta: { pagination: { complete: mode !== 'messages-truncated' } } }))
     }
   `)
@@ -83,6 +83,57 @@ describe('bundled extraction workflows', () => {
   it('requests all Lark chat pages and publishes only a complete extraction', async () => {
     await runLark('complete')
     expect(await readFile(join(root, 'output/2026-09-18/_updated.md'), 'utf8')).toContain('1 message(s)')
+  })
+
+  it.each([
+    { chat_id: 'oc_fixture', name: '研发: "项目" #1\n---', description: '第一行\n第二行: 内容', chat_mode: 'group', owner_id: 'ou_owner' },
+    { chat_id: 'oc_fixture', name: '同事', chat_mode: 'p2p', p2p_target_type: 'user', p2p_target_id: 'ou_peer' },
+    { chat_id: 'oc_fixture' }
+  ])('writes chat metadata as safely quoted YAML frontmatter: $chat_id / $chat_mode', async chat => {
+    await runLark('complete', chat)
+    const content = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    const parts = content.split('---\n')
+    expect(parts[0]).toBe('')
+    // The extractor emits YAML's JSON-compatible scalar subset. Decode each
+    // value to verify special characters round-trip without injecting fields.
+    const metadata = Object.fromEntries(parts[1]!.trimEnd().split('\n').map(line => {
+      const separator = line.indexOf(': ')
+      return [line.slice(0, separator), JSON.parse(line.slice(separator + 2))]
+    }))
+    expect(metadata).toEqual({
+      source: 'lark-im', chat_id: chat.chat_id, chat_name: chat.name ?? null,
+      chat_description: 'description' in chat ? chat.description : null,
+      chat_mode: chat.chat_mode ?? null, owner_id: 'owner_id' in chat ? chat.owner_id : null,
+      p2p_target_type: 'p2p_target_type' in chat ? chat.p2p_target_type : null,
+      p2p_target_id: 'p2p_target_id' in chat ? chat.p2p_target_id : null,
+      window_start: start, window_end: end, message_count: 1
+    })
+    expect(content).toContain('hello')
+    expect(content).not.toContain('- chat_id:')
+  })
+
+  it('renders one readable line per message with sender name, ID, time and content', async () => {
+    const sender = { name: '张三', id: 'ou_zhang' }
+    await runLark('complete', undefined, [
+      { create_time: Date.parse(start), sender, content: '第一行\r\n第二行\n第三行' },
+      { create_time: start, sender, msg_type: 'post', content: '**更新** [文档](https://example.com)' },
+      { create_time: start, sender, msg_type: 'image', content: '![Image](img_fixture)' },
+      { create_time: start, sender, msg_type: 'file', content: null },
+      { create_time: start, content: { text: '系统通知' } },
+      { create_time: start, sender, deleted: true, content: '撤回的内容' }
+    ])
+    const content = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    const body = content.split('\n---\n')[1]!
+    expect(body.trim().split('\n')).toEqual([
+      '# Fixture', '',
+      `- ${start} | 张三 (ou_zhang) | 第一行 ↵ 第二行 ↵ 第三行`,
+      `- ${start} | 张三 (ou_zhang) | **更新** [文档](https://example.com)`,
+      `- ${start} | 张三 (ou_zhang) | ![Image](img_fixture)`,
+      `- ${start} | 张三 (ou_zhang) | [file]`,
+      `- ${start} | Unknown (unknown id) | 系统通知`,
+      `- ${start} | 张三 (ou_zhang) | [recalled]`
+    ])
+    expect(body).not.toContain('```json')
   })
 
   it.each(['chat-truncated', 'messages-truncated', 'invalid-json'] as const)('rejects Lark %s without a completion summary', async mode => {

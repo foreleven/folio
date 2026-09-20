@@ -30,7 +30,14 @@ const complete = (response, label) => {
 }
 const chats = complete(await run(['im', '+chat-list', '--as', 'user', '--types', 'p2p,group', '--sort', 'active_time', '--exclude-muted', '--page-size', '100', '--page-all', '--page-limit', '1000', '--format', 'json']), 'chat list')?.chats ?? []
 const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true }); const updated = []
-const renderContent = content => typeof content === 'string' ? content : content == null ? '' : JSON.stringify(content, null, 2)
+// The CLI already renders rich text and resource placeholders. Keep that text,
+// with explicit line-break markers so every message occupies one physical line.
+const singleLine = value => String(value).replace(/\r\n|[\r\n\u2028\u2029]/g, ' ↵ ')
+const renderContent = message => {
+  if (message.deleted) return '[recalled]'
+  const content = typeof message.content === 'string' ? message.content : message.content?.text
+  return typeof content === 'string' && content.trim() ? content : `[${message.msg_type ?? 'message'}]`
+}
 const renderTime = value => { const parsed = typeof value === 'string' && !/^\d+$/.test(value) ? Date.parse(value) : Number(value); return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : 'unknown time' }
 for (const chat of chats) {
   const id = chat.chat_id
@@ -39,9 +46,25 @@ for (const chat of chats) {
   const rows = result?.messages ?? []
   if (!rows.length) continue
   const title = chat.name || chat.description || id
+  const metadata = {
+    source: 'lark-im',
+    chat_id: id,
+    chat_name: chat.name ?? null,
+    chat_description: chat.description ?? null,
+    chat_mode: chat.chat_mode ?? null,
+    owner_id: chat.owner_id ?? null,
+    p2p_target_type: chat.p2p_target_type ?? null,
+    p2p_target_id: chat.p2p_target_id ?? null,
+    window_start: start,
+    window_end: end,
+    message_count: rows.length
+  }
+  // JSON-quoted values are valid YAML and keep names/descriptions containing
+  // colons, quotes or newlines from changing the frontmatter structure.
   const body = [
-    `# ${title}`, '', `- chat_id: ${id}`, `- window: ${start} → ${end}`, '',
-    ...rows.map(message => `## ${renderTime(message.create_time)} · ${message.sender?.name || message.sender?.id || 'Unknown'}\n\n${renderContent(message.content) || `[${message.msg_type ?? 'message'}]`}\n\n\`\`\`json\n${JSON.stringify(message, null, 2)}\n\`\`\``)
+    '---', ...Object.entries(metadata).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), '---', '',
+    `# ${title}`, '',
+    ...rows.map(message => `- ${renderTime(message.create_time)} | ${singleLine(message.sender?.name || 'Unknown')} (${singleLine(message.sender?.id || 'unknown id')}) | ${singleLine(renderContent(message))}`)
   ].join('\n') + '\n'
   await writeFile(join(root, `${id}.md`), body)
   updated.push({ id, title, count: rows.length })
