@@ -212,6 +212,23 @@ describe('desktop integration lifecycle', () => {
     } finally { await f.runtime.dispose() }
   })
 
+  it('waits for an in-flight authorization before preparing a Task resource', async () => {
+    const f = fixture()
+    try {
+      const service = await f.service()
+      await f.runtime.runPromise(service.install('notes'))
+      await f.settled('login_required')
+      await f.runtime.runPromise(service.action('notes', 'authorize', { accessKey: 'test' }))
+      await vi.waitFor(async () => expect((await f.runtime.runPromise(service.list))[0]!.busy).toBe(true))
+      const preparing = f.runtime.runPromise(service.prepare(['notes'], directory, ['notes/im']))
+      await new Promise(resolve => setTimeout(resolve, 20))
+      await f.runtime.runPromise(Deferred.succeed(f.authorization, undefined))
+      const mounted = await preparing
+      expect(mounted).toEqual({ skillPaths: [], executableDirectories: [], instructions: [] })
+      await f.settled('ready')
+    } finally { await f.runtime.dispose() }
+  })
+
   it('migrates legacy action IDs without losing resources or reopening a persisted URL', async () => {
     const db = new DatabaseSync(join(directory, 'data.db'))
     try {

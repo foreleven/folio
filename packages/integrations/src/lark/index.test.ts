@@ -367,7 +367,7 @@ describe('Lark integration lifecycle', () => {
       expect(registerApp).not.toHaveBeenCalled()
       expect((await h.checked()).state).toBe('app_required')
       expect(await readFile(join(h.directory, 'skills/lark-mail/SKILL.md'), 'utf8')).toContain('name: lark-mail')
-      expect(await readFile(join(h.directory, 'workflows/lark-im/extract-window.mjs'), 'utf8')).toContain('chat-messages-list')
+      expect(await readFile(join(h.directory, 'workflows/lark-im/extract-window.mjs'), 'utf8')).toContain('messages-search')
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
       expect(h.states.map((item) => item.state)).toEqual(expect.arrayContaining(['waiting_for_app', 'waiting_for_user', 'ready']))
       expect(await h.checked()).toEqual({ state: 'ready', actions: [] })

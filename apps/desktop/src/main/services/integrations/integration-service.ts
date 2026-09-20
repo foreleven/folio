@@ -154,7 +154,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           return separator <= 0 || !new Set(ids).has(resource.slice(0, separator))
         })) return yield* rejected('Selected resource does not belong to a requested integration')
         stage = 'read-installed-integrations'
-        const rows = yield* store.list
+        let rows = yield* store.list
         // Validate the complete selection before any provider hook can prepare partial resources.
         for (const requested of requestedResources) {
           const separator = requested.indexOf('/')
@@ -178,10 +178,17 @@ export class IntegrationService extends Context.Service<IntegrationService, {
           assetPath = undefined
           stage = 'validate-installed-integration'
           const integration = catalog.find(item => item.id === id)
-          const installed = rows.find(row => row.id === id)
+          let installed = rows.find(row => row.id === id)
           if (!integration) return yield* rejected('Integration is not in the catalog')
           if (!installed) return yield* rejected('Integration is not installed')
+          // Installation and authorization are asynchronous RPC jobs. A Task started from
+          // the same UI can arrive during their final provider callback; wait for that job to
+          // settle instead of turning a normal click race into a failed Task.
+          for (let attempt = 0; running.has(id) && attempt < 300; attempt++) yield* Effect.sleep(100)
           if (running.has(id)) return yield* rejected('Integration has an operation in progress')
+          rows = yield* store.list
+          installed = rows.find(row => row.id === id)
+          if (!installed) return yield* rejected('Integration is not installed')
           if (integration.states[installed.state]?.kind !== 'ready') return yield* rejected(`Integration is not ready (state: ${installed.state})`)
           if (integration.resources.some(resource => !installed.resources.some(row => row.id === resource.id))) return yield* rejected('Installed integration is missing registered resources')
           // Readiness in SQLite can be stale; the provider owns the current executable/account check.
