@@ -14,20 +14,18 @@ describe('bundled asset upgrades', () => {
   it('installs the generic Lark Skills without touching credentials', async () => {
     const directory = join(root, 'installed')
     const source = join(root, 'source')
-    for (const name of ['lark-shared', 'lark-im', 'lark-mail']) {
-      await mkdir(join(source, name), { recursive: true })
-      await writeFile(join(source, name, 'SKILL.md'), `${name} bundled`)
-    }
+    await mkdir(join(source, 'lark-shared'), { recursive: true })
+    await writeFile(join(source, 'lark-shared/SKILL.md'), 'lark-shared bundled')
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, 'private.json'), 'private authorization')
 
     const run = () => Effect.runPromise(installSkills(directory).pipe(
       Effect.provideService(LarkSkillsDirectory, source), Effect.provide(NodeServices.layer)))
     await run()
-    expect(await readFile(join(directory, 'skills/lark-im/SKILL.md'), 'utf8')).toBe('lark-im bundled')
+    expect(await readFile(join(directory, 'skills/lark-shared/SKILL.md'), 'utf8')).toBe('lark-shared bundled')
     expect(await readFile(join(directory, 'private.json'), 'utf8')).toBe('private authorization')
-    const before = await stat(join(directory, 'skills/lark-im/SKILL.md'))
+    const before = await stat(join(directory, 'skills/lark-shared/SKILL.md'))
     await run()
-    expect((await stat(join(directory, 'skills/lark-im/SKILL.md'))).mtimeMs).toBe(before.mtimeMs)
+    expect((await stat(join(directory, 'skills/lark-shared/SKILL.md'))).mtimeMs).toBe(before.mtimeMs)
   })
 })

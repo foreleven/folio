@@ -124,7 +124,7 @@ current actions, so legacy action IDs and expired OAuth URLs are never replayed.
 
 ## Lark behavior
 
-Installation prepares the CLI and skills, registers resources, and verifies any
+Installation prepares the CLI and shared Skill, registers resources, and verifies any
 existing credentials. The `connect` action resumes saved progress: create an app
 if absent, exchange app credentials, and request user OAuth when necessary. The
 only other actions are installation recovery and opening a live authorization URL.
@@ -145,12 +145,12 @@ a different user identity can publish a newly rotated pair as ready.
 
 Lark uses the Folio-managed `lark-cli`; it never executes a global PATH copy.
 Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64 or Linux
-x64). Agent Tasks may use bundled `lark-shared`, `lark-im`, and `lark-mail` Skills from
-`larksuite/cli` commit `f065bf5b645af381f9b7475ce721451e6ca36a23`, with
-complete trees and license. Ingestion does not depend on those Skills: the Lark
-resources invoke the managed CLI from provider code and materialize raws before
-any later Agent analysis. An incomplete existing upstream skills directory is
-not overwritten. Electron injects packaged asset paths at the composition boundary.
+x64). Agent Tasks receive only the bundled `lark-shared` Skill from `larksuite/cli`
+commit `f065bf5b645af381f9b7475ce721451e6ca36a23`; users select any IM or Email
+Skill themselves. Ingestion does not depend on Agent Skills: the Lark resources
+invoke the managed CLI from provider code and materialize raws before any later
+Agent analysis. An incomplete existing shared-Skill directory is not overwritten.
+Electron injects packaged asset paths at the composition boundary.
 
 SDK 1.73.3 handles application registration, app token exchange, and user identity
 verification. SDK logging is suppressed to avoid raw credential-bearing transport

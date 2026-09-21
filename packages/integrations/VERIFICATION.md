@@ -10,7 +10,7 @@ Also inspected its `auth-state.ts`, `device-oauth.ts`, and installed SDK 1.73.3 
 | --- | --- | --- |
 | Reuse system CLI | Real `lark-cli --version`: 1.0.94; default installation reused it | Verified live |
 | Install missing CLI and reuse managed copy | Real isolated PATH: missing detection → npm installed 7 packages → executable verified → second run reused it | Verified live |
-| Install complete skills | Real pinned Git checkout; installed lark-shared (7 files), lark-im (61), lark-mail (36), plus license | Verified live |
+| Install complete skills | Historical live check installed lark-shared, lark-im, and lark-mail; current builds retain only lark-shared | Historical; current shape covered by tests |
 | Register IM and Email resources | Real standalone host persisted both metadata records in `~/.folio/integrations/lark/resources.json` | Verified live |
 | Start SDK application registration | Real SDK returned a verification URL and polling events, persisted by host | Verified live |
 | Complete application registration and token exchange | Real registration completed; app and tenant tokens exchanged and saved with 0600 permissions, ~2-hour expiry. Failure recovery remains covered by tests | Verified live |
@@ -43,8 +43,9 @@ new authorization run. Current entry points are `test:lark:install` and
 
 ## 2026-09-10 — Harness resource mounting
 
-Lark resource hooks now declare `lark-shared` plus `lark-im` or `lark-mail` and
-the managed CLI directory. Repeated declarations deduplicate; no token is copied
+Lark resource hooks originally declared `lark-shared` plus `lark-im` or `lark-mail`.
+They now declare only `lark-shared` and the managed CLI directory; users add any
+resource-specific Skill themselves. Repeated declarations deduplicate; no token is copied
 into the Agent configuration, and no network request, ingestion or workspace
 write is performed by the hooks. Updated fixture tests verify these properties;
 the integration suite passes 55 tests, with two opt-in live tests skipped.

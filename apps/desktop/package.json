@@ -80,9 +80,7 @@
         "from": "../../packages/integrations/src/lark/assets/skills",
         "to": "lark-skills",
         "filter": [
-          "lark-im/**/*",
           "lark-shared/**/*",
-          "lark-mail/**/*",
           "LICENSE"
         ]
       }

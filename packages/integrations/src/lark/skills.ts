@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { IntegrationError } from '../base/index.ts'
 
-export const skillNames = ['lark-shared', 'lark-im', 'lark-mail'] as const
+export const skillNames = ['lark-shared'] as const
 
 /** Source-tree default; Electron injects the unpacked bundled skills directory. */
 export const LarkSkillsDirectory = Context.Reference<string>('@folio/integrations/lark/SkillsDirectory', {

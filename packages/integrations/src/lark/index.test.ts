@@ -257,29 +257,29 @@ describe('Lark integration lifecycle', () => {
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
-  it('declares only selected Skill mounts and the managed CLI without performing ingestion', async () => {
+  it('declares only the shared Lark Skill and managed CLI without performing ingestion', async () => {
     expect(lark.id).toBe('lark')
     expect(JSON.parse(JSON.stringify(lark.actions)).map((a: { id: string }) => a.id))
       .toEqual(['open_authorization', 'install', 'connect'])
     const context = { integrationDirectory: '/managed/lark', workspaceDirectory: '/unused', instructions: [], skills: [], executableDirectories: [], env: {} }
     await Effect.runPromise(lark.resources[0]!.onIngest(context))
-    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md'])
+    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md'])
     for (const resource of lark.resources) await Effect.runPromise(resource.onIngest(context))
-    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md', '/managed/lark/skills/lark-mail/SKILL.md'])
+    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md'])
     expect(context.executableDirectories).toEqual(['/managed/lark/cli'])
     expect(context.instructions).toEqual([])
     expect(context.env).toEqual({})
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('mounts the generic IM Skill without copying workflow files into the Task', async () => {
+  it('does not mount a provider-specific Skill or copy workflow files into the Task', async () => {
     const directory = join(root, 'managed-lark')
     const context = {
       integrationDirectory: directory, workspaceDirectory: join(root, 'task'), instructions: [], skills: [],
       executableDirectories: [], workspaceFiles: [] as Array<{ path: string; content: string }>, env: {}
     }
     await Effect.runPromise(lark.resources[0]!.onIngest(context))
-    expect(context.skills).toEqual([join(directory, 'skills/lark-shared/SKILL.md'), join(directory, 'skills/lark-im/SKILL.md')])
+    expect(context.skills).toEqual([join(directory, 'skills/lark-shared/SKILL.md')])
     expect(context.instructions).toEqual([])
     expect(context.workspaceFiles).toEqual([])
   })
@@ -299,7 +299,7 @@ describe('Lark integration lifecycle', () => {
         LARKSUITE_CLI_BRAND: app.brand, LARKSUITE_CLI_DEFAULT_AS: 'user',
         LARKSUITE_CLI_USER_ACCESS_TOKEN: 'saved-token', LARKSUITE_CLI_TENANT_ACCESS_TOKEN: 'test-app-token'
       })
-      expect(context.skills).toEqual([join(h.directory, 'skills/lark-shared/SKILL.md'), join(h.directory, 'skills/lark-im/SKILL.md')])
+      expect(context.skills).toEqual([join(h.directory, 'skills/lark-shared/SKILL.md')])
       expect(context.workspaceFiles).toEqual([])
     } finally { await h.stop(); await h.runtime.dispose() }
   })
@@ -388,8 +388,9 @@ describe('Lark integration lifecycle', () => {
       expect(h.resources.size).toBe(2)
       expect(registerApp).not.toHaveBeenCalled()
       expect((await h.checked()).state).toBe('app_required')
-      expect(await readFile(join(h.directory, 'skills/lark-mail/SKILL.md'), 'utf8')).toContain('name: lark-mail')
-      expect(await readFile(join(h.directory, 'skills/lark-im/SKILL.md'), 'utf8')).toContain('name: lark-im')
+      expect(await readFile(join(h.directory, 'skills/lark-shared/SKILL.md'), 'utf8')).toContain('name: lark-shared')
+      await expect(stat(join(h.directory, 'skills/lark-mail'))).rejects.toThrow()
+      await expect(stat(join(h.directory, 'skills/lark-im'))).rejects.toThrow()
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
       expect(h.states.map((item) => item.state)).toEqual(expect.arrayContaining(['waiting_for_app', 'waiting_for_user', 'ready']))
       expect(await h.checked()).toEqual({ state: 'ready', actions: [] })

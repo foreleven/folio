@@ -11,13 +11,10 @@ import { larkMetadata } from './metadata.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { LarkPrivateState, migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
 import { ingestLarkEmail, ingestLarkIm } from './ingest.ts'
-/** Mounts only the capability selected for this Task resource. */
-const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) => Effect.gen(function* () {
-  const skills = ['lark-shared', skill]
-  for (const name of skills) {
-    const entrypoint = join(context.integrationDirectory, 'skills', name, 'SKILL.md')
-    if (!context.skills.includes(entrypoint)) context.skills.push(entrypoint)
-  }
+/** Exposes only shared CLI guidance; users select any task-specific Lark Skill themselves. */
+const onIngest = (context: IngestContext) => Effect.gen(function* () {
+  const entrypoint = join(context.integrationDirectory, 'skills', 'lark-shared', 'SKILL.md')
+  if (!context.skills.includes(entrypoint)) context.skills.push(entrypoint)
   const cli = join(context.integrationDirectory, 'cli')
   if (!context.executableDirectories.includes(cli)) context.executableDirectories.push(cli)
   // External credentials isolate task commands from the user's global CLI account.
@@ -49,8 +46,8 @@ const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) =>
   })
 })
 const resources = [
-  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('lark-im'), ingest: ingestLarkIm },
-  { id: 'email', type: 'email' as const, name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest: onIngest('lark-mail'), ingest: ingestLarkEmail }
+  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest, ingest: ingestLarkIm },
+  { id: 'email', type: 'email' as const, name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest, ingest: ingestLarkEmail }
 ] as const
 const actions = [
   { id: 'open_authorization', label: { en: 'Continue in browser', 'zh-CN': '前往授权' } },
