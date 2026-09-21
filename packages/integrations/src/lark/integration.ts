@@ -219,6 +219,9 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
       if (!(yield* readPrivateState(directory)).installed) return
       // Folio-owned Skills are refreshed on startup so their extraction logic
       // follows the application version without changing private credentials.
+      // The managed CLI is versioned the same way: startup replaces older
+      // releases before any ingestion operation can acquire them.
+      yield* ensureCli(directory)
       yield* installSkills(directory)
       // Re-register the static capability catalog on every provider startup. This
       // upgrades installations created before resource `type` was persisted while

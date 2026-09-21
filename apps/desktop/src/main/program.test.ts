@@ -4,8 +4,8 @@ import { ElectronApp } from './electron/ElectronApp'
 import { MainWindow } from './electron/MainWindow'
 import { application } from './program'
 // Electron's asset transform belongs to the bundler; lifecycle tests use an inert archive path.
-vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli.tar.gz' }))
-vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-linux-amd64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli-linux.tar.gz' }))
+vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-darwin-arm64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli.tar.gz' }))
+vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-linux-amd64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli-linux.tar.gz' }))
 vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '/test/folio' } }))
 
 

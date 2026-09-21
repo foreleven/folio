@@ -8,7 +8,7 @@ Also inspected its `auth-state.ts`, `device-oauth.ts`, and installed SDK 1.73.3 
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
-| Reuse system CLI | Real `lark-cli --version`: 1.0.94; default installation reused it | Verified live |
+| Reuse system CLI | Real `lark-cli --version`: 1.0.96; default installation reused it | Verified live |
 | Install missing CLI and reuse managed copy | Real isolated PATH: missing detection → npm installed 7 packages → executable verified → second run reused it | Verified live |
 | Install complete skills | Historical live check installed lark-shared, lark-im, and lark-mail; current builds retain only lark-shared | Historical; current shape covered by tests |
 | Register IM and Email resources | Real standalone host persisted both metadata records in `~/.folio/integrations/lark/resources.json` | Verified live |

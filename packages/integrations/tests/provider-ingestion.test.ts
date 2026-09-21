@@ -188,7 +188,7 @@ describe('provider-hosted ingestion', () => {
     expect(triage[0]).toEqual(expect.arrayContaining(['--as', 'user', '--max', '400']))
     expect(triage[0]).not.toContain('--page-size')
     expect(JSON.parse(triage[0]![triage[0]!.indexOf('--filter') + 1]!)).toEqual({
-      time_range: { start_time: '2026-09-21T00:00:00.000Z', end_time: '2026-09-21T01:00:00.000Z' }
+      time_range: { start_time: '2026-09-21T00:00:00Z', end_time: '2026-09-21T01:00:00Z' }
     })
     expect(triage[1]).toEqual(expect.arrayContaining(['--page-token', 'search:next']))
     const bodies = commands.filter(args => args[1] === '+messages')

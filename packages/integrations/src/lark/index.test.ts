@@ -1,6 +1,6 @@
 import { NodeServices } from '@effect/platform-node'
 import { registerApp } from '@larksuiteoapi/node-sdk'
-import { Clock, ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, ManagedRuntime, References, Scope, Sink, Stream } from 'effect'
+import { Clock, ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Layer, Logger, ManagedRuntime, References, Scope, Sink, Stream } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -63,12 +63,15 @@ afterEach(async () => { vi.unstubAllGlobals(); await rm(root, { recursive: true,
 /** Simulates process outcomes but keeps real Effect filesystem operations and private state files. */
 function harness(options: {
   missingCli?: boolean
+  cliVersion?: string
+  directoryName?: string
   systemExit?: number
   authStatusExit?: number
   authStatusBody?: unknown | string
   tarExit?: number
   gitExit?: number
 } = {}) {
+  let installedCliVersion = options.cliVersion ?? '1.0.96'
   const commands: ChildProcess.StandardCommand[] = []
   const states: Array<{ state: string; data: unknown }> = []
   const resources = new Map<string, Pick<IntegrationResource, 'id' | 'type' | 'name'>>()
@@ -92,6 +95,20 @@ function harness(options: {
     return ChildProcessSpawner.ChildProcessSpawner.of({ ...actual,
       spawn: (command) => {
         if (!ChildProcess.isStandardCommand(command)) throw new Error('Expected a direct command')
+        if ((command.command === 'lark-cli' || command.command.endsWith('/lark-cli')) &&
+            command.args[0] === '--version') {
+          commands.push(command)
+          const stdout = `lark-cli version ${installedCliVersion}\n`
+          return Effect.succeed(ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(1), stdin: Sink.drain,
+            stdout: Stream.fromIterable([new TextEncoder().encode(stdout)]), stderr: Stream.empty,
+            all: Stream.fromIterable([new TextEncoder().encode(stdout)]),
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(options.systemExit ?? 0)),
+            isRunning: Effect.succeed(false), kill: () => Effect.void,
+            getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void)
+          }))
+        }
         if ((command.command === 'lark-cli' || command.command.endsWith('/lark-cli')) &&
             command.args[0] === 'auth' && command.args[1] === 'status') {
           commands.push(command)
@@ -131,6 +148,7 @@ function harness(options: {
             }
           } else if (command.command === '/usr/bin/tar') {
             if (options.tarExit) return ChildProcessSpawner.ExitCode(options.tarExit)
+            installedCliVersion = '1.0.96'
             const prefix = command.args[command.args.indexOf('-C') + 1]
             const binary = join(prefix, 'lark-cli')
             await mkdir(dirname(binary), { recursive: true })
@@ -144,7 +162,7 @@ function harness(options: {
   const runtime = ManagedRuntime.make(Layer.merge(NodeServices.layer, processLayer).pipe(
     Layer.provideMerge(ConfigProvider.layer(ConfigProvider.fromEnvRecord({ FOLIO_CONFIG_DIR: root })))
   ))
-  const directory = join(root, 'integrations', 'lark')
+  const directory = join(root, 'integrations', options.directoryName ?? 'lark')
   if (!options.missingCli) { mkdirSync(join(directory, 'cli'), { recursive: true }); writeFileSync(join(directory, 'cli', 'lark-cli'), 'fixture CLI') }
   const context: IntegrationContext["Service"] = {
     directory,
@@ -431,7 +449,7 @@ describe('Lark integration lifecycle', () => {
       for (const message of ['Lark CLI installation started', 'Lark CLI installation failed',
         'Lark installation failed']) expect(output).toContain(message)
       expect(output).not.toContain(root)
-      expect(output).not.toContain('lark-cli-1.0.94-darwin-arm64.tar.gz')
+      expect(output).not.toContain('lark-cli-1.0.96-darwin-arm64.tar.gz')
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
@@ -444,6 +462,45 @@ describe('Lark integration lifecycle', () => {
       expect(h.commands.filter((cmd) => cmd.args[0] === 'clone')).toHaveLength(0)
       expect([...h.resources.keys()]).toEqual(['im', 'email'])
       expect([...h.resources.values()].map((resource) => resource.type)).toEqual(['im', 'email'])
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
+  it('upgrades an older managed CLI during startup and leaves the current version untouched', async () => {
+    const old = harness({ cliVersion: '1.0.94' })
+    const current = harness({ directoryName: 'lark-current' })
+    await seed(old.directory)
+    await seed(current.directory)
+    try {
+      old.start()
+      current.start()
+      await Promise.all([old.settled('ready'), current.settled('ready')])
+      expect(old.commands.filter((command) => command.command === '/usr/bin/tar')).toHaveLength(1)
+      expect(current.commands.filter((command) => command.command === '/usr/bin/tar')).toHaveLength(0)
+    } finally {
+      await old.stop()
+      await current.stop()
+      await old.runtime.dispose()
+      await current.runtime.dispose()
+    }
+  })
+
+  it('restores the previous managed CLI when upgrade publication fails', async () => {
+    const h = harness({ cliVersion: '1.0.94' })
+    await seed(h.directory)
+    const fs = await h.runtime.runPromise(FileSystem.FileSystem)
+    const failingFs = FileSystem.FileSystem.of({
+      ...fs,
+      rename: (from, to) => from.endsWith('.cli-staging') && to === join(h.directory, 'cli')
+        ? fs.rename(join(root, 'missing-cli-staging'), to)
+        : fs.rename(from, to)
+    })
+    try {
+      await expect(h.runtime.runPromise(lark.install().pipe(
+        Effect.provideService(IntegrationContext, h.context),
+        Effect.provideService(FileSystem.FileSystem, failingFs)
+      ))).rejects.toThrow()
+      expect(await readFile(join(h.directory, 'cli', 'lark-cli'), 'utf8')).toBe('fixture CLI')
+      await expect(stat(join(h.directory, '.cli-backup'))).rejects.toThrow()
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 

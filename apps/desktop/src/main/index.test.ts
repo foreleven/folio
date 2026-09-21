@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ELECTRON_RPC_REQUEST_CHANNEL } from '../shared/rpc/electron-rpc'
 // Electron's asset transform belongs to the bundler; lifecycle tests use an inert archive path.
-vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli.tar.gz' }))
-vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-linux-amd64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli-linux.tar.gz' }))
+vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-darwin-arm64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli.tar.gz' }))
+vi.mock('../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-linux-amd64.tar.gz?asset&asarUnpack', () => ({ default: '/test/lark-cli-linux.tar.gz' }))
 
 
 const electronMocks = vi.hoisted(() => ({

@@ -8,8 +8,8 @@ import { gmail } from '@folio/integrations/gmail'
 import { imap } from '@folio/integrations/imap'
 import { app } from 'electron'
 import { join } from 'node:path'
-import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-darwin-arm64.tar.gz?asset&asarUnpack'
-import larkCliLinuxArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.94-linux-amd64.tar.gz?asset&asarUnpack'
+import larkCliArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-darwin-arm64.tar.gz?asset&asarUnpack'
+import larkCliLinuxArchive from '../../../../packages/integrations/src/lark/assets/lark-cli-1.0.96-linux-amd64.tar.gz?asset&asarUnpack'
 
 const larkCliArchiveForPlatform = process.platform === 'linux' && process.arch === 'x64' ? larkCliLinuxArchive : larkCliArchive
 

@@ -144,7 +144,7 @@ without `verified` are previously verified records. Neither unknown responses no
 a different user identity can publish a newly rotated pair as ready.
 
 Lark uses the Folio-managed `lark-cli`; it never executes a global PATH copy.
-Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64 or Linux
+Missing tools are extracted from bundled `lark-cli@1.0.96` (macOS arm64 or Linux
 x64). Agent Tasks receive only the bundled `lark-shared` Skill from `larksuite/cli`
 commit `f065bf5b645af381f9b7475ce721451e6ca36a23`; users select any IM or Email
 Skill themselves. Ingestion does not depend on Agent Skills: the Lark resources

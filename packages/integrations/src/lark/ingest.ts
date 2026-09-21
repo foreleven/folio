@@ -207,7 +207,10 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
 /** Uses Lark Mail triage for the exact window, then writes stable message projections. */
 export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: IngestInput) {
   const session = yield* openIngestSession(input.integrationDirectory)
-  const filter = JSON.stringify({ time_range: { start_time: new Date(input.window.start).toISOString(), end_time: new Date(input.window.end).toISOString() } })
+  // Lark Mail rejects RFC 3339 fractional seconds, so expand to exact whole-second bounds and filter details below.
+  const start = new Date(Math.floor(input.window.start / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const end = new Date(Math.ceil(input.window.end / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const filter = JSON.stringify({ time_range: { start_time: start, end_time: end } })
   const ids = new Set<string>()
   let mailboxId: string | undefined
   let pageToken: string | undefined
