@@ -59,7 +59,8 @@ const readyImap = (): IntegrationView => {
 /** Keeps service tests near local midnight so successful ingestion does not start a long catch-up chain. */
 const nearMidnightTimeZone = () => {
   const utcHour = new Date().getUTCHours()
-  const offset = -utcHour
+  // Keep the synthetic offset within the IANA Etc/GMT range while wrapping to local midnight.
+  const offset = utcHour <= 12 ? -utcHour : 24 - utcHour
   return offset === 0 ? 'Etc/GMT' : `Etc/GMT${offset > 0 ? '-' : '+'}${Math.abs(offset)}`
 }
 

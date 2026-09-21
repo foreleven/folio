@@ -76,7 +76,7 @@ it('does not silently advance an unsubmitted selection to a newly refreshed base
 
 it('discovers a retained save, previews its snapshot and retries its original identity after reload', async () => {
   const input = { id: 'retained', expectedParent: 'c'.repeat(40), paths: ['wiki/one.md'] as [string] }
-  mocks.view = { ...mocks.view, files: [], pending: [{ ...input, state: 'prepared' }] }
+  mocks.view = { ...mocks.view, files: [], pending: [{ ...input, state: 'pending' }] }
   render(<WorkspaceChangesPanel />)
   expect(mocks.save).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'wiki/one.md' }))

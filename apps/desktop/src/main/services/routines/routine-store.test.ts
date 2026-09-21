@@ -15,7 +15,7 @@ let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-routine-store-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
-const layer = () => RoutineStore.layer.pipe(Layer.provide(TaskWorktrees.layer(root)), Layer.provideMerge(Layer.merge(HarnessStore.layer, ExecutionQueue.layer)), Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provide(NodeServices.layer))
+const layer = () => RoutineStore.layer.pipe(Layer.provide(TaskWorktrees.layer(root)), Layer.provideMerge(Layer.merge(HarnessStore.layer(root), ExecutionQueue.layer)), Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provide(NodeServices.layer))
 const routineId = '11111111-1111-4111-8111-111111111111'
 const sessionId = '22222222-2222-4222-8222-222222222222'
 const runId = (n: number) => `33333333-3333-4333-8333-${n.toString().padStart(12, '0')}`

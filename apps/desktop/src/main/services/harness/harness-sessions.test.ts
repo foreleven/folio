@@ -34,7 +34,7 @@ function runtime(entrypoint = resolve('out/main/agent-worker.js')) {
   }).pipe(
     Layer.provide(protocolTestSink),
     Layer.provide(AgentWorkerPool.layer), Layer.provideMerge(TaskWorktrees.layer(root)),
-    Layer.provideMerge(Layer.merge(HarnessStore.layer, HarnessEventStore.layer)),
+    Layer.provideMerge(Layer.merge(HarnessStore.layer(root), HarnessEventStore.layer)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer)
   ))
 }

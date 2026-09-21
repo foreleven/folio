@@ -12,14 +12,13 @@ import type { ExecutionSubmission } from '../../../shared/execution'
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-execution-queue-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
-const layer = () => Layer.merge(ExecutionQueue.layer, HarnessStore.layer).pipe(Layer.provideMerge(vaultDatabaseLayer(root)))
+const layer = () => Layer.merge(ExecutionQueue.layer, HarnessStore.layer(root)).pipe(Layer.provideMerge(vaultDatabaseLayer(root)))
 const input = (id: string, taskId = 'task'): ExecutionSubmission => ({ id, taskId, sessionId: taskId,
   prompt: 'Read notes', purpose: 'execution', resumesRunId: null, source: 'manual' })
 /** Unbound Sessions prove admission does not require an Agent connection. */
 const setup = (id = 'task') => Effect.gen(function* () {
   const store = yield* HarnessStore
-  yield* store.createTask({ id, type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
-    branch: `task/${id}`, worktree: `/tasks/${id}` })
+  yield* store.createTask({ id, type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
   const sql = yield* SqlClient.SqlClient
   yield* sql`UPDATE tasks SET worktree_state='ready' WHERE id=${id}`
   yield* store.createSession({ id, taskId: id, agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })

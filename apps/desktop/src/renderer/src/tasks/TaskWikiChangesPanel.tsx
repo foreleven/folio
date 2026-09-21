@@ -68,7 +68,6 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
   const synchronize = useAtomSet(TaskRpcClient.synchronizeTaskWiki, { mode: 'promise' })
   const reprepare = useAtomSet(TaskRpcClient.reprepareTaskWiki, { mode: 'promise' })
   const startConflict = useAtomSet(TaskRpcClient.startConflictResolution, { mode: 'promise' })
-  const resolveConflict = useAtomSet(TaskRpcClient.resolveTaskWikiConflict, { mode: 'promise' })
   const abortConflict = useAtomSet(TaskRpcClient.abortTaskWikiConflict, { mode: 'promise' })
   const [selection, setSelection] = useState<{ head: string; paths: string[] } | null>(null)
   const [submitted, setSubmitted] = useState<(SaveTaskWikiFiles | SaveRunWikiFiles) | null>(persisted.submitted ?? null)
@@ -161,7 +160,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     try {
       const settled = await synchronize({ payload: { input: syncRequest } })
       setSyncIntent(null)
-      setSyncMessage(settled.state === 'aligned'
+      setSyncMessage(settled.state === 'completed'
         ? (chinese ? '已发布并对齐到 main。' : 'Published and aligned with main.')
         : settled.state === 'conflict'
           ? (chinese ? '发生冲突，现场已保留在隔离目录。' : 'A conflict is isolated; the coordinator was retained.')
@@ -170,9 +169,9 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations() }
   }
 
-  /** Rebuilds stale prepared input on the current main without discarding its source journal. */
+  /** Rebuilds stale prepared input on the current main without discarding its source commits. */
   async function retryOnNewMain(): Promise<void> {
-    if (syncInFlight.current || (!reprepareIntent && (!operation || !['prepared', 'conflict', 'resolving'].includes(operation.state)))) return
+    if (syncInFlight.current || (!reprepareIntent && (!operation || !['prepared', 'conflict'].includes(operation.state)))) return
     // The replacement edge is deterministic for the superseded operation. This means a refresh
     // before sessionStorage is flushed can still reconstruct the same id instead of creating a
     // second replacement operation for the same frozen source interval.
@@ -209,20 +208,9 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations(); refreshDetail() }
   }
 
-  /** Accepts a fully staged coordinator result; Folio performs the Git checks and sync. */
-  async function acceptConflictResolution(): Promise<void> {
-    if (syncInFlight.current || !operation || operation.state !== 'resolving') return
-    syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
-    try {
-      const settled = await resolveConflict({ payload: { taskId, id: operation.id } })
-      setSyncMessage(chinese ? `冲突结果已接纳：${settled.state}` : `Conflict result accepted: ${settled.state}`)
-    } catch { setSyncFailed(true) }
-    finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations() }
-  }
-
   /** Explicitly discards only the isolated coordinator; main, Task and source history remain intact. */
   async function abortConflictResolution(): Promise<void> {
-    if (syncInFlight.current || !operation || !['conflict', 'resolving'].includes(operation.state)) return
+    if (syncInFlight.current || !operation || operation.state !== 'conflict') return
     syncInFlight.current = true; setPending(true); setSyncFailed(false); setSyncMessage('')
     try {
       await abortConflict({ payload: { taskId, id: operation.id } })
@@ -286,7 +274,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
         : submitted ? (chinese ? '重试保存' : 'Retry save') : runSelection.length ? (chinese ? '保存并归属所选 Run' : 'Save and attribute to selected Runs') : (chinese ? '保存所选文件' : 'Save selected files')}</Button>
       {selection && !submitted ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => setSelection(null)}>{chinese ? '清除选择' : 'Clear selection'}</Button> : null}
       {syncRequest ? <Button variant="outline" size="sm" disabled={pending} onClick={() => void sync()}>{operation ? (chinese ? '继续同步' : 'Continue sync') : (chinese ? '同步到 main' : 'Sync to main')}</Button> : null}
-      {(reprepareIntent || (operation && ['prepared', 'conflict', 'resolving'].includes(operation.state))) && !syncIntent ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => void retryOnNewMain()}>
+      {(reprepareIntent || (operation && ['prepared', 'conflict'].includes(operation.state))) && !syncIntent ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => void retryOnNewMain()}>
         {operation?.state === 'prepared' || reprepareIntent?.supersededId === operation?.id
           ? (chinese ? 'main 已变化，重新准备' : 'Reprepare after main changed')
           : (chinese ? '在当前 main 上重新准备冲突' : 'Reprepare conflict on current main')}
@@ -299,14 +287,6 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
           {chinese ? '放弃冲突现场' : 'Abort conflict'}
         </Button> : null}
       </> : null}
-      {operation?.state === 'resolving' ? <>
-        <Button variant="outline" size="sm" disabled={pending} onClick={() => void acceptConflictResolution()}>
-          {chinese ? '接纳已暂存结果' : 'Accept staged resolution'}
-        </Button>
-        <Button variant="ghost" size="sm" disabled={pending} onClick={() => void abortConflictResolution()}>
-          {chinese ? '放弃冲突现场' : 'Abort conflict'}
-        </Button>
-      </> : null}
       {activeConflictIntent ? <p role="status" className="w-full text-support text-muted-foreground">
         {chinese ? '冲突解决请求未确认，重试会复用原请求。' : 'The conflict-resolution request is unconfirmed; retry will reuse the original request.'}
       </p> : null}
@@ -316,7 +296,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     {syncFailed ? <p role="alert" className="text-support text-destructive">{chinese ? '同步尚未确认，操作收据已保留，请刷新后重试。' : 'Synchronization was not confirmed; its receipt is retained. Refresh and retry.'}</p> : null}
     {syncMessage ? <p role="status" className="text-support">{syncMessage}</p> : null}
     {savedCommit ? <p role="status" className="text-support text-muted-foreground">{chinese ? 'Task 提交：' : 'Task commit: '}{savedCommit.slice(0, 8)}</p> : null}
-    {operation && ['conflict', 'resolving'].includes(operation.state) ? <TaskWikiConflictDetails taskId={taskId} operationId={operation.id}
+    {operation?.state === 'conflict' ? <TaskWikiConflictDetails taskId={taskId} operationId={operation.id}
       conflictSessionId={conflictSession?.id} conflictRunId={conflictRun?.id} /> : null}
     {preview ? <TaskWikiDiff key={JSON.stringify(preview)} taskId={taskId} input={preview} onClose={() => setPreview(null)} /> : null}
   </section>

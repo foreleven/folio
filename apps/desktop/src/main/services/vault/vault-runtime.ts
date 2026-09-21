@@ -23,7 +23,6 @@ import { AgentRuntime } from '../agent/agent-runtime'
 import { HarnessSessions } from '../harness/harness-sessions'
 import { HarnessEventStore } from '../harness/harness-event-store'
 import { GitChangeApplications } from '../git/git-change-applications'
-import { GitChangeJournal } from '../git/git-change-journal'
 import { WorkspaceChanges } from '../git/workspace-changes'
 import { TaskGitSynchronization } from '../tasks/task-git-synchronization'
 
@@ -71,7 +70,6 @@ export class VaultRuntime extends Context.Service<
                 Layer.provide(WorkspaceChanges.layer(directory)),
                 Layer.provideMerge(wikiServiceLayer(directory)),
                 Layer.provide(GitChangeApplications.layer(directory)),
-                Layer.provide(GitChangeJournal.layer(directory)),
                 Layer.provide(HarnessRuns.layer),
                 Layer.provide(Layer.succeed(ModelService)(models)),
                 Layer.provide(RoutineStore.layer),
@@ -103,7 +101,7 @@ export class VaultRuntime extends Context.Service<
                 Layer.provide(Layer.succeed(IntegrationService)(integrations)),
                 Layer.provide(Layer.succeed(ConfigService)(config)),
                 Layer.provide(Layer.succeed(ExecutionNotifications)(notifications)),
-                Layer.provide(Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer, ExecutionQueue.layer)),
+                Layer.provide(Layer.mergeAll(HarnessStore.layer(directory), HarnessEventStore.layer, ExecutionQueue.layer)),
                 Layer.provide(vaultDatabaseLayer(directory)),
                   Layer.provideMerge(Layer.succeed(VaultContext)(context)),
                 Layer.fresh

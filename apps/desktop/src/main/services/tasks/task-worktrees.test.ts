@@ -12,7 +12,6 @@ import { TaskWorktrees } from './task-worktrees'
 import { makeVaultGit } from '../git/vault-git'
 import { vaultDatabaseLayer } from '../vault/vault-database'
 import { GitChangeApplications } from '../git/git-change-applications'
-import { GitChangeJournal } from '../git/git-change-journal'
 
 let root: string
 beforeEach(async () => {
@@ -23,7 +22,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 /** Every test uses real Git and a scoped Vault database; reopening shares only durable state. */
 function layer() {
   return Layer.merge(TaskWorktrees.layer(root), GitChangeApplications.layer(root)).pipe(
-    Layer.provideMerge(GitChangeJournal.layer(root)), Layer.provideMerge(HarnessStore.layer),
+    Layer.provideMerge(HarnessStore.layer(root)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
 const draft = (id: string) => ({ id, type: 'agent' as const, receipt: null, configuration: { goal: 'Test task', agent: 'pi' as const, model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
@@ -134,7 +133,7 @@ describe('Task Git worktree creation checkpoints', () => {
     await Effect.runPromise(Effect.gen(function*() {
       yield* initialize
       const store = yield* HarnessStore
-      yield* store.createTask({ ...draft('task'), branch: 'folio/task/task', worktree: join(root, 'worktrees/task') })
+      yield* store.createTask(draft('task'))
       const session = { id: 'session', taskId: 'task', agent: 'pi' as const, adapterVersion: '1', purpose: 'task' as const, syncOperationId: null }
       yield* store.createSession(session)
       expect(yield* store.sessions('task')).toMatchObject([{ id: 'session', acpSessionId: null }])
@@ -150,7 +149,7 @@ describe('Task Git worktree creation checkpoints', () => {
     }).pipe(Effect.provide(layer())))
   })
 
-  it('refuses unregistered main commits and mismatched Task paths without overwriting them', async () => {
+  it('refuses unregistered main commits without creating a Task branch', async () => {
     await Effect.runPromise(Effect.gen(function*() {
       const main = yield* initialize
       const git = yield* makeVaultGit
@@ -160,9 +159,6 @@ describe('Task Git worktree creation checkpoints', () => {
       const worktrees = yield* TaskWorktrees
       expect(yield* worktrees.create(draft('unknown-base')).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       expect((yield* git(main.workspace, ['for-each-ref', '--format=%(refname)', 'refs/heads/folio/task/unknown-base'])).trim()).toBe('')
-      const store = yield* HarnessStore
-      yield* store.createTask({ ...draft('wrong-path'), branch: 'folio/task/wrong-path', worktree: main.workspace })
-      expect(yield* worktrees.ensure('wrong-path').pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
       expect(yield* Effect.promise(() => readFile(join(main.wiki, 'external.md'), 'utf8'))).toBe('external commit')
     }).pipe(Effect.provide(layer())))
   })

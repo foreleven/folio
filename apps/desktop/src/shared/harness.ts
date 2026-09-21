@@ -37,9 +37,7 @@ export const IngestionReceipt = Schema.Struct({
 export type IngestionReceipt = typeof IngestionReceipt.Type
 
 const TaskIdentity = {
-  id: Id,
-  branch: Id,
-  worktree: Id
+  id: Id
 }
 export const NewTask = Schema.Union([
   Schema.Struct({ ...TaskIdentity, type: Schema.Literal('agent'), configuration: AgentTaskConfiguration, receipt: Schema.Null }),
@@ -47,6 +45,10 @@ export const NewTask = Schema.Union([
 ])
 export type NewTask = typeof NewTask.Type
 const TaskLifecycle = {
+  // These are derived from the Vault directory and Task id; they are exposed for consumers but
+  // are deliberately not persisted in the Task row.
+  branch: Id,
+  worktree: Id,
   state: Schema.Literals(['active', 'completed', 'cancelled']),
   worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
   worktreeBase: Schema.NullOr(Schema.String),

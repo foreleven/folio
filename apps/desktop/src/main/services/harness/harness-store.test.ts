@@ -19,7 +19,7 @@ afterEach(async () => {
 })
 /** Rebuild layers for every invocation to verify disk persistence rather than shared in-memory objects. */
 function layer(directory = root) {
-  return HarnessStore.layer.pipe(Layer.provideMerge(vaultDatabaseLayer(directory)))
+  return HarnessStore.layer(directory).pipe(Layer.provideMerge(vaultDatabaseLayer(directory)))
 }
 /** Supplies three deliberately distinct identities for a bound Session. */
 const setup = Effect.gen(function* () {
@@ -27,9 +27,7 @@ const setup = Effect.gen(function* () {
   yield* store.createTask({
     id: 'task',
     type: 'agent', receipt: null,
-    configuration: { goal: 'Summarize notes', agent: 'pi', model: null, skillIds: ['notes'], integrationIds: ['lark'], resourceIds: [] },
-    branch: 'task/task',
-    worktree: '/worktrees/task'
+    configuration: { goal: 'Summarize notes', agent: 'pi', model: null, skillIds: ['notes'], integrationIds: ['lark'], resourceIds: [] }
   })
   // Storage-only fixture: the real Git resource boundary is covered by TaskWorktrees tests.
   yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='task'`)
@@ -81,9 +79,7 @@ describe('Vault harness execution ledger', () => {
         yield* store.createTask({
           id: 'other',
           type: 'agent', receipt: null,
-          configuration: { goal: 'Other', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
-          branch: 'task/other',
-          worktree: '/worktrees/other'
+          configuration: { goal: 'Other', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] }
         })
         // Storage-only fixture: the real Git resource boundary is covered by TaskWorktrees tests.
         yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='other'`)

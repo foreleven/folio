@@ -92,12 +92,11 @@ export class HarnessRuns extends Context.Service<HarnessRuns, {
         let taskWorktree: string | undefined
         if (input.purpose === 'conflict-resolution') {
           if (savedSession.purpose !== 'conflict-resolution' || !savedSession.syncOperationId) return yield* failure('invalid-state')
-          const target = (yield* sql<{ mainBase: string; canonicalCommits: string }>`SELECT main_base AS mainBase,
-            canonical_commits AS canonicalCommits FROM git_sync_operations
-            WHERE id=${savedSession.syncOperationId} AND task_id=${input.taskId} AND state='conflict'`)[0]
+          const target = (yield* sql<{ baseline: string }>`SELECT target_commit AS baseline FROM git_operations
+            WHERE id=${savedSession.syncOperationId} AND task_id=${input.taskId}
+              AND kind='synchronize' AND state='conflict'`)[0]
           if (!target) return yield* failure('invalid-state')
-          const prefix = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Schema.Struct({ commit: Schema.String }))))(target.canonicalCommits)
-          baseline = prefix.at(-1)?.commit ?? target.mainBase
+          baseline = target.baseline
         } else {
           if (savedSession.purpose !== 'task') return yield* failure('invalid-state')
           const checkout = yield* worktrees.ensure(input.taskId, claim)

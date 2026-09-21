@@ -1,6 +1,14 @@
 # Git 同步：统一冲突结果的候选方案
 
-状态：2026-09-10 用户已确认采用。本文取代原双向分别解冲突的候选算法；2026-09-11 已完成手动 `wiki` 保存、stale reprepare、人工 coordinator resolve/abort，以及 terminal receipt 前 Folio-owned Agent 进程回收的生产后端切片；自动保存编排、AI conflict-resolution Run 和完整故障恢复仍未完成。
+状态：2026-09-10 用户已确认采用。本文取代原双向分别解冲突的候选算法；历史方案记录保留在后文，当前生产结构以 2026-09-22 的实现说明为准。
+
+## 当前实现（2026-09-22）
+
+新 Vault 不迁移旧 Git 账本。SQLite 只保留 `git_operations` 与 `git_operation_runs`：前者记录保存/同步操作的紧凑生命周期，后者记录一次 wiki 保存所归属的 Run 集合。旧的 preparation、application、sync 和 resolution-input 表均已删除，Task branch/worktree 路径也不再入库，而是由 Task ID 确定性派生。
+
+Git 负责 commit、tree、ref 与 checkout；可重建的详细恢复输入保存在 `git-operations/{operationId}/operation.json`，已接受的冲突结果保存在同目录的 `resolution.patch`，冲突答案 tree 由 operation ref 临时保护。JSON 通过临时文件加 rename 原子替换，操作完成后删除。保存只重置本次选择路径的 index，保留无关 staged 内容；同步把 source commit 序列重放到隔离 worktree，main 前进时基于最新已登记 main 重建。Task 对齐前先在本地文件保存准确 reset 目标，因此 reset 后 SQLite 收据丢失、main 又继续前进时仍可无歧义恢复。
+
+并发门禁按 checkout 分层：main 发布/同步共享 `main` 临界区，各 Task 保存使用 `task:{taskId}` 临界区。SQLite 只约束同一 Task 的活动 Git operation 与普通 Run 互斥；conflict-resolution Run 可继续处理对应 conflict。没有 Vault 全局 Git 数据库锁，也没有兼容视图或双写。
 
 ## 问题与目标
 

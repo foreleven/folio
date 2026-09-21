@@ -225,7 +225,7 @@ export const TaskServiceLive = Layer.effect(
           || target?.purpose !== 'conflict-resolution' || target.syncOperationId !== operation.id || target.agent !== source.agent) return yield* failure('invalid-state')
         // A retry of a successful Run can finish post-processing after a lost reply;
         // queue admission and execution history now refer to this same record.
-        if (previousRun.state === 'succeeded' && (operation.state === 'conflict' || operation.state === 'resolving')) {
+        if (previousRun.state === 'succeeded' && operation.state === 'conflict') {
           yield* synchronization.acceptAgentResolution(task.id, operation.id, previousRun.id)
         }
         return previousRun
@@ -445,7 +445,7 @@ export const TaskServiceLive = Layer.effect(
               stage = 'prepare-publication'
               const sourceHead = (yield* git(task.worktree, ['rev-parse', 'HEAD'])).trim()
               operation = yield* synchronization.prepare({ id: randomUUID(), taskId, expectedSourceHead: sourceHead })
-            } else if (operation.state === 'preparing' || operation.state === 'resolving') {
+            } else if (operation.state === 'pending') {
               operation = yield* synchronization.prepare({ id: operation.id, taskId, expectedSourceHead: operation.sourceHead })
             }
             if (operation.state === 'conflict') return { kind: 'conflict' as const }
@@ -457,12 +457,15 @@ export const TaskServiceLive = Layer.effect(
           // successful SQLite receipt, interruption must not expose a cancelled window.
           stage = 'publish-raws'
           if (operation.state === 'prepared') operation = yield* synchronization.publish(operation.id)
-          if (!operation.publishedHead || !['published', 'aligning', 'aligned'].includes(operation.state)) return yield* failure('invalid-state')
+          if (!operation.publishedHead || !['published', 'completed'].includes(operation.state)) return yield* failure('invalid-state')
           const current = yield* store.task(taskId)
           if (current.type !== 'ingestion') return yield* failure('invalid-state')
           if (!paths.length && current.receipt.changeId) {
-            const rows = yield* sql<{ paths: string }>`SELECT paths FROM git_change_preparations WHERE id=${current.receipt.changeId} AND task_id=${taskId}`
-            paths = rows[0] ? JSON.parse(rows[0].paths) as string[] : []
+            const saved = (yield* sql<{ source: string; target: string }>`SELECT source_commit AS source, target_commit AS target
+              FROM git_operations WHERE id=${current.receipt.changeId} AND task_id=${taskId}
+                AND kind='save-raws' AND state='completed'`)[0]
+            if (saved) paths = (yield* git(task.worktree, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', saved.source, saved.target]))
+              .split('\0').filter(Boolean)
           }
           stage = 'save-receipt'
           yield* finishIngestionSuccess(current, operation.publishedHead, paths)
@@ -554,7 +557,7 @@ export const TaskServiceLive = Layer.effect(
         const session = (yield* store.sessions(request.taskId)).find(value => value.id === request.sessionId)
         if (!session?.syncOperationId) return yield* failure('invalid-state')
         const operation = yield* synchronization.get(session.syncOperationId)
-        if (operation.state === 'conflict' || operation.state === 'resolving') {
+        if (operation.state === 'conflict') {
           yield* synchronization.acceptAgentResolution(request.taskId, session.syncOperationId, request.id)
         }
       }
@@ -617,10 +620,10 @@ export const TaskServiceLive = Layer.effect(
       for (const task of yield* store.tasks) {
         if (task.type === 'agent') yield* completeRoutineAfterReceipt(task.id)
         else if (task.state === 'completed' && task.worktreeState !== 'released') {
-          const rows = yield* sql<{ id: string; state: string }>`SELECT id, state FROM git_sync_operations
+          const rows = yield* sql<{ id: string; state: string }>`SELECT id, state FROM git_operations
             WHERE task_id=${task.id} ORDER BY sequence DESC LIMIT 1`
           const operation = rows[0]
-          if (operation && (operation.state === 'published' || operation.state === 'aligning')) {
+          if (operation?.state === 'published') {
             yield* synchronization.align(operation.id).pipe(Effect.catch(() => Effect.void))
           }
           yield* worktrees.complete(task.id).pipe(Effect.catch(() => Effect.void))
@@ -654,7 +657,7 @@ export const TaskServiceLive = Layer.effect(
       const operation = yield* synchronization.get(id)
       if (operation.taskId !== taskId) return yield* failure('not-found')
       const settled = yield* action === 'resolve' ? synchronization.resolve(id) : synchronization.abort(id)
-      if (settled.state === 'aligned') yield* completeRoutineAfterReceipt(taskId)
+      if (settled.state === 'completed') yield* completeRoutineAfterReceipt(taskId)
       return settled
     })
     const cancelIngestion = Effect.fn('TaskService.cancelIngestion')(function* (taskId: string) {
@@ -717,9 +720,9 @@ export const TaskServiceLive = Layer.effect(
       saveRunWikiFiles: changes.saveRunWiki,
       confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
       synchronizeTaskWiki: (input) =>
-        synchronization.synchronize(input).pipe(Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
+        synchronization.synchronize(input).pipe(Effect.tap((operation) => (operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
       reprepareTaskWiki: (input) =>
-        synchronization.reprepare(input).pipe(Effect.tap((operation) => (operation.state === 'aligned' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
+        synchronization.reprepare(input).pipe(Effect.tap((operation) => (operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
       resolveTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'resolve'),
       abortTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'abort'),
       cancelIngestion,

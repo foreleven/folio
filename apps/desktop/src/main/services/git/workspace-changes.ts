@@ -6,8 +6,8 @@ import { join, resolve } from 'node:path'
 import { GitObjectId, GitSelectedPath, PendingWorkspaceSave, WorkspaceChangesView, WorkspaceDiffInput, WorkspaceFileDiff } from '../../../shared/git-change'
 import { HarnessStoreError } from '../../../shared/harness'
 import { isRegisteredGitCommit } from './git-change-applications'
-import { GitChangeJournal } from './git-change-journal'
 import { HarnessStore } from '../harness/harness-store'
+import { readSaveOperationFile } from './git-operation-files'
 import { snapshotGitChange } from './git-change-snapshot'
 import { makeVaultGit } from './vault-git'
 
@@ -32,7 +32,6 @@ export class WorkspaceChanges extends Context.Service<
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
         const sql = yield* SqlClient.SqlClient
-        const journal = yield* GitChangeJournal
         const store = yield* HarnessStore
         const dependencies = yield* Effect.context<FileSystem.FileSystem | SqlClient.SqlClient | ChildProcessSpawner.ChildProcessSpawner>()
         const git = yield* makeVaultGit
@@ -113,21 +112,19 @@ export class WorkspaceChanges extends Context.Service<
               [...paths].sort(([a], [b]) => a.localeCompare(b)),
               ([path, status]) => fileInfo(base.path, path, taskId !== null).pipe(Effect.map((info) => ({ path, status, selectable: info.selectable })))
             )
-            const pending = yield* sql`SELECT p.id, p.parent AS expectedParent, p.paths,
-          CASE WHEN a.state='applying' THEN 'applying' ELSE p.state END AS state
-          FROM git_change_preparations p LEFT JOIN git_change_applications a ON a.id=p.id
-          WHERE p.task_id IS ${taskId} AND p.kind='user' AND (a.id IS NULL OR a.state<>'applied') ORDER BY p.created_at, p.id`.pipe(
-              Effect.flatMap(
-                Schema.decodeUnknownEffect(
-                  Schema.Array(
-                    Schema.Struct({
-                      ...PendingWorkspaceSave.fields,
-                      paths: Schema.fromJsonString(PendingWorkspaceSave.fields.paths)
-                    })
-                  )
-                )
-              )
-            )
+            const pendingRows = yield* sql<{ id: string; expectedParent: string; artifactPath: string }>`SELECT
+              id, source_commit AS expectedParent, artifact_path AS artifactPath FROM git_operations
+              WHERE task_id IS ${taskId} AND state='pending'
+                AND (kind='save-user' OR (${taskId} IS NOT NULL AND kind='save-wiki')) ORDER BY sequence`
+            const pending = yield* Effect.forEach(pendingRows, row =>
+              readSaveOperationFile(root, row.artifactPath).pipe(
+                Effect.flatMap(artifact => Schema.decodeUnknownEffect(PendingWorkspaceSave)({
+                  id: row.id,
+                  expectedParent: row.expectedParent,
+                  paths: artifact.paths,
+                  state: 'pending'
+                }))
+              ))
             if ((yield* git(base.path, ['rev-parse', 'HEAD'])).trim() !== base.head) return yield* invalid()
             return { head: base.head, registered: base.registered, files, pending }
           },
@@ -153,8 +150,12 @@ export class WorkspaceChanges extends Context.Service<
             if (taskId !== null && !value.path.startsWith('wiki/')) return yield* invalid()
             let tree: string
             if (value.saveId !== null) {
-              const saved = yield* journal.get(value.saveId)
-              if (saved.taskId !== taskId || saved.kind !== 'user' || saved.parent !== value.expectedParent || !saved.paths.includes(value.path)) return yield* invalid()
+              const rows = yield* sql<{ artifactPath: string }>`SELECT artifact_path AS artifactPath FROM git_operations
+                WHERE id=${value.saveId} AND task_id IS ${taskId} AND state='pending'
+                  AND (kind='save-user' OR (${taskId} IS NOT NULL AND kind='save-wiki'))`
+              if (!rows[0]) return yield* invalid()
+              const saved = yield* readSaveOperationFile(root, rows[0].artifactPath)
+              if (saved.parent !== value.expectedParent || !saved.paths.includes(value.path)) return yield* invalid()
               tree = saved.tree
             } else {
               if (base.head !== value.expectedParent) return yield* invalid()

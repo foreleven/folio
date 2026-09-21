@@ -63,15 +63,8 @@ export class TaskWorktrees extends Context.Service<
             const active = yield* sql`SELECT id FROM runs WHERE task_id=${taskId} AND state IN ('preparing', 'running')
               AND NOT (id IS ${claim?.id ?? null} AND owner IS ${claim?.owner ?? null} AND state='preparing' AND baseline_commit IS NULL)`
             if (active.length) return yield* new HarnessStoreError({ reason: 'task-busy', message: 'Task has an active Run.' })
-            const saving = yield* sql`SELECT a.id FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
-          WHERE p.task_id=${taskId} AND a.state='applying'`
-            if (saving.length) return yield* invalid()
-            if (
-              (yield* sql`SELECT pending.id FROM git_sync_operations pending WHERE pending.task_id=${taskId} AND pending.state NOT IN ('aligned', 'aborted')
-              AND (pending.state<>'superseded' OR NOT EXISTS (
-                SELECT 1 FROM git_sync_operations replacement WHERE replacement.supersedes_id=pending.id))`).length
-            )
-              return yield* invalid()
+            if ((yield* sql`SELECT id FROM git_operations WHERE task_id=${taskId}
+              AND state IN ('pending', 'conflict', 'prepared', 'published')`).length) return yield* invalid()
             yield* fs.makeDirectory(parent, { recursive: true })
             if ((yield* fs.realPath(parent)) !== parent) return yield* invalid()
             const marker = yield* fs
@@ -113,18 +106,15 @@ export class TaskWorktrees extends Context.Service<
             AND worktree_state='creating' AND worktree_base=${base} RETURNING id`
               if (!changed.length && (yield* store.task(taskId)).worktreeState !== 'ready') return yield* invalid()
             }
-            const synchronized = checkpoint
-              ? []
-              : yield* sql<{ alignedHead: string; publishedHead: string }>`SELECT
-              aligned_head AS alignedHead, published_head AS publishedHead FROM git_sync_operations
-              WHERE task_id=${taskId} AND state='aligned' ORDER BY sequence DESC LIMIT 1`
-            const expectedTaskHead = checkpoint?.taskHead ?? synchronized[0]?.alignedHead ?? base
-            const expectedMainHead = checkpoint?.mainHead ?? synchronized[0]?.publishedHead ?? base
-            // Execution may only reuse a checkout at its last completed two-sided checkpoint.
-            // A newer main or Task commit must pass through TaskGitSynchronization first; ensure
-            // never updates or overwrites either checkout on the caller's behalf.
-            if ((yield* git(path, ['rev-parse', 'HEAD'])).trim() !== expectedTaskHead || (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim() !== expectedMainHead)
-              return yield* invalid()
+            const synchronized = checkpoint ? [] : yield* sql<{ target: string }>`SELECT target_commit AS target
+              FROM git_operations WHERE task_id=${taskId} AND kind='synchronize' AND state='completed'
+              ORDER BY sequence DESC LIMIT 1`
+            const expectedTaskHead = checkpoint?.taskHead ?? synchronized[0]?.target ?? base
+            const mainHead = (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim()
+            if ((yield* git(path, ['rev-parse', 'HEAD'])).trim() !== expectedTaskHead ||
+              (checkpoint ? mainHead !== checkpoint.mainHead :
+                !(yield* git(main, ['merge-base', '--is-ancestor', expectedTaskHead, mainHead]).pipe(
+                  Effect.as(true), Effect.catch(() => Effect.succeed(false)))))) return yield* invalid()
             return { path, branch, baselineCommit: base }
           },
           Effect.mapError(storage)
@@ -148,9 +138,9 @@ export class TaskWorktrees extends Context.Service<
             return yield* store.task(taskId)
           }
           const base = yield* Schema.decodeUnknownEffect(Commit)(task.worktreeBase).pipe(Effect.mapError(invalid))
-          const synchronized = yield* sql<{ alignedHead: string; publishedHead: string }>`SELECT aligned_head AS alignedHead, published_head AS publishedHead FROM git_sync_operations
-            WHERE task_id=${taskId} AND state='aligned' ORDER BY sequence DESC LIMIT 1`
-          const expectedHead = synchronized[0]?.alignedHead ?? base
+          const synchronized = yield* sql<{ target: string }>`SELECT target_commit AS target FROM git_operations
+            WHERE task_id=${taskId} AND kind='synchronize' AND state='completed' ORDER BY sequence DESC LIMIT 1`
+          const expectedHead = synchronized[0]?.target ?? base
           if (task.state === 'completed' && task.worktreeState === 'released') {
             if (
               (yield* fs.exists(path)) ||
@@ -161,7 +151,7 @@ export class TaskWorktrees extends Context.Service<
             return task
           }
           if (task.state === 'active' && task.worktreeState === 'ready') {
-            const publishedHead = synchronized[0]?.publishedHead ?? base
+            const publishedHead = synchronized[0]?.target ?? base
             const mainHead = (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim()
             const marker = yield* fs.readFileString(join(main, '.git', 'folio-workspace.json')).pipe(
               Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({ version: Schema.Literal(1), initialCommit: Commit })))))
@@ -192,8 +182,8 @@ export class TaskWorktrees extends Context.Service<
           // Ingestion records business success before best-effort alignment and cleanup.
           // Once alignment is durable, cleanup may advance the already-completed Task.
           if (task.type === 'ingestion' && task.state === 'completed' && task.worktreeState === 'ready') {
-            const publishedHead = synchronized[0]?.publishedHead
-            if (!publishedHead || !synchronized[0]?.alignedHead) return yield* invalid()
+            const publishedHead = synchronized[0]?.target
+            if (!publishedHead) return yield* invalid()
             const mainHead = (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim()
             if ((yield* git(main, ['merge-base', publishedHead, mainHead])).trim() !== publishedHead) return yield* invalid()
             const changed = yield* sql`UPDATE tasks SET worktree_state='releasing'
@@ -263,8 +253,8 @@ export class TaskWorktrees extends Context.Service<
           const branchRef = `refs/heads/${branch}`
           const branchValue = (yield* git(main, ['for-each-ref', '--format=%(objectname)', branchRef])).trim()
           if (!branchValue) return yield* invalid()
-          const expectedTaskHead = (yield* sql<{ alignedHead: string }>`SELECT aligned_head AS alignedHead FROM git_sync_operations
-            WHERE task_id=${taskId} AND state='aligned' ORDER BY sequence DESC LIMIT 1`)[0]?.alignedHead ?? task.worktreeBase
+          const expectedTaskHead = (yield* sql<{ target: string }>`SELECT target_commit AS target FROM git_operations
+            WHERE task_id=${taskId} AND kind='synchronize' AND state='completed' ORDER BY sequence DESC LIMIT 1`)[0]?.target ?? task.worktreeBase
           if (!expectedTaskHead) return yield* invalid()
 
           // A previous attempt may have moved the branch before its SQL receipt was written.
@@ -290,7 +280,7 @@ export class TaskWorktrees extends Context.Service<
             if (current.state !== 'active' || current.worktreeState !== 'creating' || current.worktreeBase !== mainHead) return yield* invalid()
           }
           // Reopen establishes a new two-sided checkpoint at current main. The historical
-          // aligned operation remains immutable, so the explicit checkpoint prevents ensure
+          // The completed operation remains immutable, so the explicit checkpoint prevents ensure
           // from validating the newly-created checkout against that stale receipt.
           return yield* ensureLocked(taskId, { taskHead: mainHead, mainHead })
         }, Effect.mapError(storage))
@@ -334,7 +324,7 @@ export class TaskWorktrees extends Context.Service<
         /** Persists Task identity before touching Git so failed creation can be retried by the same ID. */
         const reserve = Effect.fn('TaskWorktrees.reserve')(function* (input: TaskDraft) {
           const value = yield* Schema.decodeUnknownEffect(Draft)(input)
-          yield* store.createTask({ ...value, branch: `folio/task/${value.id}`, worktree: join(parent, value.id) })
+          yield* store.createTask(value)
         }, Effect.mapError(storage))
         const create = (input: TaskDraft) => reserve(input).pipe(Effect.andThen(ensure(input.id)))
         return TaskWorktrees.of({ create, reserve, ensure, complete, resetIngestion, reopen })

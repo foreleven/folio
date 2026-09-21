@@ -18,13 +18,13 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-vault-subscr
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 const vaultLayer = (id = 'a') => ExecutionEventSink.layer.pipe(
   Layer.provideMerge(RunFiles.layer),
-  Layer.provideMerge(Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer, ExecutionQueue.layer)),
+  Layer.provideMerge(Layer.mergeAll(HarnessStore.layer(root), HarnessEventStore.layer, ExecutionQueue.layer)),
   Layer.provideMerge(vaultDatabaseLayer(join(root, id))),
   Layer.provide(Layer.succeed(VaultContext)({ id, directory: join(root, id), vault: { id, name: id, path: join(root, id) } }))
 )
 const setup = Effect.gen(function* () {
   const store = yield* HarnessStore
-  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, branch: 'task', worktree: '/worktrees/task', configuration: { goal: 'notes', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'notes', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
   const sql = yield* SqlClient.SqlClient
   yield* sql`UPDATE tasks SET worktree_state='ready' WHERE id='task'`
   yield* store.createSession({ id: 'session', taskId: 'task', agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })

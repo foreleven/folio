@@ -67,12 +67,9 @@ export class ExecutionQueue extends Context.Service<ExecutionQueue, {
         const changed = yield* sql<{ id: string }>`UPDATE runs SET state='preparing', owner=${owner}, started_at=${yield* now}
           WHERE id=(SELECT q.id FROM runs q JOIN tasks t ON t.id=q.task_id
             WHERE q.state='queued' AND t.state='active'
-            AND NOT EXISTS (SELECT 1 FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
-              WHERE p.task_id=q.task_id AND a.state='applying')
             AND (q.purpose='conflict-resolution' OR NOT EXISTS (
-              SELECT 1 FROM git_sync_operations pending WHERE pending.task_id=q.task_id
-                AND pending.state NOT IN ('aligned', 'aborted') AND (pending.state<>'superseded' OR NOT EXISTS (
-                  SELECT 1 FROM git_sync_operations replacement WHERE replacement.supersedes_id=pending.id))))
+              SELECT 1 FROM git_operations operation WHERE operation.task_id=q.task_id
+                AND operation.state IN ('pending', 'conflict', 'prepared', 'published')))
             AND NOT EXISTS (SELECT 1 FROM runs active WHERE active.task_id=q.task_id AND active.state IN ('preparing', 'running'))
             ORDER BY q.sequence LIMIT 1) AND state='queued' RETURNING id`
         return changed[0] ? yield* get(changed[0].id) : null

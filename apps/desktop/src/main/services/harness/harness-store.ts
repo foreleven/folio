@@ -1,6 +1,7 @@
 import { ModelProfile } from '@folio/agent/config/schema'
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
+import { join } from 'node:path'
 import {
   AgentTaskConfiguration,
   HarnessStoreError,
@@ -17,8 +18,6 @@ import {
 
 const TaskRowIdentity = {
   id: Schema.NonEmptyString,
-  branch: Schema.NonEmptyString,
-  worktree: Schema.NonEmptyString,
   state: Schema.Literals(['active', 'completed', 'cancelled']),
   worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
   worktreeBase: Schema.NullOr(Schema.String),
@@ -63,32 +62,43 @@ export class HarnessStore extends Context.Service<
     readonly runs: (taskId: string) => Effect.Effect<readonly RunRecord[], HarnessStoreError>
   }
 >()('folio/services/HarnessStore') {
-  static readonly layer = Layer.effect(
+  static layer(directory: string) {
+    return Layer.effect(
     HarnessStore,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
 
+      const withLocation = <A extends { readonly id: string }>(row: A) => ({
+        ...row,
+        branch: `folio/task/${row.id}`,
+        worktree: join(directory, 'worktrees', row.id)
+      })
+
       /** Creates a stable manual Task snapshot; resource creation is the caller's separate responsibility. */
       const createTask = Effect.fn('HarnessStore.createTask')(function* (input: NewTask) {
         const value = yield* Schema.decodeUnknownEffect(NewTask)(input)
-        yield* sql`INSERT INTO tasks (id, type, configuration, receipt, branch, worktree, state, created_at)
+        yield* sql`INSERT INTO tasks (id, type, configuration, receipt, state, created_at)
         VALUES (${value.id}, ${value.type}, ${JSON.stringify(value.configuration)}, ${value.receipt === null ? null : JSON.stringify(value.receipt)},
-          ${value.branch}, ${value.worktree}, 'active', ${yield* now})`
+          'active', ${yield* now})`
       }, Effect.mapError(storageError))
 
       /** Reads this Vault's immutable snapshot and independent Task lifecycle. */
-      const tasks = sql`SELECT id, type, configuration, receipt, branch, worktree, state,
+      const tasks = sql`SELECT id, type, configuration, receipt, state,
       worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt
-      FROM tasks ORDER BY created_at DESC, id DESC`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow))), Effect.mapError(storageError))
+      FROM tasks ORDER BY created_at DESC, id DESC`.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow))),
+        Effect.map(rows => rows.map(withLocation)),
+        Effect.mapError(storageError)
+      )
 
       /** Retrieves one Task, distinguishing missing identity from a storage failure. */
       const task = Effect.fn('HarnessStore.task')(function* (id: string) {
-        const rows = yield* sql`SELECT id, type, configuration, receipt, branch, worktree, state,
+        const rows = yield* sql`SELECT id, type, configuration, receipt, state,
         worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt FROM tasks WHERE id=${id}`.pipe(
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow)))
         )
         if (!rows[0]) return yield* failure('not-found')
-        return rows[0]
+        return withLocation(rows[0])
       }, Effect.mapError(storageError))
 
       /** Allocates a Folio identity before ACP creation; every Session inherits its Task's fixed Agent. */
@@ -100,15 +110,12 @@ export class HarnessStore extends Context.Service<
             if (owner.type !== 'agent' || owner.state !== 'active') return yield* failure('invalid-state')
             const active = yield* sql`SELECT id FROM runs WHERE task_id=${value.taskId} AND state IN ('preparing', 'running')`
             if (active.length) return yield* failure('task-busy')
-            if (value.purpose === 'task' &&
-              (yield* sql`SELECT pending.id FROM git_sync_operations pending WHERE pending.task_id=${value.taskId} AND pending.state NOT IN ('aligned', 'aborted')
-              AND (pending.state<>'superseded' OR NOT EXISTS (
-                SELECT 1 FROM git_sync_operations replacement WHERE replacement.supersedes_id=pending.id))`).length
-            ) {
+            if (value.purpose === 'task' && (yield* sql`SELECT id FROM git_operations
+              WHERE task_id=${value.taskId} AND state IN ('pending', 'conflict', 'prepared', 'published')`).length) {
               return yield* failure('task-busy')
             }
-            if (value.purpose === 'conflict-resolution' && !(yield* sql`SELECT id FROM git_sync_operations
-              WHERE id=${value.syncOperationId} AND task_id=${value.taskId} AND state IN ('conflict', 'resolving')`).length) {
+            if (value.purpose === 'conflict-resolution' && !(yield* sql`SELECT id FROM git_operations
+              WHERE id=${value.syncOperationId} AND task_id=${value.taskId} AND kind='synchronize' AND state='conflict'`).length) {
               return yield* failure('invalid-state')
             }
             yield* sql`INSERT INTO sessions
@@ -156,9 +163,11 @@ export class HarnessStore extends Context.Service<
           Effect.gen(function* () {
             const owner = yield* task(value.taskId)
             if (owner.state !== 'active' || owner.worktreeState !== 'ready') return yield* failure('invalid-state')
-            const saving = yield* sql`SELECT a.id FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
-          WHERE p.task_id=${value.taskId} AND a.state='applying'`
-            if (saving.length) return yield* failure('task-busy')
+            if (value.purpose !== 'conflict-resolution') {
+              const saving = yield* sql`SELECT id FROM git_operations WHERE task_id=${value.taskId}
+                AND state IN ('pending', 'conflict', 'prepared', 'published')`
+              if (saving.length) return yield* failure('task-busy')
+            }
             // Keep the stable service error for normal callers; database triggers independently
             // enforce the same invariant for writers that bypass this ledger method.
             const session = (yield* sql<{ purpose: 'task' | 'conflict-resolution'; syncOperationId: string | null }>`SELECT
@@ -167,17 +176,14 @@ export class HarnessStore extends Context.Service<
             if (!session) return yield* failure('invalid-state')
             if (value.purpose === 'conflict-resolution') {
               if (session.purpose !== 'conflict-resolution' || !session.syncOperationId ||
-                !(yield* sql`SELECT id FROM git_sync_operations WHERE id=${session.syncOperationId}
-                  AND task_id=${value.taskId} AND state IN ('conflict', 'resolving')`).length) {
+                !(yield* sql`SELECT id FROM git_operations WHERE id=${session.syncOperationId}
+                  AND task_id=${value.taskId} AND kind='synchronize' AND state='conflict'`).length) {
                 return yield* failure('invalid-state')
               }
             } else {
               if (session.purpose !== 'task') return yield* failure('invalid-state')
-              if (
-                (yield* sql`SELECT pending.id FROM git_sync_operations pending WHERE pending.task_id=${value.taskId} AND pending.state NOT IN ('aligned', 'aborted')
-                AND (pending.state<>'superseded' OR NOT EXISTS (
-                  SELECT 1 FROM git_sync_operations replacement WHERE replacement.supersedes_id=pending.id))`).length
-              ) {
+              if ((yield* sql`SELECT id FROM git_operations WHERE task_id=${value.taskId}
+                AND state IN ('pending', 'conflict', 'prepared', 'published')`).length) {
                 return yield* failure('task-busy')
               }
             }
@@ -202,5 +208,6 @@ export class HarnessStore extends Context.Service<
 
       return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, runs })
     })
-  )
+    )
+  }
 }

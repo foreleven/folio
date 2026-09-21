@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { NodeServices } from '@effect/platform-node'
 import { GitChangeApplications } from '../git/git-change-applications'
-import { GitChangeJournal } from '../git/git-change-journal'
 import { HarnessStore } from '../harness/harness-store'
 import { initializeVaultWorkspace } from '../vault/vault-workspace'
 import { Effect, Layer, ManagedRuntime } from 'effect'
@@ -30,8 +29,7 @@ beforeEach(async () => {
 afterEach(async () => { await runtime.dispose(); await rm(directory, { recursive: true, force: true }) })
 const testLayer = () => wikiServiceLayer(directory).pipe(
   Layer.provide(GitChangeApplications.layer(directory)),
-  Layer.provide(GitChangeJournal.layer(directory)),
-  Layer.provide(HarnessStore.layer),
+  Layer.provide(HarnessStore.layer(directory)),
   Layer.provideMerge(vaultDatabaseLayer(directory)),
   Layer.provide(NodeServices.layer)
 )

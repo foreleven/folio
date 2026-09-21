@@ -1,13 +1,12 @@
 import { NodeServices } from '@effect/platform-node'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { WorkspaceChanges } from './workspace-changes'
 import { GitChangeApplications } from './git-change-applications'
-import { GitChangeJournal } from './git-change-journal'
 import { HarnessStore } from '../harness/harness-store'
 import { vaultDatabaseLayer } from '../vault/vault-database'
 import { makeVaultGit } from './vault-git'
@@ -22,7 +21,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 /** Reopens services over one real Vault; reads use the same production Git/SQL dependencies as saving. */
 function layer() {
   return Layer.mergeAll(WorkspaceChanges.layer(root), GitChangeApplications.layer(root)).pipe(
-    Layer.provideMerge(GitChangeJournal.layer(root)), Layer.provideMerge(HarnessStore.layer),
+    Layer.provideMerge(HarnessStore.layer(root)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
 
@@ -47,7 +46,7 @@ it('lists disk changes, ignores staged-only reversions, and previews literal fil
       await writeFile(join(main.workspace, '.DS_Store'), 'ignored')
       await symlink(join(root, 'entry'), join(main.wiki, 'redirect'))
     })
-    const before = yield* Effect.promise(() => readFile(join(main.workspace, '.git/index')))
+    const before = (yield* git(main.workspace, ['write-tree'])).trim()
     const result = yield* view.inspect
     expect(result.registered).toBe(true)
     expect(result.files).toEqual(expect.arrayContaining([
@@ -64,7 +63,7 @@ it('lists disk changes, ignores staged-only reversions, and previews literal fil
     expect(preview.text).toContain('+new literal file')
     expect(yield* view.diff({ expectedParent: saved.commit, path: 'wiki/redirect/outside.md', saveId: null }).pipe(Effect.flip))
       .toMatchObject({ reason: 'invalid-state' })
-    expect(yield* Effect.promise(() => readFile(join(main.workspace, '.git/index')))).toEqual(before)
+    expect((yield* git(main.workspace, ['write-tree'])).trim()).toBe(before)
     expect((yield* git(main.workspace, ['rev-parse', 'HEAD'])).trim()).toBe(saved.commit)
     expect((yield* view.inspect).pending).toEqual([])
   }).pipe(Effect.provide(layer())))
@@ -75,8 +74,8 @@ it('discovers accepted saves without application intent after restart and previe
     const main = yield* initializeVaultWorkspace(root, join(root, 'entry'))
     yield* Effect.promise(() => writeFile(join(main.wiki, 'note.md'), 'accepted content\n'))
     const sql = yield* SqlClient.SqlClient
-    yield* sql`CREATE TRIGGER fail_application BEFORE INSERT ON git_change_applications
-      BEGIN SELECT RAISE(ABORT, 'fixture lost application intent'); END`
+    yield* sql`CREATE TRIGGER fail_application BEFORE UPDATE OF state ON git_operations
+      WHEN NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'fixture lost application receipt'); END`
     const saves = yield* GitChangeApplications
     yield* saves.save({ id: 'pending', taskId: null, expectedParent: main.initialCommit, paths: ['wiki/note.md'] }).pipe(Effect.flip)
     yield* sql`DROP TRIGGER fail_application`
@@ -86,11 +85,11 @@ it('discovers accepted saves without application intent after restart and previe
   await Effect.runPromise(Effect.gen(function*() {
     const view = yield* WorkspaceChanges
     const result = yield* view.inspect
-    expect(result.pending).toEqual([{ id: 'pending', expectedParent: parent, paths: ['wiki/note.md'], state: 'prepared' }])
+    expect(result.pending).toEqual([{ id: 'pending', expectedParent: parent, paths: ['wiki/note.md'], state: 'pending' }])
     const original = yield* view.diff({ expectedParent: parent, path: 'wiki/note.md', saveId: 'pending' })
     expect(original.text).toContain('+accepted content')
     expect(original.text).not.toContain('+newer content')
-    const live = yield* view.diff({ expectedParent: parent, path: 'wiki/note.md', saveId: null })
+    const live = yield* view.diff({ expectedParent: result.head, path: 'wiki/note.md', saveId: null })
     expect(live.text).toContain('+newer content')
     expect(yield* view.diff({ expectedParent: parent, path: 'AGENTS.md', saveId: 'pending' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     expect((yield* view.inspect).pending).toEqual(result.pending)

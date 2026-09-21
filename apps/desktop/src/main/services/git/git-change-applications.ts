@@ -1,79 +1,70 @@
-import { Context, Effect, FileSystem, Layer, Schema, Semaphore } from 'effect'
+import { Context, DateTime, Effect, FileSystem, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { randomUUID } from 'node:crypto'
-import { link, lstat } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   ConfirmRunWikiUnchanged,
   GitChangeApplication,
-  GitChangeIntent,
   GitObjectId,
   SaveGitFiles,
   SaveRunWikiFiles,
   SaveTaskRawFiles,
-  type GitChangePreparation,
   type ConfirmRunWikiUnchanged as ConfirmRunWikiUnchangedValue,
   type SaveGitFiles as SaveGitFilesValue,
   type SaveRunWikiFiles as SaveRunWikiFilesValue,
   type SaveTaskRawFiles as SaveTaskRawFilesValue
 } from '../../../shared/git-change'
 import { HarnessStoreError, type RunRecord } from '../../../shared/harness'
-import { GitChangeJournal } from './git-change-journal'
-import { prepareSaveIndex, savedIndexTree } from './git-save-index'
 import { HarnessStore } from '../harness/harness-store'
-import { makeVaultGit } from './vault-git'
+import { gitCommitData, gitCommitHash } from './git-commit-object'
+import { operationFilePath, readSaveOperationFile, SaveOperationFile, writeSaveOperationFile } from './git-operation-files'
+import { withGitOperationGate } from './git-operation-gate'
 import { snapshotGitChange } from './git-change-snapshot'
+import { makeVaultGit } from './vault-git'
 
-const Row = Schema.Struct({ ...GitChangeApplication.fields, before: Schema.Uint8Array, after: Schema.Uint8Array })
-type Row = typeof Row.Type
-const RunOwnerRow = Schema.Struct({ runId: Schema.String })
-type SaveRequest = (SaveGitFilesValue & { readonly kind: 'user'; readonly runIds: readonly [] })
+const OperationRow = Schema.Struct({
+  id: Schema.String,
+  taskId: Schema.NullOr(Schema.String),
+  kind: Schema.Literals(['save-user', 'save-raws', 'save-wiki']),
+  state: Schema.Literals(['pending', 'completed']),
+  sourceCommit: GitObjectId,
+  targetCommit: Schema.NullOr(GitObjectId),
+  artifactPath: Schema.NullOr(Schema.String),
+  createdAt: Schema.Int
+})
+type OperationRow = typeof OperationRow.Type
+type SaveRequest =
+  | (SaveGitFilesValue & { readonly kind: 'user'; readonly runIds: readonly [] })
   | (SaveRunWikiFilesValue & { readonly kind: 'wiki' })
   | (SaveTaskRawFilesValue & { readonly kind: 'raws'; readonly runIds: readonly [] })
-const existsError = Schema.is(Schema.Struct({ code: Schema.Literal('EEXIST') }))
-const invalid = () => new HarnessStoreError({ reason: 'invalid-state', message: 'Git save state changed. Its files and journal have been retained for inspection.' })
-const storage = (cause: unknown) =>
-  cause instanceof HarnessStoreError ? cause : new HarnessStoreError({ reason: 'storage', message: 'Could not apply the saved change. Inspect or retry its recorded operation.' })
-const sameBytes = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b))
-// Electron admits one application process, while this registry also coordinates independently
-// constructed Layers in tests or recovery code. Keys stay checkout-specific, not Vault-global.
-const checkoutGates = new Map<string, Semaphore.Semaphore>()
-const gateFor = (root: string, branch: string) => {
-  const key = JSON.stringify([root, branch])
-  let gate = checkoutGates.get(key)
-  if (!gate) { gate = Semaphore.makeUnsafe(1); checkoutGates.set(key, gate) }
-  return gate
-}
 
-/** A prepared object alone never registers a source baseline. The caller supplies a verified bootstrap/base. */
+const invalid = () => new HarnessStoreError({ reason: 'invalid-state', message: 'Git save state changed. Review the workspace before retrying.' })
+const storage = (cause: unknown) =>
+  cause instanceof HarnessStoreError
+    ? cause
+    : new HarnessStoreError({ reason: 'storage', message: 'Could not finish the Git save. Its local recovery file was retained.' })
+const operationKind = (kind: SaveOperationFile['kind']) => `save-${kind}` as const
+
+/** A commit is registered only after its branch or synchronization receipt reached completion. */
 export const isRegisteredGitCommit = Effect.fn('GitChange.isRegisteredCommit')(function* (branch: string, commit: string, base: string) {
   if (commit === base) return true
   const sql = yield* SqlClient.SqlClient
-  const rows = yield* sql`SELECT a.id FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id
-    WHERE a.branch=${branch} AND a.state='applied' AND p.commit_oid=${commit}`
-  if (rows.length === 1) return true
   if (branch === 'main') {
-    return (
-      (yield* sql`SELECT id FROM git_sync_operations WHERE published_head=${commit}
-      AND state IN ('published', 'aligning', 'aligned') LIMIT 1`).length === 1
-    )
+    return (yield* sql`SELECT id FROM git_operations WHERE target_commit=${commit}
+      AND state IN ('published', 'completed')
+      AND ((task_id IS NULL AND kind='save-user') OR kind='synchronize') LIMIT 1`).length === 1
   }
-  return (
-    (yield* sql`SELECT s.id FROM git_sync_operations s JOIN tasks t ON t.id=s.task_id
-    WHERE t.branch=${branch} AND s.aligned_head=${commit} AND s.state='aligned' LIMIT 1`).length === 1
-  )
+  const taskId = branch.startsWith('folio/task/') ? branch.slice('folio/task/'.length) : ''
+  if (!taskId) return false
+  return (yield* sql`SELECT id FROM git_operations WHERE task_id=${taskId} AND target_commit=${commit}
+    AND state='completed' LIMIT 1`).length === 1
 })
 
-/**
- * Applies a retained save to its original branch without writing working files. It journals both
- * index versions before any branch write. Pending saves block new Runs in SQLite; native writer
- * quiescence remains the caller's separate obligation and is not inferred from a terminal Run.
- */
+/** Saves selected files as one compact operation without persisting commit bytes or index images. */
 export class GitChangeApplications extends Context.Service<
   GitChangeApplications,
   {
-    /** Runs a trusted editor mutation and saves only its reported files under one main-checkout gate. */
     readonly editWorkspace: <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) => Effect.Effect<A, HarnessStoreError>
     readonly save: (input: SaveGitFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly saveRunWiki: (input: SaveRunWikiFilesValue) => Effect.Effect<GitChangeApplication, HarnessStoreError>
@@ -89,334 +80,264 @@ export class GitChangeApplications extends Context.Service<
       GitChangeApplications,
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem
-        const dependencies = yield* Effect.context<FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner | SqlClient.SqlClient>()
         const sql = yield* SqlClient.SqlClient
         const store = yield* HarnessStore
-        const journal = yield* GitChangeJournal
         const git = yield* makeVaultGit
+        const dependencies = yield* Effect.context<FileSystem.FileSystem | SqlClient.SqlClient | ChildProcessSpawner.ChildProcessSpawner>()
         const root = yield* fs.realPath(directory)
         const main = join(root, 'workspace')
-        const withCheckout = <A, E, R>(branch: string, action: Effect.Effect<A, E, R>) =>
-          // Semaphore acquisition remains interruptible. Once admitted, native Promise/Git work
-          // must settle before the permit is released because interruption cannot cancel that I/O.
-          gateFor(root, branch).withPermit(Effect.uninterruptible(action))
 
-        /** Reads persisted index bytes; the payload is never exposed in the application receipt. */
         const find = Effect.fn('GitChangeApplications.find')(function* (id: string) {
-          yield* Schema.decodeUnknownEffect(GitChangeIntent.fields.id)(id)
-          const rows = yield* sql`SELECT a.id, a.branch, p.commit_oid AS "commit", a.state,
-          a.before_index AS before, a.after_index AS after
-          FROM git_change_applications a JOIN git_change_preparations p ON p.id=a.id WHERE a.id=${id}`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Row))))
+          const rows = yield* sql`SELECT id, task_id AS taskId, kind, state, source_commit AS sourceCommit,
+            target_commit AS targetCommit, artifact_path AS artifactPath, created_at AS createdAt
+            FROM git_operations WHERE id=${id} AND kind IN ('save-user', 'save-raws', 'save-wiki')`.pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(OperationRow)))
+          )
           return rows[0]
         })
 
-        /** Rejects redirected/missing indexes instead of treating them as an empty staging area. */
-        const readIndex = Effect.fn('GitChangeApplications.readIndex')(function* (path: string) {
-          const info = yield* Effect.tryPromise(() => lstat(path))
-          if (!info.isFile() || info.isSymbolicLink()) return yield* invalid()
-          return yield* fs.readFile(path)
-        })
-
-        /** Verifies source identity and refuses another unfinished native Git operation. */
-        const checkout = Effect.fn('GitChangeApplications.checkout')(function* (change: Pick<GitChangePreparation, 'taskId' | 'branch'>) {
+        /** Verifies Folio's checkout identity and refuses active Runs or native Git operations. */
+        const checkout = Effect.fn('GitChangeApplications.checkout')(function* (taskId: string | null) {
+          const marker = yield* fs.readFileString(join(main, '.git', 'folio-workspace.json')).pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({ version: Schema.Literal(1), initialCommit: GitObjectId }))))
+          )
           let path = main
-          const marker = yield* fs
-            .readFileString(join(main, '.git/folio-workspace.json'))
-            .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({ version: Schema.Literal(1), initialCommit: GitObjectId })))))
+          let branch = 'main'
           let base = marker.initialCommit
-          if (change.taskId !== null) {
-            const task = yield* store.task(change.taskId)
-            path = join(root, 'worktrees', change.taskId)
-            if (
-              task.state !== 'active' ||
-              task.worktreeState !== 'ready' ||
-              task.worktree !== path ||
-              task.branch !== change.branch ||
-              task.worktreeBase === null ||
-              !(yield* isRegisteredGitCommit('main', task.worktreeBase, marker.initialCommit))
-            )
-              return yield* invalid()
+          if (taskId !== null) {
+            const task = yield* store.task(taskId)
+            path = join(root, 'worktrees', taskId)
+            branch = `folio/task/${taskId}`
+            if (task.state !== 'active' || task.worktreeState !== 'ready' || task.worktreeBase === null) return yield* invalid()
+            if ((yield* store.runs(taskId)).some((run) => run.state === 'preparing' || run.state === 'running')) return yield* invalid()
             base = task.worktreeBase
-            if ((yield* store.runs(change.taskId)).some((run) => run.state === 'preparing' || run.state === 'running')) return yield* invalid()
-            if (
-              (yield* sql`SELECT id FROM git_sync_operations WHERE task_id=${change.taskId}
-            AND state IN ('preparing', 'conflict', 'resolving', 'prepared', 'aligning')`).length
-            )
-              return yield* invalid()
           }
           if (
             (yield* fs.realPath(path)) !== path ||
             (yield* git(path, ['rev-parse', '--show-toplevel'])).trim() !== path ||
-            (yield* fs.realPath(resolve(path, (yield* git(path, ['rev-parse', '--git-common-dir'])).trim()))) !== join(main, '.git') ||
-            (yield* git(path, ['symbolic-ref', 'HEAD'])).trim() !== `refs/heads/${change.branch}`
-          )
-            return yield* invalid()
-          const gitDir = yield* fs.realPath((yield* git(path, ['rev-parse', '--absolute-git-dir'])).trim())
-          const index = (yield* git(path, ['rev-parse', '--path-format=absolute', '--git-path', 'index'])).trim()
-          if (index !== join(gitDir, 'index')) return yield* invalid()
+            (yield* git(path, ['symbolic-ref', 'HEAD'])).trim() !== `refs/heads/${branch}` ||
+            (taskId !== null && (yield* fs.realPath(resolve(path, (yield* git(path, ['rev-parse', '--git-common-dir'])).trim()))) !== join(main, '.git'))
+          ) return yield* invalid()
+          const gitDirectory = (yield* git(path, ['rev-parse', '--absolute-git-dir'])).trim()
           for (const name of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']) {
-            if (yield* fs.exists(join(gitDir, name))) return yield* invalid()
+            if (yield* fs.exists(join(gitDirectory, name))) return yield* invalid()
           }
-          return { path, index, base }
+          return { path, branch, base }
         })
 
-        /** Reserves the exact old/new index bytes before acquiring index.lock or moving a ref. */
-        const reserve = Effect.fn('GitChangeApplications.reserve')(function* (change: GitChangePreparation) {
-          const previous = yield* find(change.id)
-          if (previous) return previous
-          const source = yield* checkout(change)
-          if ((yield* git(source.path, ['rev-parse', 'HEAD'])).trim() !== change.parent || !(yield* isRegisteredGitCommit(change.branch, change.parent, source.base)))
-            return yield* invalid()
-          const before = yield* readIndex(source.index)
-          const after = yield* prepareSaveIndex(source.path, before, change)
-          yield* sql`INSERT INTO git_change_applications (id, branch, before_index, after_index, state)
-          VALUES (${change.id}, ${change.branch}, ${before}, ${after}, 'applying') ON CONFLICT(id) DO NOTHING`
-          const row = yield* find(change.id)
-          if (!row) return yield* invalid()
-          return row
+        const receipt = (row: OperationRow): GitChangeApplication => ({
+          id: row.id,
+          branch: row.taskId === null ? 'main' : `folio/task/${row.taskId}`,
+          commit: row.targetCommit!,
+          state: row.state === 'completed' ? 'completed' : 'pending'
         })
 
-        /**
-         * Atomically publishes immutable staged bytes. Hard-link identity proves ownership of a
-         * surviving index.lock after a crash; an unrelated lock is never removed or overwritten.
-         */
-        const stageIndex = Effect.fn('GitChangeApplications.stageIndex')(function* (index: string, row: Row) {
-          const folder = join(dirname(index), 'folio-save-indexes')
-          yield* fs.makeDirectory(folder, { recursive: true })
-          if ((yield* fs.realPath(folder)) !== folder) return yield* invalid()
-          const staged = join(folder, row.id)
-          const temporary = yield* fs.makeTempDirectoryScoped({ directory: folder, prefix: '.prepare-' })
-          const file = join(temporary, 'index')
-          yield* fs.writeFile(file, row.after, { mode: 0o600 })
-          yield* Effect.tryPromise(() =>
-            link(file, staged).catch((error) => {
-              if (!existsError(error)) throw error
-            })
-          )
-          if (!sameBytes(yield* readIndex(staged), row.after)) return yield* invalid()
-          return staged
-        }, Effect.scoped)
-
-        /** Completes both Git writes while the caller owns the source branch gate, then saves the receipt. */
-        const publish = Effect.fn('GitChangeApplications.publish')(function* (change: GitChangePreparation, row: Row) {
-          if (row.state === 'applied') return row
-          const source = yield* checkout(change)
-          const staged = yield* stageIndex(source.index, row)
-          const indexLock = `${source.index}.lock`
-          yield* Effect.tryPromise(() =>
-            link(staged, indexLock).catch((error) => {
-              if (!existsError(error)) throw error
-            })
-          )
-          const ownsLock = Effect.fn('GitChangeApplications.ownsIndexLock')(function* () {
-            const a = yield* Effect.tryPromise(() => lstat(staged))
-            const b = yield* Effect.tryPromise(() => lstat(indexLock))
-            return a.isFile() && b.isFile() && !b.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino
-          })
-          if (!(yield* ownsLock()) || !sameBytes(yield* readIndex(indexLock), row.after)) return yield* invalid()
-          const current = yield* readIndex(source.index)
-          const head = (yield* git(source.path, ['rev-parse', 'HEAD'])).trim()
-          const ref = `refs/heads/${change.branch}`
-          if (
-            (yield* git(source.path, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)', ref])).trim() !== `${ref} ${head}` ||
-            (head !== change.parent && head !== change.commit)
-          )
-            return yield* invalid()
-          let keepCurrentIndex = head === change.commit && sameBytes(current, row.after)
-          if (!sameBytes(current, row.before) && !keepCurrentIndex) {
-            // Git status may refresh stat/cache data after a successful save whose receipt was lost.
-            // Accept identical staged content without overwriting that newer index or its flags.
-            if (head !== change.commit || (yield* savedIndexTree(source.path, current)) !== (yield* savedIndexTree(source.path, row.after))) return yield* invalid()
-            keepCurrentIndex = true
-          }
-          if (head === change.parent) {
-            // A surviving Git child from a dead owner can only attempt this same CAS, never force a newer HEAD back.
-            yield* git(source.path, ['update-ref', '--no-deref', '-m', `Folio save ${change.id}`, ref, change.commit, change.parent]).pipe(
-              Effect.catch((error) => git(source.path, ['rev-parse', ref]).pipe(Effect.flatMap((actual) => (actual.trim() === change.commit ? Effect.void : Effect.fail(error)))))
-            )
-          }
-          if ((yield* git(source.path, ['rev-parse', 'HEAD'])).trim() !== change.commit || !(yield* ownsLock())) return yield* invalid()
-          // Rename publishes the complete index atomically; no working file is restored or overwritten.
-          if (keepCurrentIndex) yield* fs.remove(indexLock)
-          else yield* fs.rename(indexLock, source.index)
-          if (!sameBytes(yield* readIndex(source.index), keepCurrentIndex ? current : row.after)) return yield* invalid()
-          yield* sql`UPDATE git_change_applications SET state='applied' WHERE id=${row.id}`
-          return { ...row, state: 'applied' as const }
-        })
-
-        /** Called only while the outer operation owns the source branch gate; receipts never reapply an old commit. */
-        const applyLocked = Effect.fn('GitChangeApplications.applyLocked')(
-          function* (id: string) {
-            const previous = yield* find(id)
-            if (previous?.state === 'applied') {
-              const { before: _, after: __, ...receipt } = previous
-              return receipt
-            }
-            const change = yield* journal.recover(id)
-            const result = yield* publish(change, yield* reserve(change))
-            const { before: _, after: __, ...receipt } = result
-            return receipt
+        /** Computes the selected-path index transition without writing the checkout's real index. */
+        const indexTransition = Effect.fn('GitChangeApplications.indexTransition')(
+          function* (path: string, tree: string, paths: readonly string[]) {
+            const before = yield* Schema.decodeUnknownEffect(GitObjectId)((yield* git(path, ['write-tree'])).trim())
+            const temporary = yield* fs.makeTempDirectoryScoped({ prefix: 'folio-save-index-' })
+            const options = { indexFile: join(temporary, 'index') }
+            yield* git(path, ['read-tree', before], options)
+            yield* git(path, ['--literal-pathspecs', 'reset', tree, '--', ...paths], options)
+            const after = yield* Schema.decodeUnknownEffect(GitObjectId)((yield* git(path, ['write-tree'], options)).trim())
+            return { before, after }
           },
-          Effect.provide(dependencies),
-          Effect.mapError(storage)
+          Effect.scoped
         )
 
-        /** Captures one explicit selection; user edits and accepted Run output keep distinct provenance. */
-        const saveLocked = Effect.fn('GitChangeApplications.saveLocked')(function* (value: SaveRequest) {
-          const previous = yield* journal.get(value.id).pipe(Effect.catch((error) => (error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error))))
-          if (previous) {
-            if (
-              previous.kind !== value.kind ||
-              JSON.stringify(previous.runIds) !== JSON.stringify(value.runIds) ||
-              previous.taskId !== value.taskId ||
-              previous.parent !== value.expectedParent ||
-              JSON.stringify(previous.paths) !== JSON.stringify(value.paths)
-            )
-              return yield* invalid()
-            return yield* applyLocked(value.id)
+        /** Recreates the deterministic object from the local file, then advances one branch by CAS. */
+        const completeLocked = Effect.fn('GitChangeApplications.completeLocked')(function* (row: OperationRow) {
+          if (row.state === 'completed' && row.targetCommit) return receipt(row)
+          if (row.state !== 'pending' || !row.artifactPath || !row.targetCommit) return yield* invalid()
+          const artifact = yield* readSaveOperationFile(root, row.artifactPath)
+          if (
+            artifact.id !== row.id || artifact.taskId !== row.taskId || operationKind(artifact.kind) !== row.kind ||
+            artifact.parent !== row.sourceCommit || artifact.commit !== row.targetCommit
+          ) return yield* invalid()
+          const format = yield* Schema.decodeUnknownEffect(Schema.Literals(['sha1', 'sha256']))((yield* git(main, ['rev-parse', '--show-object-format'])).trim())
+          const data = gitCommitData({
+            tree: artifact.tree,
+            parent: artifact.parent,
+            createdAt: artifact.createdAt,
+            message: `Save ${artifact.kind} changes\n\nFolio-Operation-Id: ${artifact.id}\n` +
+              (artifact.taskId === null ? '' : `Folio-Task-Id: ${artifact.taskId}\n`) +
+              artifact.runIds.map((runId) => `Folio-Run-Id: ${runId}\n`).join('')
+          })
+          if (gitCommitHash(data, format) !== artifact.commit) return yield* invalid()
+          if ((yield* git(main, ['hash-object', '-t', 'commit', '-w', '--stdin'], { input: data })).trim() !== artifact.commit) return yield* invalid()
+          const ref = `refs/folio/operations/${artifact.id}`
+          const retained = (yield* git(main, ['for-each-ref', '--format=%(objectname)', ref])).trim()
+          if (retained && retained !== artifact.commit) return yield* invalid()
+          if (!retained) yield* git(main, ['update-ref', '--no-deref', ref, artifact.commit, '0'.repeat(artifact.commit.length)])
+
+          const source = yield* checkout(artifact.taskId)
+          const head = (yield* git(source.path, ['rev-parse', 'HEAD'])).trim()
+          if (head !== artifact.parent && head !== artifact.commit) return yield* invalid()
+          let indexTree = yield* Schema.decodeUnknownEffect(GitObjectId)((yield* git(source.path, ['write-tree'])).trim())
+          if (head === artifact.parent) {
+            if (indexTree !== artifact.beforeIndexTree) return yield* invalid()
+            yield* git(source.path, ['update-ref', '--no-deref', '-m', `Folio save ${artifact.id}`,
+              `refs/heads/${source.branch}`, artifact.commit, artifact.parent])
           }
+          // Update only selected index entries. Unselected staging is user state and must survive
+          // both the initial save and a crash after the branch ref moved.
+          if (indexTree === artifact.beforeIndexTree) {
+            yield* git(source.path, ['--literal-pathspecs', 'reset', artifact.commit, '--', ...artifact.paths])
+            indexTree = yield* Schema.decodeUnknownEffect(GitObjectId)((yield* git(source.path, ['write-tree'])).trim())
+          }
+          if (indexTree !== artifact.afterIndexTree) return yield* invalid()
+          if ((yield* git(source.path, ['rev-parse', 'HEAD'])).trim() !== artifact.commit) return yield* invalid()
+          const changed = yield* sql`UPDATE git_operations SET state='completed', artifact_path=NULL,
+            updated_at=${DateTime.toEpochMillis(yield* DateTime.now)} WHERE id=${artifact.id} AND state='pending' RETURNING id`
+          const current = yield* find(artifact.id)
+          if (!current || (!changed.length && current.state !== 'completed')) return yield* invalid()
+          yield* fs.remove(operationFilePath(root, artifact.id).directory, { recursive: true }).pipe(Effect.catch(() => Effect.void))
+          return receipt(current)
+        })
+
+        const recoverLocked = Effect.fn('GitChangeApplications.recoverLocked')(function* (id: string) {
+          const row = yield* find(id)
+          if (!row) return yield* new HarnessStoreError({ reason: 'not-found', message: 'Git save operation was not found.' })
+          return yield* completeLocked(row)
+        })
+
+        /** Captures selected paths with a private index, then stores only compact recovery metadata. */
+        const saveLocked = Effect.fn('GitChangeApplications.saveLocked')(function* (value: SaveRequest) {
+          const previous = yield* find(value.id)
+          if (previous) {
+            if (previous.taskId !== value.taskId || previous.kind !== operationKind(value.kind) ||
+              previous.sourceCommit !== value.expectedParent || !previous.targetCommit) return yield* invalid()
+            if (previous.state === 'completed') {
+              const paths = (yield* git(main, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+                previous.sourceCommit, previous.targetCommit])).split('\0').filter(Boolean).sort()
+              const owners = (yield* sql<{ runId: string }>`SELECT run_id AS runId FROM git_operation_runs
+                WHERE operation_id=${previous.id} ORDER BY run_id`).map((row) => row.runId)
+              if (JSON.stringify(paths) !== JSON.stringify(value.paths) ||
+                JSON.stringify(owners) !== JSON.stringify(value.runIds)) return yield* invalid()
+              return receipt(previous)
+            }
+            if (!previous.artifactPath) return yield* invalid()
+            if (previous.artifactPath) {
+              const artifact = yield* readSaveOperationFile(root, previous.artifactPath)
+              if (artifact.taskId !== value.taskId || artifact.kind !== value.kind || artifact.parent !== value.expectedParent ||
+                JSON.stringify(artifact.paths) !== JSON.stringify(value.paths) || JSON.stringify(artifact.runIds) !== JSON.stringify(value.runIds)) return yield* invalid()
+            }
+            return yield* completeLocked(previous)
+          }
+          const source = yield* checkout(value.taskId)
+          const parent = (yield* git(source.path, ['rev-parse', 'HEAD'])).trim()
+          if (parent !== value.expectedParent || !(yield* isRegisteredGitCommit(source.branch, parent, source.base))) return yield* invalid()
+          if ((yield* sql`SELECT id FROM git_operations WHERE task_id IS ${value.taskId}
+            AND state IN ('pending', 'conflict', 'prepared', 'published')`).length) return yield* invalid()
           if (value.kind === 'wiki') {
             const runs = yield* store.runs(value.taskId)
-            if (
-              value.runIds.some((runId) => {
-                const run = runs.find((candidate) => candidate.id === runId)
-                return !run || run.state !== 'succeeded' || (run.syncState !== 'pending' && run.syncState !== 'failed')
-              })
-            )
-              return yield* invalid()
-            const owners = yield* sql`SELECT run_id AS runId FROM git_change_preparation_runs
-              WHERE task_id=${value.taskId} AND kind='wiki'`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(RunOwnerRow))))
-            if (owners.some((owner) => value.runIds.includes(owner.runId))) return yield* invalid()
+            if (value.runIds.some((runId) => {
+              const run = runs.find((candidate) => candidate.id === runId)
+              return !run || run.state !== 'succeeded' || !['pending', 'failed'].includes(run.syncState)
+            })) return yield* invalid()
+            for (const runId of value.runIds) {
+              if ((yield* sql`SELECT run_id FROM git_operation_runs WHERE run_id=${runId}`).length) return yield* invalid()
+            }
           }
-          const branch = value.taskId === null ? 'main' : `folio/task/${value.taskId}`
-          const source = yield* checkout({ taskId: value.taskId, branch })
-          const pendingSave = yield* sql`SELECT id FROM git_change_applications WHERE branch=${branch} AND state='applying'`
-          if (pendingSave.length || !(yield* isRegisteredGitCommit(branch, value.expectedParent, source.base))) return yield* invalid()
-          const snapshot = yield* snapshotGitChange({ cwd: source.path, parent: value.expectedParent, paths: value.paths })
-          yield* journal.prepare({ id: value.id, taskId: value.taskId, runIds: value.runIds, kind: value.kind, parent: snapshot.parent, tree: snapshot.tree, paths: value.paths })
-          return yield* applyLocked(value.id)
+          const snapshot = yield* snapshotGitChange({ cwd: source.path, parent, paths: value.paths })
+          if (snapshot.changed.length !== value.paths.length) return yield* invalid()
+          const index = yield* indexTransition(source.path, snapshot.tree, value.paths)
+          const createdAt = DateTime.toEpochMillis(yield* DateTime.now)
+          const data = gitCommitData({
+            tree: snapshot.tree,
+            parent,
+            createdAt,
+            message: `Save ${value.kind} changes\n\nFolio-Operation-Id: ${value.id}\n` +
+              (value.taskId === null ? '' : `Folio-Task-Id: ${value.taskId}\n`) +
+              value.runIds.map((runId) => `Folio-Run-Id: ${runId}\n`).join('')
+          })
+          const format = yield* Schema.decodeUnknownEffect(Schema.Literals(['sha1', 'sha256']))((yield* git(main, ['rev-parse', '--show-object-format'])).trim())
+          const commit = gitCommitHash(data, format)
+          const artifact: SaveOperationFile = { version: 1, id: value.id, taskId: value.taskId, kind: value.kind,
+            runIds: value.runIds, parent, tree: snapshot.tree, paths: value.paths, commit,
+            beforeIndexTree: index.before, afterIndexTree: index.after, createdAt }
+          const artifactPath = yield* writeSaveOperationFile(root, artifact)
+          yield* sql.withTransaction(Effect.gen(function* () {
+            yield* sql`INSERT INTO git_operations
+              (id, task_id, kind, state, source_commit, target_commit, artifact_path, created_at, updated_at)
+              VALUES (${value.id}, ${value.taskId}, ${operationKind(value.kind)}, 'pending', ${parent}, ${commit},
+                ${artifactPath}, ${createdAt}, ${createdAt})`
+            for (const runId of value.runIds) yield* sql`INSERT INTO git_operation_runs (operation_id, run_id) VALUES (${value.id}, ${runId})`
+          }))
+          return yield* recoverLocked(value.id)
         })
 
-        /** Captures a user save, then applies its durable Git change. */
-        const save = Effect.fn('GitChangeApplications.save')(
-          function* (input: SaveGitFiles) {
-            const decoded = yield* Schema.decodeUnknownEffect(SaveGitFiles)(input, { onExcessProperty: 'error' })
-            const value = yield* Schema.decodeUnknownEffect(SaveGitFiles)({ ...decoded, paths: [...new Set(decoded.paths)].sort() })
-            return yield* withCheckout(value.taskId === null ? 'main' : `folio/task/${value.taskId}`,
-              saveLocked({ ...value, kind: 'user', runIds: [] })
-            )
-          },
-          Effect.provide(dependencies),
-          Effect.mapError(storage)
-        )
+        const normalizePaths = <A extends { readonly paths: readonly string[] }>(value: A) => ({ ...value, paths: [...new Set(value.paths)].sort() })
+        const save = Effect.fn('GitChangeApplications.save')(function* (input: SaveGitFilesValue) {
+          const decoded = yield* Schema.decodeUnknownEffect(SaveGitFiles)(input, { onExcessProperty: 'error' })
+          return yield* saveLocked({ ...normalizePaths(decoded), kind: 'user', runIds: [] })
+        }, Effect.provide(dependencies), Effect.mapError(storage))
+        const saveRunWiki = Effect.fn('GitChangeApplications.saveRunWiki')(function* (input: SaveRunWikiFilesValue) {
+          const decoded = yield* Schema.decodeUnknownEffect(SaveRunWikiFiles)(input, { onExcessProperty: 'error' })
+          return yield* saveLocked({ ...normalizePaths(decoded), runIds: [...new Set(decoded.runIds)].sort() as [string, ...string[]], kind: 'wiki' })
+        }, Effect.provide(dependencies), Effect.mapError(storage))
+        const saveTaskRaws = Effect.fn('GitChangeApplications.saveTaskRaws')(function* (input: SaveTaskRawFilesValue) {
+          const decoded = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)(input, { onExcessProperty: 'error' })
+          return yield* saveLocked({ ...normalizePaths(decoded), kind: 'raws', runIds: [] })
+        }, Effect.provide(dependencies), Effect.mapError(storage))
 
-        // The editor's filesystem write and Git snapshot are one durable operation.
-        // Other dirty files are deliberately excluded from the saved path set.
+        const gateKey = (taskId: string | null) => taskId === null ? 'main' : `task:${taskId}`
+        const runSave = <A, R>(taskId: string | null, effect: Effect.Effect<A, HarnessStoreError, R>) =>
+          withGitOperationGate(root, gateKey(taskId), effect)
+
         const editWorkspace = <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) =>
-          Effect.gen(function* () {
-            const source = yield* checkout({ taskId: null, branch: 'main' })
-            if ((yield* sql`SELECT id FROM git_change_applications WHERE branch='main' AND state='applying'`).length) return yield* invalid()
+          runSave(null, Effect.gen(function* () {
+            const source = yield* checkout(null)
             const expectedParent = (yield* git(source.path, ['rev-parse', 'HEAD'])).trim()
-            if (!(yield* isRegisteredGitCommit('main', expectedParent, source.base))) return yield* invalid()
             const { value, paths } = yield* edit
-            const input = yield* Schema.decodeUnknownEffect(SaveGitFiles)({ id: randomUUID(), taskId: null, expectedParent, paths })
-            if ((yield* git(source.path, ['status', '--porcelain', '--untracked-files=all', '--', ...input.paths])).trim())
-              yield* saveLocked({ ...input, kind: 'user', runIds: [] })
+            const selected = [...new Set(paths)].sort()
+            if (selected.length && (yield* git(source.path, ['status', '--porcelain', '--untracked-files=all', '--', ...selected])).trim()) {
+              yield* saveLocked({ id: randomUUID(), taskId: null, expectedParent, paths: selected as [string, ...string[]], kind: 'user', runIds: [] })
+            }
             return value
-          }).pipe(Effect.provide(dependencies), Effect.mapError(storage), action => withCheckout('main', action))
+          }).pipe(Effect.provide(dependencies), Effect.mapError(storage)))
 
-        /** User-triggered Run save records Agent provenance without inferring filesystem ownership. */
-        const saveRunWiki = Effect.fn('GitChangeApplications.saveRunWiki')(
-          function* (input: SaveRunWikiFilesValue) {
-            const decoded = yield* Schema.decodeUnknownEffect(SaveRunWikiFiles)(input, { onExcessProperty: 'error' })
-            const value = yield* Schema.decodeUnknownEffect(SaveRunWikiFiles)({
-              ...decoded,
-              runIds: [...new Set(decoded.runIds)].sort(),
-              paths: [...new Set(decoded.paths)].sort()
-            })
-            return yield* withCheckout(`folio/task/${value.taskId}`, saveLocked({ ...value, kind: 'wiki' }))
-          },
-          Effect.provide(dependencies),
-          Effect.mapError(storage)
-        )
+        const confirmRunWikiUnchanged = (input: ConfirmRunWikiUnchangedValue) => runSave(input.taskId, Effect.gen(function* () {
+          const value = yield* Schema.decodeUnknownEffect(ConfirmRunWikiUnchanged)(input, { onExcessProperty: 'error' })
+          let run = (yield* store.runs(value.taskId)).find((candidate) => candidate.id === value.runId)
+          if (!run || run.state !== 'succeeded' || run.baselineCommit !== value.expectedHead) return yield* invalid()
+          if (run.syncState === 'not-required') return run
+          if (run.syncState !== 'pending') return yield* invalid()
+          const source = yield* checkout(value.taskId)
+          if ((yield* git(source.path, ['rev-parse', 'HEAD'])).trim() !== value.expectedHead ||
+            (yield* git(source.path, ['diff', '--name-only', '-z', value.expectedHead, '--', 'wiki'])) ||
+            (yield* git(source.path, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'wiki']))) return yield* invalid()
+          yield* sql`UPDATE runs SET sync_state='not-required' WHERE id=${value.runId} AND sync_state='pending'`
+          run = (yield* store.runs(value.taskId)).find((candidate) => candidate.id === value.runId)
+          if (!run) return yield* invalid()
+          return run
+        }).pipe(Effect.provide(dependencies), Effect.mapError(storage)))
 
-        /** Captures host-produced raw files without inventing Agent Run ownership. */
-        const saveTaskRaws = Effect.fn('GitChangeApplications.saveTaskRaws')(
-          function* (input: SaveTaskRawFilesValue) {
-            const decoded = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)(input, { onExcessProperty: 'error' })
-            const value = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)({ ...decoded, paths: [...new Set(decoded.paths)].sort() })
-            return yield* withCheckout(`folio/task/${value.taskId}`, saveLocked({ ...value, kind: 'raws', runIds: [] }))
-          },
-          Effect.provide(dependencies),
-          Effect.mapError(storage)
-        )
-
-        /** Records explicit acceptance only while the observed Run baseline still has no wiki delta. */
-        const confirmRunWikiUnchangedLocked = Effect.fn('GitChangeApplications.confirmRunWikiUnchanged')(
-          function* (input: ConfirmRunWikiUnchangedValue) {
-            const value = yield* Schema.decodeUnknownEffect(ConfirmRunWikiUnchanged)(input, { onExcessProperty: 'error' })
-            let run = (yield* store.runs(value.taskId)).find((candidate) => candidate.id === value.runId)
-            if (!run || run.state !== 'succeeded' || run.baselineCommit !== value.expectedHead) return yield* invalid()
-            // The Run row is the durable receipt; retry stays read-only even after Task release.
-            if (run.syncState === 'not-required') return run
-            if (run.syncState !== 'pending') return yield* invalid()
-            const branch = `folio/task/${value.taskId}`
-            const source = yield* checkout({ taskId: value.taskId, branch })
-            if (
-              (yield* git(source.path, ['rev-parse', 'HEAD'])).trim() !== value.expectedHead ||
-              !(yield* isRegisteredGitCommit(branch, value.expectedHead, source.base)) ||
-              (yield* sql`SELECT p.id FROM git_change_preparations p LEFT JOIN git_change_applications a ON a.id=p.id
-                WHERE p.task_id=${value.taskId} AND (a.id IS NULL OR a.state<>'applied') LIMIT 1`).length ||
-              (yield* git(source.path, [
-                '--no-optional-locks',
-                'diff',
-                '--no-ext-diff',
-                '--no-textconv',
-                '--no-renames',
-                '--name-only',
-                '-z',
-                value.expectedHead,
-                '--',
-                'wiki'
-              ])) ||
-              (yield* git(source.path, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'wiki']))
-            )
-              return yield* invalid()
-            const changed = yield* sql`UPDATE runs SET sync_state='not-required'
-              WHERE id=${value.runId} AND task_id=${value.taskId} AND state='succeeded' AND sync_state='pending'
-                AND baseline_commit=${value.expectedHead} RETURNING id`
-            run = (yield* store.runs(value.taskId)).find((candidate) => candidate.id === value.runId)
-            if (!run || (!changed.length && run.syncState !== 'not-required')) return yield* invalid()
-            return run
-          },
-          Effect.provide(dependencies),
-          Effect.mapError(storage)
-        )
-        const confirmRunWikiUnchanged = (input: ConfirmRunWikiUnchangedValue) =>
-          withCheckout(`folio/task/${input.taskId}`, confirmRunWikiUnchangedLocked(input))
-
-        /**
-         * Serializes a checkout's multi-command publication across Layers in this app process.
-         * Different Task worktrees still progress independently; external writers are detected by
-         * Git's index/ref locks and the persisted parent/receipt checks.
-         */
-        const apply = (id: string) => Effect.gen(function* () {
+        const recover = (id: string) => Effect.gen(function* () {
           const row = yield* find(id)
-          const branch = row?.branch ?? (yield* journal.recover(id)).branch
-          return yield* withCheckout(branch, applyLocked(id))
-        }).pipe(Effect.provide(dependencies), Effect.mapError(storage))
+          if (!row) return yield* new HarnessStoreError({ reason: 'not-found', message: 'Git save operation was not found.' })
+          return yield* runSave(row.taskId, completeLocked(row).pipe(Effect.provide(dependencies), Effect.mapError(storage)))
+        }).pipe(Effect.mapError(storage))
+        const pending = Effect.gen(function* () {
+          const rows = yield* sql`SELECT id, task_id AS taskId, kind, state, source_commit AS sourceCommit,
+            target_commit AS targetCommit, artifact_path AS artifactPath, created_at AS createdAt
+            FROM git_operations WHERE kind IN ('save-user', 'save-raws', 'save-wiki') AND state='pending' ORDER BY sequence`.pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(OperationRow)))
+          )
+          return rows.map(receipt)
+        }).pipe(Effect.mapError(storage))
 
-        /** Recovery requires existing application intent; it cannot create a new index plan. */
-        const recover = Effect.fn('GitChangeApplications.recover')(function* (id: string) {
-          if (!(yield* find(id))) return yield* invalid()
-          return yield* apply(id)
-        }, Effect.mapError(storage))
-        const pending = sql`SELECT a.id, a.branch, p.commit_oid AS "commit", a.state FROM git_change_applications a
-        JOIN git_change_preparations p ON p.id=a.id WHERE a.state='applying' ORDER BY a.id`.pipe(
-          Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(GitChangeApplication))),
-          Effect.mapError(storage)
-        )
-        return GitChangeApplications.of({ editWorkspace, save, saveRunWiki, saveTaskRaws, confirmRunWikiUnchanged, apply, recover, pending })
+        return GitChangeApplications.of({
+          editWorkspace,
+          save: (input) => runSave(input.taskId, save(input)),
+          saveRunWiki: (input) => runSave(input.taskId, saveRunWiki(input)),
+          saveTaskRaws: (input) => runSave(input.taskId, saveTaskRaws(input)),
+          confirmRunWikiUnchanged,
+          apply: recover,
+          recover,
+          pending
+        })
       }).pipe(Effect.mapError(storage))
     )
   }

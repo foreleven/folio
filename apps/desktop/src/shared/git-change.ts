@@ -8,63 +8,22 @@ export const GitSelectedPath = Schema.NonEmptyString.check(
 )
 const Identity = Schema.String.check(Schema.makeFilter((value) => /^[a-zA-Z0-9_-]{1,128}$/.test(value)))
 
-/** Frozen tree intent, supplied by the save coordinator rather than by a renderer path or diff. */
-export const GitChangeIntent = Schema.Struct({
-  id: Identity,
-  taskId: Schema.NullOr(Identity),
-  runIds: Schema.Array(Identity),
-  kind: Schema.Literals(['user', 'raws', 'wiki']),
-  parent: GitObjectId,
-  tree: GitObjectId,
-  paths: Schema.NonEmptyArray(GitSelectedPath)
-})
-export type GitChangeIntent = typeof GitChangeIntent.Type
-
-/** Prepared means retained in Git, not applied to a branch or synchronized. */
-export const GitChangePreparation = Schema.Struct({
-  ...GitChangeIntent.fields,
-  branch: Schema.NonEmptyString,
-  commit: GitObjectId,
-  createdAt: Schema.Int,
-  state: Schema.Literals(['preparing', 'prepared'])
-})
-export type GitChangePreparation = typeof GitChangePreparation.Type
-
-/** A source-branch save receipt is separate from preparation and from later synchronization. */
+/** A save is one operation; Git stores its commit while SQLite stores only its lifecycle. */
 export const GitChangeApplication = Schema.Struct({
   id: Identity,
   branch: Schema.NonEmptyString,
   commit: GitObjectId,
-  state: Schema.Literals(['applying', 'applied'])
+  state: Schema.Literals(['pending', 'completed'])
 })
 export type GitChangeApplication = typeof GitChangeApplication.Type
 
-export const GitSyncCanonicalCommit = Schema.Struct({
-  sourceChangeId: Identity,
-  sourceCommit: GitObjectId,
-  tree: GitObjectId,
-  commit: GitObjectId,
-  data: Schema.String
-})
-export type GitSyncCanonicalCommit = typeof GitSyncCanonicalCommit.Type
-
-/** Durable synchronization checkpoint; conflict retains its isolated coordinator worktree. */
+/** Compact synchronization receipt; detailed recovery state is a local operation artifact. */
 export const GitSyncOperation = Schema.Struct({
   id: Identity,
   taskId: Identity,
-  supersedesId: Schema.NullOr(Identity),
-  sourceFrontier: GitObjectId,
   sourceHead: GitObjectId,
-  sourceChanges: Schema.Array(Identity),
-  sourceCommits: Schema.Array(GitObjectId),
-  mainBase: GitObjectId,
-  canonicalCommits: Schema.Array(GitSyncCanonicalCommit),
-  conflictIndex: Schema.NullOr(Schema.Int),
-  preparedHead: Schema.NullOr(GitObjectId),
   publishedHead: Schema.NullOr(GitObjectId),
-  alignedHead: Schema.NullOr(GitObjectId),
-  alignmentCommit: Schema.NullOr(GitObjectId),
-  state: Schema.Literals(['preparing', 'conflict', 'resolving', 'prepared', 'published', 'aligning', 'aligned', 'superseded', 'aborted']),
+  state: Schema.Literals(['pending', 'conflict', 'prepared', 'published', 'completed', 'aborted']),
   createdAt: Schema.Int
 })
 export type GitSyncOperation = typeof GitSyncOperation.Type
@@ -143,7 +102,7 @@ export const ConfirmRunWikiUnchanged = Schema.Struct({
 })
 export type ConfirmRunWikiUnchanged = typeof ConfirmRunWikiUnchanged.Type
 
-export const PendingWorkspaceSave = Schema.Struct({ ...SaveWorkspaceFiles.fields, state: Schema.Literals(['preparing', 'prepared', 'applying']) })
+export const PendingWorkspaceSave = Schema.Struct({ ...SaveWorkspaceFiles.fields, state: Schema.Literal('pending') })
 export const WorkspaceChangesView = Schema.Struct({
   head: GitObjectId,
   registered: Schema.Boolean,

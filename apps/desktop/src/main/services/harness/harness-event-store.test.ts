@@ -16,7 +16,7 @@ beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-events-')) }
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 /** Fresh connection scopes share only the Vault database on disk. */
 function layer() {
-  return Layer.mergeAll(HarnessStore.layer, HarnessEventStore.layer).pipe(Layer.provideMerge(vaultDatabaseLayer(root)))
+  return Layer.mergeAll(HarnessStore.layer(root), HarnessEventStore.layer).pipe(Layer.provideMerge(vaultDatabaseLayer(root)))
 }
 /** Builds explicit Folio archive positions; repeated text is not a deduplication key. */
 function event(position: number, update: Schema.JsonObject, connectionId = 'first'): RecordedUpdate {
@@ -25,7 +25,7 @@ function event(position: number, update: Schema.JsonObject, connectionId = 'firs
 }
 const setup = Effect.gen(function*() {
   const store = yield* HarnessStore
-  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] }, branch: 'task', worktree: '/worktrees/task' })
+  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
   // Storage-only fixture: the real Git resource boundary is covered by TaskWorktrees tests.
   yield* Effect.flatMap(SqlClient.SqlClient, sql => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='task'`)
   yield* store.createSession({ id: 'folio', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
