@@ -188,7 +188,7 @@ describe('provider-hosted ingestion', () => {
             internal_date: String(window.start + 20_000), folder_id: 'INBOX',
             head_from: { name: 'Bob', mail_address: 'bob@example.com' },
             to: [{ name: 'Feng', mail_address: 'feng@example.com' }], body_plain_text: 'Second body' }
-        ], total: 2, unavailable_message_ids: []
+        ], total: 2
       } }))
     })
 

@@ -88,7 +88,9 @@ const MailMessage = Schema.Struct({
 const MailMessagesResponse = Schema.Struct({
   messages: Schema.Array(MailMessage),
   total: Schema.Int,
-  unavailable_message_ids: Schema.Array(Schema.NonEmptyString)
+  // lark-cli omits this field when every requested message is available, despite
+  // the shortcut documentation describing an explicit empty array.
+  unavailable_message_ids: Schema.optional(Schema.Array(Schema.NonEmptyString))
 })
 
 /** Message search ignores per-user notification settings, so muted chats must be filtered explicitly. */
@@ -249,8 +251,18 @@ export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: I
       '--message-ids', [...ids].join(','), '--html=false', '--format', 'json'
     ]))
     stage = 'decode-bodies'
-    const result = yield* Schema.decodeUnknownEffect(MailMessagesResponse)(bodies).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail bodies.' })))
-    yield* Effect.logInfo('Lark Mail bodies received', { count: result.messages.length, total: result.total, unavailableCount: result.unavailable_message_ids.length })
+    const result = yield* Schema.decodeUnknownEffect(MailMessagesResponse)(bodies).pipe(
+      Effect.tapError(() => Effect.logWarning('Lark Mail body response shape was invalid', {
+        keys: bodies && typeof bodies === 'object' ? Object.keys(bodies) : [],
+        messageCount: bodies && typeof bodies === 'object' && Array.isArray((bodies as Record<string, unknown>).messages)
+          ? ((bodies as Record<string, unknown>).messages as unknown[]).length : null,
+        hasTotal: bodies && typeof bodies === 'object' && 'total' in bodies,
+        hasUnavailableMessageIds: bodies && typeof bodies === 'object' && 'unavailable_message_ids' in bodies
+      })),
+      Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail bodies.' }))
+    )
+    const unavailableMessageIds = result.unavailable_message_ids ?? []
+    yield* Effect.logInfo('Lark Mail bodies received', { count: result.messages.length, total: result.total, unavailableCount: unavailableMessageIds.length })
     stage = 'validate-bodies'
     const returnedIds = new Set<string>()
     for (const message of result.messages) {
@@ -259,9 +271,9 @@ export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: I
       }
       returnedIds.add(message.message_id)
     }
-    const unavailableIds = new Set(result.unavailable_message_ids)
-    if (result.total !== result.messages.length || unavailableIds.size !== result.unavailable_message_ids.length ||
-      result.unavailable_message_ids.some(messageId => !ids.has(messageId) || returnedIds.has(messageId))) {
+    const unavailableIds = new Set(unavailableMessageIds)
+    if (result.total !== result.messages.length || unavailableIds.size !== unavailableMessageIds.length ||
+      unavailableMessageIds.some(messageId => !ids.has(messageId) || returnedIds.has(messageId))) {
       return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
     }
     if ([...ids].some(messageId => !returnedIds.has(messageId) && !unavailableIds.has(messageId))) {
