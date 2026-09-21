@@ -6,10 +6,30 @@ import { spawn } from 'node:child_process'
 
 const args = new Map()
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1])
-const start = args.get('start'); const end = args.get('end')
-if (!start || !end) throw new Error('Usage: extract-window.mjs --start <ISO> --end <ISO> [--output raws/lark-im]')
+const start = args.get('start'); const end = args.get('end'); const timeZone = args.get('time-zone')
+if (!start || !end || !timeZone) throw new Error('Usage: extract-window.mjs --start <ISO> --end <ISO> --time-zone <IANA zone> [--output raws/lark-im]')
 const startTime = Date.parse(start); const endTime = Date.parse(end)
 if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) throw new Error('The extraction window must contain valid ISO timestamps with end after start.')
+let zonedFormatter
+try {
+  zonedFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone, calendar: 'iso8601', numberingSystem: 'latn', hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    fractionalSecondDigits: 3
+  })
+} catch {
+  throw new Error(`Invalid IANA time zone: ${timeZone}`)
+}
+/** Renders an instant with the offset active in the Routine zone, including DST transitions. */
+const formatZonedTime = epoch => {
+  const parts = Object.fromEntries(zonedFormatter.formatToParts(new Date(epoch))
+    .filter(part => part.type !== 'literal').map(part => [part.type, part.value]))
+  const localEpoch = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second), Number(parts.fractionalSecond))
+  const offsetMinutes = Math.round((localEpoch - epoch) / 60_000)
+  const offset = offsetMinutes === 0 ? 'Z' : `${offsetMinutes < 0 ? '-' : '+'}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}:${String(Math.abs(offsetMinutes) % 60).padStart(2, '0')}`
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.${parts.fractionalSecond}${offset}`
+}
 const parseMessageTime = value => {
   if (typeof value === 'number') return value
   if (typeof value === 'string') return /^\d+$/.test(value) ? Number(value) : Date.parse(value)
@@ -21,7 +41,7 @@ const formatLarkTime = value => new Date(value).toISOString().replace(/\.\d{3}Z$
 const searchStart = formatLarkTime(Math.floor(startTime / 1000) * 1000)
 const searchEnd = formatLarkTime(Math.ceil(endTime / 1000) * 1000)
 const output = args.get('output') ?? join('raws', 'lark-im')
-const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true })
+const root = join(output, formatZonedTime(startTime).slice(0, 10)); await mkdir(root, { recursive: true })
 const summaryPath = join(root, '_updated.md')
 // A marker describes only the current attempt. A failed retry must not leave a
 // previous successful marker beside partial or stale output.
@@ -149,7 +169,7 @@ const renderContent = message => {
   const content = typeof message.content === 'string' ? message.content : message.content?.text
   return typeof content === 'string' && content.trim() ? content : `[${message.msg_type ?? 'message'}]`
 }
-const renderTime = value => { const parsed = parseMessageTime(value); return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : 'unknown time' }
+const renderTime = value => { const parsed = parseMessageTime(value); return Number.isFinite(parsed) && parsed > 0 ? formatZonedTime(parsed) : 'unknown time' }
 for (const [id, rows] of grouped) {
   if (mutedChatIds.has(id)) { filteredChats++; continue }
   const chat = rows[0]
@@ -158,7 +178,7 @@ for (const [id, rows] of grouped) {
     source: 'lark-im', chat_id: id, chat_name: chat.chat_name ?? null,
     chat_description: null, chat_mode: chat.chat_type ?? null,
     owner_id: null, p2p_target_type: null, p2p_target_id: null,
-    window_start: start, window_end: end, message_count: rows.length
+    window_start: start, window_end: end, time_zone: timeZone, message_count: rows.length
   }
   const body = ['---', ...Object.entries(metadata).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), '---', '', `# ${title}`, '',
     ...rows.map(message => `- ${renderTime(message.create_time)} | ${singleLine(message.sender?.name || 'Unknown')} (${singleLine(message.sender?.id || 'unknown id')}) | ${singleLine(renderContent(message))}`)].join('\n') + '\n'

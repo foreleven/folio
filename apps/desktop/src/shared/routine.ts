@@ -44,6 +44,11 @@ export type RoutineExecution = typeof RoutineExecution.Type
 export const RunRoutine = Schema.Struct({ routineId: Id, requestId: Schema.optionalKey(Id) })
 export type RunRoutine = typeof RunRoutine.Type
 
+/** Formats an execution instant in the Routine's named timezone for Agent-facing boundaries. */
+export function routineTimestampAt(at: number, timeZone: string): string {
+  return DateTime.formatIsoOffset(DateTime.makeZonedUnsafe(at, { timeZone }))
+}
+
 /** Converts an instant into a civil date in the Routine's named timezone. */
 export function routineDateAt(at: number, timeZone: string): string {
   const parts = DateTime.toParts(DateTime.makeZonedUnsafe(at, { timeZone }))

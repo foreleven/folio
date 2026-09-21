@@ -10,7 +10,7 @@ import { SqlClient } from 'effect/unstable/sql'
 import type { RunRecord } from '../../../shared/execution'
 import { TaskService } from '../../../shared/task-service'
 import { RoutineStore } from '../routines/routine-store'
-import { routineDateAt, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
+import { routineDateAt, routineTimestampAt, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
 import { HarnessRuns } from '../harness/harness-runs'
 import { ModelService } from '../models/model-service'
 import { Cause, DateTime, Effect, Exit, Fiber, Layer, Semaphore } from 'effect'
@@ -458,8 +458,8 @@ export const TaskServiceLive = Layer.effect(
       if (!execution) return null
       yield* Effect.logInfo('Routine extraction window reserved', {
         routineId: input.routineId, taskId: execution.taskId, timeZone: execution.timeZone,
-        windowStart: execution.windowStart === null ? null : new Date(execution.windowStart).toISOString(),
-        windowEnd: execution.windowEnd === null ? null : new Date(execution.windowEnd).toISOString(),
+        windowStart: execution.windowStart === null ? null : routineTimestampAt(execution.windowStart, execution.timeZone),
+        windowEnd: execution.windowEnd === null ? null : routineTimestampAt(execution.windowEnd, execution.timeZone),
         windowMs: execution.windowStart === null || execution.windowEnd === null ? null : execution.windowEnd - execution.windowStart,
         status: execution.status
       })
@@ -485,7 +485,7 @@ export const TaskServiceLive = Layer.effect(
       const sessionId = randomUUID()
       const runId = input.requestId ?? randomUUID()
       if (execution.windowStart === null || execution.windowEnd === null) return yield* failure('invalid-state')
-      const prompt = `${task.goal}\n\nRoutine execution window (use these exact ISO timestamps for extraction):\n- start: ${new Date(execution.windowStart).toISOString()}\n- end: ${new Date(execution.windowEnd).toISOString()}`
+      const prompt = `${task.goal}\n\nRoutine execution window (use this timezone and these exact ISO timestamps for extraction):\n- time-zone: ${execution.timeZone}\n- start: ${routineTimestampAt(execution.windowStart, execution.timeZone)}\n- end: ${routineTimestampAt(execution.windowEnd, execution.timeZone)}`
       yield* prepareSession({ taskId: task.id, sessionId, agent: task.configuration.agent, ...(execution.model ? { model: execution.model } : {}) })
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
       return { execution: (yield* routines.executionForTask(task.id))!, task, run }

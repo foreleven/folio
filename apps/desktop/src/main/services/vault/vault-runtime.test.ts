@@ -19,6 +19,7 @@ import { ModelService } from '../models/model-service'
 import type { IntegrationView } from '../../../shared/integration'
 import { imap } from '@folio/integrations/imap'
 import { lark } from '@folio/integrations/lark'
+import { routineTimestampAt } from '../../../shared/routine'
 
 function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle')), integrations: readonly IntegrationView[] = []) {
   return ManagedRuntime.make(
@@ -113,7 +114,7 @@ it('keeps Routine admission and retries on the reserved Task revision after edit
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
       const input = { id: '11111111-1111-4111-8111-111111111111', expectedRevision: null,
         name: 'Original', prompt: 'Original prompt', agent: 'codex' as const, model: null,
-        skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'UTC', enabled: true }
+        skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'Asia/Shanghai', enabled: true }
       yield* tasks.saveRoutine(input)
       const reserved = yield* tasks.prepareRoutine({ routineId: input.id })
       yield* tasks.saveRoutine({ ...input, expectedRevision: 1, prompt: 'Edited prompt', agent: 'codex', model: null })
@@ -121,6 +122,9 @@ it('keeps Routine admission and retries on the reserved Task revision after edit
       expect(submitted.task).toEqual(reserved.task)
       expect(submitted.execution.routineRevision).toBe(1)
       expect(submitted.run.prompt).toMatch(/^Original prompt\n/)
+      expect(submitted.run.prompt).toContain('- time-zone: Asia/Shanghai')
+      expect(submitted.run.prompt).toContain(`- start: ${routineTimestampAt(submitted.execution.windowStart!, input.timeZone)}`)
+      expect(submitted.run.prompt).toContain(`- end: ${routineTimestampAt(submitted.execution.windowEnd!, input.timeZone)}`)
       expect((yield* tasks.get(reserved.task.id)).sessions).toMatchObject([{ agent: 'codex', modelProfile: null }])
       expect((yield* tasks.runRoutine({ routineId: input.id })).run.id).toBe(submitted.run.id)
       yield* tasks.cancelRun(reserved.task.id, submitted.run.id)

@@ -12,6 +12,8 @@ const gmail = fileURLToPath(new URL('../src/gmail/assets/workflows/gmail/extract
 const lark = fileURLToPath(new URL('../src/lark/assets/skills/folio-lark-im/scripts/extract-window.mjs', import.meta.url))
 const start = '2026-09-18T00:00:00.500Z'
 const end = '2026-09-18T01:00:00.500Z'
+const larkStart = '2026-09-21T00:00:00.500+08:00'
+const larkEnd = '2026-09-21T01:00:00.500+08:00'
 let root: string
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'folio-extraction-')) })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
@@ -44,8 +46,10 @@ async function runGmail(repeatedCursor = false) {
   })
 }
 
-async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' | 'mute-invalid' | 'timeout' | 'timeout-descendant', chat: Record<string, unknown> = { chat_id: 'oc_fixture', name: 'Fixture' }, messages: readonly Record<string, unknown>[] = [{ create_time: Date.parse(start), content: 'hello' }]) {
+async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' | 'mute-invalid' | 'timeout' | 'timeout-descendant', chat: Record<string, unknown> = { chat_id: 'oc_fixture', name: 'Fixture' }, messages: readonly Record<string, unknown>[] = [{ create_time: Date.parse(larkStart), content: 'hello' }], timeZone = 'Asia/Shanghai', windowStart = larkStart, windowEnd = larkEnd) {
   const cli = join(root, 'lark-cli')
+  const queryStart = new Date(Math.floor(Date.parse(windowStart) / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const queryEnd = new Date(Math.ceil(Date.parse(windowEnd) / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
   await writeFile(cli, `#!/usr/bin/env node
     import assert from 'node:assert/strict'
     import { spawn } from 'node:child_process'
@@ -65,8 +69,8 @@ async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' 
       setInterval(() => {}, 1_000)
     }
     if (process.argv.includes('+messages-search')) {
-      assert.equal(process.argv[process.argv.indexOf('--start') + 1], '2026-09-18T00:00:00Z')
-      assert.equal(process.argv[process.argv.indexOf('--end') + 1], '2026-09-18T01:00:01Z')
+      assert.equal(process.argv[process.argv.indexOf('--start') + 1], ${JSON.stringify(queryStart)})
+      assert.equal(process.argv[process.argv.indexOf('--end') + 1], ${JSON.stringify(queryEnd)})
       assert.ok(process.argv.includes('--no-reactions'))
       if (mode === 'invalid-json') process.stdout.write('{bad')
       else process.stdout.write(JSON.stringify({ data: {
@@ -82,7 +86,7 @@ async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' 
     }
   `)
   await chmod(cli, 0o700)
-  return execute(process.execPath, [lark, '--start', start, '--end', end, '--output', join(root, 'output')], {
+  return execute(process.execPath, [lark, '--start', windowStart, '--end', windowEnd, '--time-zone', timeZone, '--output', join(root, 'output')], {
     env: { ...process.env, PATH: [root, process.env.PATH ?? ''].join(delimiter),
       ...(mode.startsWith('timeout') ? { FOLIO_LARK_IM_COMMAND_TIMEOUT_MS: '50' } : {}) }, timeout: 10_000
   })
@@ -106,13 +110,13 @@ describe('bundled extraction workflows', () => {
 
   it('searches the exact Lark window and publishes only a complete extraction', async () => {
     await runLark('complete', undefined, [
-      { create_time: Date.parse(end), content: 'after' },
-      { create_time: Date.parse(end) - 1, content: 'last' },
-      { create_time: Date.parse(start) - 1, content: 'before' },
-      { create_time: Date.parse(start), content: 'first' }
+      { create_time: Date.parse(larkEnd), content: 'after' },
+      { create_time: Date.parse(larkEnd) - 1, content: 'last' },
+      { create_time: Date.parse(larkStart) - 1, content: 'before' },
+      { create_time: Date.parse(larkStart), content: 'first' }
     ])
-    const summary = await readFile(join(root, 'output/2026-09-18/_updated.md'), 'utf8')
-    const chat = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    const summary = await readFile(join(root, 'output/2026-09-21/_updated.md'), 'utf8')
+    const chat = await readFile(join(root, 'output/2026-09-21/oc_fixture.md'), 'utf8')
     expect(summary).toContain('Searched messages: 2')
     expect(summary).toContain('2 message(s)')
     expect(chat).toContain('first')
@@ -128,7 +132,7 @@ describe('bundled extraction workflows', () => {
     { chat_id: 'oc_fixture' }
   ])('writes chat metadata as safely quoted YAML frontmatter: $chat_id / $chat_mode', async chat => {
     await runLark('complete', chat)
-    const content = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    const content = await readFile(join(root, 'output/2026-09-21/oc_fixture.md'), 'utf8')
     const parts = content.split('---\n')
     expect(parts[0]).toBe('')
     // The extractor emits YAML's JSON-compatible scalar subset. Decode each
@@ -142,7 +146,7 @@ describe('bundled extraction workflows', () => {
       chat_description: null,
       chat_mode: chat.chat_mode ?? null, owner_id: null,
       p2p_target_type: null, p2p_target_id: null,
-      window_start: start, window_end: end, message_count: 1
+      window_start: larkStart, window_end: larkEnd, time_zone: 'Asia/Shanghai', message_count: 1
     })
     expect(content).toContain('hello')
     expect(content).not.toContain('- chat_id:')
@@ -151,29 +155,41 @@ describe('bundled extraction workflows', () => {
   it('renders one readable line per message with sender name, ID, time and content', async () => {
     const sender = { name: '张三', id: 'ou_zhang' }
     await runLark('complete', undefined, [
-      { create_time: Date.parse(start), sender, content: '第一行\r\n第二行\n第三行' },
-      { create_time: start, sender, msg_type: 'post', content: '**更新** [文档](https://example.com)' },
-      { create_time: start, sender, msg_type: 'image', content: '![Image](img_fixture)' },
-      { create_time: start, sender, msg_type: 'file', content: null },
-      { create_time: start, content: { text: '系统通知' } },
-      { create_time: start, sender, deleted: true, content: '撤回的内容' }
+      { create_time: Date.parse(larkStart), sender, content: '第一行\r\n第二行\n第三行' },
+      { create_time: larkStart, sender, msg_type: 'post', content: '**更新** [文档](https://example.com)' },
+      { create_time: larkStart, sender, msg_type: 'image', content: '![Image](img_fixture)' },
+      { create_time: larkStart, sender, msg_type: 'file', content: null },
+      { create_time: larkStart, content: { text: '系统通知' } },
+      { create_time: larkStart, sender, deleted: true, content: '撤回的内容' }
     ])
-    const content = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    const content = await readFile(join(root, 'output/2026-09-21/oc_fixture.md'), 'utf8')
     const body = content.split('\n---\n')[1]!
     expect(body.trim().split('\n')).toEqual([
       '# Fixture', '',
-      `- ${start} | 张三 (ou_zhang) | 第一行 ↵ 第二行 ↵ 第三行`,
-      `- ${start} | 张三 (ou_zhang) | **更新** [文档](https://example.com)`,
-      `- ${start} | 张三 (ou_zhang) | ![Image](img_fixture)`,
-      `- ${start} | 张三 (ou_zhang) | [file]`,
-      `- ${start} | Unknown (unknown id) | 系统通知`,
-      `- ${start} | 张三 (ou_zhang) | [recalled]`
+      `- ${larkStart} | 张三 (ou_zhang) | 第一行 ↵ 第二行 ↵ 第三行`,
+      `- ${larkStart} | 张三 (ou_zhang) | **更新** [文档](https://example.com)`,
+      `- ${larkStart} | 张三 (ou_zhang) | ![Image](img_fixture)`,
+      `- ${larkStart} | 张三 (ou_zhang) | [file]`,
+      `- ${larkStart} | Unknown (unknown id) | 系统通知`,
+      `- ${larkStart} | 张三 (ou_zhang) | [recalled]`
     ])
     expect(body).not.toContain('```json')
   })
 
+  it('renders each message with the active Routine-zone offset across a DST transition', async () => {
+    const windowStart = '2026-11-01T01:30:00.000-04:00'
+    const windowEnd = '2026-11-01T01:30:00.000-05:00'
+    await runLark('complete', undefined, [
+      { create_time: Date.parse(windowStart), content: 'before fallback' },
+      { create_time: Date.parse(windowEnd) - 1, content: 'after fallback' }
+    ], 'America/New_York', windowStart, windowEnd)
+    const content = await readFile(join(root, 'output/2026-11-01/oc_fixture.md'), 'utf8')
+    expect(content).toContain('- 2026-11-01T01:30:00.000-04:00 |')
+    expect(content).toContain('- 2026-11-01T01:29:59.999-05:00 |')
+  })
+
   it.each(['messages-truncated', 'invalid-json', 'mute-invalid', 'timeout'] as const)('rejects Lark %s without a completion summary', async mode => {
-    const directory = join(root, 'output/2026-09-18')
+    const directory = join(root, 'output/2026-09-21')
     await mkdir(directory, { recursive: true })
     await writeFile(join(directory, '_updated.md'), 'stale successful marker')
     await expect(runLark(mode)).rejects.toMatchObject({ stderr: expect.stringContaining(

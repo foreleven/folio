@@ -1,7 +1,7 @@
 import { Schema } from 'effect'
 import { RoutineRecord } from './routine'
 import { describe, expect, it } from 'vitest'
-import { previousRoutineDate, routineDateAt, routineDayEnd, routineDateState, routineGapDates } from './routine'
+import { previousRoutineDate, routineDateAt, routineDayEnd, routineDateState, routineGapDates, routineTimestampAt } from './routine'
 
 describe('Routine civil dates', () => {
   it('includes unprocessed dates before the first run and after the last run in the Routine timezone', () => {
@@ -41,5 +41,14 @@ describe('Routine civil dates', () => {
     expect(autumn - routineDayEnd('2026-10-31', zone)).toBe(25 * 60 * 60 * 1000)
     expect(routineDateAt(spring, zone)).toBe('2026-03-08')
     expect(routineDateAt(spring + 1, zone)).toBe('2026-03-09')
+  })
+
+  it('formats execution instants with the Routine timezone offset', () => {
+    expect(routineTimestampAt(Date.parse('2026-09-20T16:00:00Z'), 'Asia/Shanghai'))
+      .toBe('2026-09-21T00:00:00.000+08:00')
+    expect(routineTimestampAt(Date.parse('2026-01-15T17:00:00Z'), 'America/New_York'))
+      .toBe('2026-01-15T12:00:00.000-05:00')
+    expect(routineTimestampAt(Date.parse('2026-07-15T16:00:00Z'), 'America/New_York'))
+      .toBe('2026-07-15T12:00:00.000-04:00')
   })
 })
