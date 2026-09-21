@@ -1,5 +1,5 @@
 import { NodeServices } from '@effect/platform-node'
-import { Effect } from 'effect'
+import { Effect, Logger } from 'effect'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -70,6 +70,20 @@ const prepareLarkIntegration = async (name: string): Promise<string> => {
 }
 
 describe('provider-hosted ingestion', () => {
+  it('logs the mail decode failure stage without including response content', async () => {
+    const integrationDirectory = await prepareLarkIntegration('lark-invalid-mail')
+    mocks.runCli.mockReturnValue(Effect.succeed(JSON.stringify({ data: { messages: 'private-mail-content' } })))
+    const logs: unknown[] = []
+    await Effect.runPromise(ingestLarkEmail({ integrationDirectory, outputDirectory: join(root, 'mail'), window }).pipe(
+      Effect.flip, Effect.provide(NodeServices.layer),
+      Effect.provide(Logger.layer([Logger.make(({ message }) => { logs.push(message) })]))
+    ))
+    const output = JSON.stringify(logs)
+    expect(output).toContain('decode-summaries')
+    expect(output).toContain('Lark returned invalid mail summaries.')
+    expect(output).not.toContain('private-mail-content')
+  })
+
   it('writes only Gmail messages inside the exact half-open window', async () => {
     const details: Record<string, unknown> = {
       inside: { id: 'inside', threadId: 'thread', internalDate: String(window.start + 1), labelIds: ['INBOX'], payload: {

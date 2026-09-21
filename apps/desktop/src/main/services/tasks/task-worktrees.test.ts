@@ -11,6 +11,8 @@ import { initializeVaultWorkspace } from '../vault/vault-workspace'
 import { TaskWorktrees } from './task-worktrees'
 import { makeVaultGit } from '../git/vault-git'
 import { vaultDatabaseLayer } from '../vault/vault-database'
+import { GitChangeApplications } from '../git/git-change-applications'
+import { GitChangeJournal } from '../git/git-change-journal'
 
 let root: string
 beforeEach(async () => {
@@ -20,13 +22,62 @@ beforeEach(async () => {
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 /** Every test uses real Git and a scoped Vault database; reopening shares only durable state. */
 function layer() {
-  return TaskWorktrees.layer(root).pipe(Layer.provideMerge(HarnessStore.layer),
+  return Layer.merge(TaskWorktrees.layer(root), GitChangeApplications.layer(root)).pipe(
+    Layer.provideMerge(GitChangeJournal.layer(root)), Layer.provideMerge(HarnessStore.layer),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
 const draft = (id: string) => ({ id, type: 'agent' as const, receipt: null, configuration: { goal: 'Test task', agent: 'pi' as const, model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
 const initialize = Effect.suspend(() => initializeVaultWorkspace(root, join(root, 'entry')))
 
+const ingestionDraft = (id: string) => ({
+  id, type: 'ingestion' as const,
+  configuration: { integrationId: 'lark', resourceId: 'email' },
+  receipt: { state: 'failed' as const, attemptCount: 1, cancelRequested: false,
+    startedAt: 1, endedAt: 2, error: 'fixture failure', changeId: null, observedHead: null }
+})
+
 describe('Task Git worktree creation checkpoints', () => {
+  it('creates the frozen checkout when an Ingestion retry starts before its baseline exists', async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const main = yield* initialize
+      const worktrees = yield* TaskWorktrees
+      yield* worktrees.reserve(ingestionDraft('retry-before-baseline'))
+
+      const reset = yield* worktrees.resetIngestion('retry-before-baseline', 'raws/lark/email/2026-09-21')
+      expect(reset.baselineCommit).toBe(main.initialCommit)
+      expect(yield* (yield* HarnessStore).task('retry-before-baseline')).toMatchObject({
+        worktreeState: 'ready', worktreeBase: main.initialCommit
+      })
+    }).pipe(Effect.provide(layer())))
+  })
+
+  it('resets a failed Ingestion at its frozen baseline after registered main advances', async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const main = yield* initialize
+      const worktrees = yield* TaskWorktrees
+      const checkout = yield* worktrees.create(ingestionDraft('retry-after-main-advance'))
+      const namespace = 'raws/lark/email/2026-09-21'
+      yield* Effect.promise(() => mkdir(join(checkout.path, namespace), { recursive: true }))
+      yield* Effect.promise(() => writeFile(join(checkout.path, namespace, 'partial.md'), 'partial'))
+
+      yield* Effect.promise(() => writeFile(join(main.workspace, 'wiki/concurrent.md'), 'concurrent main change'))
+      const application = yield* GitChangeApplications
+      const advanced = yield* application.save({
+        id: 'advance-main-before-retry', taskId: null,
+        expectedParent: checkout.baselineCommit, paths: ['wiki/concurrent.md']
+      })
+
+      const reset = yield* worktrees.resetIngestion('retry-after-main-advance', namespace)
+      expect(reset.baselineCommit).toBe(checkout.baselineCommit)
+      expect(yield* Effect.promise(() => readFile(join(checkout.path, namespace, 'partial.md')).then(
+        () => 'exists', (error: NodeJS.ErrnoException) => error.code
+      ))).toBe('ENOENT')
+      const git = yield* makeVaultGit
+      expect((yield* git(checkout.path, ['rev-parse', 'HEAD'])).trim()).toBe(checkout.baselineCommit)
+      expect((yield* git(main.workspace, ['rev-parse', 'HEAD'])).trim()).toBe(advanced.commit)
+    }).pipe(Effect.provide(layer())))
+  })
+
   it('creates isolated Task branches from registered main while preserving unsaved user and Task edits', async () => {
     await Effect.runPromise(Effect.gen(function*() {
       const main = yield* initialize

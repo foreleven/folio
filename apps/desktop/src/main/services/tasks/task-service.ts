@@ -413,6 +413,7 @@ export const TaskServiceLive = Layer.effect(
         const startedAt = yield* now
         yield* saveIngestionReceipt(taskId, receipt => ({ ...receipt, state: 'running', attemptCount: receipt.attemptCount + 1,
           cancelRequested: false, startedAt, endedAt: null, error: null }), 'active')
+        let stage = 'prepare-worktree'
         const attempt = yield* Effect.gen(function* () {
           const prepared = yield* restore(Effect.gen(function* () {
             task = yield* store.task(taskId)
@@ -430,8 +431,10 @@ export const TaskServiceLive = Layer.effect(
                 const checkout = previousState === 'pending' && task.receipt.attemptCount === 1
                   ? yield* worktrees.ensure(taskId)
                   : yield* worktrees.resetIngestion(taskId, namespace)
+                stage = 'ingest-provider'
                 yield* integrations.ingest(task.configuration.integrationId, task.configuration.resourceId,
                   join(checkout.path, namespace), { start: windowStart, end: windowEnd, timeZone: execution.timeZone })
+                stage = 'commit-raws'
                 paths = yield* rawPaths(task, namespace)
                 if (paths.length) {
                   const application = yield* changes.saveTaskRaws({ id: randomUUID(), taskId,
@@ -439,6 +442,7 @@ export const TaskServiceLive = Layer.effect(
                   yield* saveIngestionReceipt(taskId, receipt => ({ ...receipt, changeId: application.id }))
                 }
               }
+              stage = 'prepare-publication'
               const sourceHead = (yield* git(task.worktree, ['rev-parse', 'HEAD'])).trim()
               operation = yield* synchronization.prepare({ id: randomUUID(), taskId, expectedSourceHead: sourceHead })
             } else if (operation.state === 'preparing' || operation.state === 'resolving') {
@@ -451,6 +455,7 @@ export const TaskServiceLive = Layer.effect(
           let { operation, paths } = prepared
           // Canonical publication wins a concurrent Stop. From this point through the
           // successful SQLite receipt, interruption must not expose a cancelled window.
+          stage = 'publish-raws'
           if (operation.state === 'prepared') operation = yield* synchronization.publish(operation.id)
           if (!operation.publishedHead || !['published', 'aligning', 'aligned'].includes(operation.state)) return yield* failure('invalid-state')
           const current = yield* store.task(taskId)
@@ -459,6 +464,7 @@ export const TaskServiceLive = Layer.effect(
             const rows = yield* sql<{ paths: string }>`SELECT paths FROM git_change_preparations WHERE id=${current.receipt.changeId} AND task_id=${taskId}`
             paths = rows[0] ? JSON.parse(rows[0].paths) as string[] : []
           }
+          stage = 'save-receipt'
           yield* finishIngestionSuccess(current, operation.publishedHead, paths)
           // Business success is already durable. Alignment and release are recoverable cleanup.
           yield* synchronization.align(operation.id).pipe(Effect.andThen(worktrees.complete(taskId)), Effect.catch(error =>
@@ -485,9 +491,15 @@ export const TaskServiceLive = Layer.effect(
           state: cancelled ? 'cancelled' : interrupted ? 'interrupted' : 'failed',
           endedAt, error: cancelled ? null : interrupted ? 'The ingestion attempt was interrupted.' : 'The ingestion attempt failed.'
         }), cancelled ? 'cancelled' : 'active')
-        if (!interrupted) yield* Effect.logWarning('Ingestion attempt failed; the exact window remains retryable.', {
-          taskId, integration: task.configuration.integrationId, resource: task.configuration.resourceId
-        })
+        if (!interrupted) {
+          const error = Cause.squash(attempt.cause)
+          yield* Effect.logError('Ingestion attempt failed; the exact window remains retryable.', {
+            taskId, stage, integration: task.configuration.integrationId, resource: task.configuration.resourceId,
+            windowStart, windowEnd, attemptCount: latest.receipt.attemptCount,
+            reason: error instanceof HarnessStoreError ? error.reason : 'operation-failed',
+            message: error instanceof HarnessStoreError ? error.message : 'See provider stage logs'
+          })
+        }
       }))
     })
     function startIngestion(taskId: string): Effect.Effect<void, HarnessStoreError> {

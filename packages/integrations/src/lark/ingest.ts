@@ -206,71 +206,94 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
 
 /** Uses Lark Mail triage for the exact window, then writes stable message projections. */
 export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: IngestInput) {
-  const session = yield* openIngestSession(input.integrationDirectory)
-  // Lark Mail rejects RFC 3339 fractional seconds, so expand to exact whole-second bounds and filter details below.
-  const start = new Date(Math.floor(input.window.start / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const end = new Date(Math.ceil(input.window.end / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const filter = JSON.stringify({ time_range: { start_time: start, end_time: end } })
-  const ids = new Set<string>()
-  let mailboxId: string | undefined
-  let pageToken: string | undefined
+  let stage = 'open-session'
   let pages = 0
-  do {
-    const args = ['mail', '+triage', '--as', 'user', '--filter', filter, '--max', '400', '--format', 'json']
-    if (pageToken) args.push('--page-token', pageToken)
-    const page = yield* Schema.decodeUnknownEffect(MailTriageResponse)(envelope(yield* command(session, args))).pipe(
-      Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail summaries.' }))
-    )
-    if (mailboxId !== undefined && page.mailbox_id !== mailboxId) {
-      return yield* new IntegrationError({ message: 'Lark returned inconsistent mailboxes.' })
+  let selectedCount = 0
+  yield* Effect.logInfo('Lark Mail ingestion started', { window: input.window })
+  return yield* Effect.gen(function* () {
+    const session = yield* openIngestSession(input.integrationDirectory)
+    // Lark Mail rejects RFC 3339 fractional seconds, so expand to exact whole-second bounds and filter details below.
+    const start = new Date(Math.floor(input.window.start / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+    const end = new Date(Math.ceil(input.window.end / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+    const filter = JSON.stringify({ time_range: { start_time: start, end_time: end } })
+    const ids = new Set<string>()
+    let mailboxId: string | undefined
+    let pageToken: string | undefined
+    do {
+      stage = 'list-summaries'
+      const args = ['mail', '+triage', '--as', 'user', '--filter', filter, '--max', '400', '--format', 'json']
+      if (pageToken) args.push('--page-token', pageToken)
+      const summary = envelope(yield* command(session, args))
+      stage = 'decode-summaries'
+      const page = yield* Schema.decodeUnknownEffect(MailTriageResponse)(summary).pipe(
+        Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail summaries.' }))
+      )
+      if (mailboxId !== undefined && page.mailbox_id !== mailboxId) {
+        return yield* new IntegrationError({ message: 'Lark returned inconsistent mailboxes.' })
+      }
+      mailboxId = page.mailbox_id
+      for (const value of page.messages) ids.add(value.message_id)
+      selectedCount = ids.size
+      yield* Effect.logInfo('Lark Mail summaries received', { page: pages + 1, count: page.messages.length, hasMore: page.has_more })
+      stage = 'validate-pagination'
+      const nextPageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
+      if (page.has_more === true && !nextPageToken) return yield* new IntegrationError({ message: 'Lark mail pagination was incomplete.' })
+      pageToken = page.has_more === true ? nextPageToken : undefined
+      if (++pages > 1000) return yield* new IntegrationError({ message: 'Lark mail pagination exceeded its safe limit.' })
+    } while (pageToken)
+    if (!ids.size) return
+    const selectedMailbox = mailboxId ?? 'me'
+    stage = 'fetch-bodies'
+    const bodies = envelope(yield* command(session, [
+      'mail', '+messages', '--as', 'user', '--mailbox', selectedMailbox,
+      '--message-ids', [...ids].join(','), '--html=false', '--format', 'json'
+    ]))
+    stage = 'decode-bodies'
+    const result = yield* Schema.decodeUnknownEffect(MailMessagesResponse)(bodies).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail bodies.' })))
+    yield* Effect.logInfo('Lark Mail bodies received', { count: result.messages.length, total: result.total, unavailableCount: result.unavailable_message_ids.length })
+    stage = 'validate-bodies'
+    const returnedIds = new Set<string>()
+    for (const message of result.messages) {
+      if (returnedIds.has(message.message_id) || !ids.has(message.message_id)) {
+        return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
+      }
+      returnedIds.add(message.message_id)
     }
-    mailboxId = page.mailbox_id
-    for (const value of page.messages) ids.add(value.message_id)
-    const nextPageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
-    if (page.has_more === true && !nextPageToken) return yield* new IntegrationError({ message: 'Lark mail pagination was incomplete.' })
-    pageToken = page.has_more === true ? nextPageToken : undefined
-    if (++pages > 1000) return yield* new IntegrationError({ message: 'Lark mail pagination exceeded its safe limit.' })
-  } while (pageToken)
-  if (!ids.size) return
-  const selectedMailbox = mailboxId ?? 'me'
-  const result = yield* Schema.decodeUnknownEffect(MailMessagesResponse)(envelope(yield* command(session, [
-    'mail', '+messages', '--as', 'user', '--mailbox', selectedMailbox,
-    '--message-ids', [...ids].join(','), '--html=false', '--format', 'json'
-  ]))).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail bodies.' })))
-  const returnedIds = new Set<string>()
-  for (const message of result.messages) {
-    if (returnedIds.has(message.message_id) || !ids.has(message.message_id)) {
+    const unavailableIds = new Set(result.unavailable_message_ids)
+    if (result.total !== result.messages.length || unavailableIds.size !== result.unavailable_message_ids.length ||
+      result.unavailable_message_ids.some(messageId => !ids.has(messageId) || returnedIds.has(messageId))) {
       return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
     }
-    returnedIds.add(message.message_id)
-  }
-  const unavailableIds = new Set(result.unavailable_message_ids)
-  if (result.total !== result.messages.length || unavailableIds.size !== result.unavailable_message_ids.length ||
-    result.unavailable_message_ids.some(messageId => !ids.has(messageId) || returnedIds.has(messageId))) {
-    return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
-  }
-  if ([...ids].some(messageId => !returnedIds.has(messageId) && !unavailableIds.has(messageId))) {
-    return yield* new IntegrationError({ message: 'Lark returned incomplete mail bodies.' })
-  }
-  yield* joinedTryPromise({
-    try: async (signal) => {
-      await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
-      for (const message of result.messages) {
-        const receivedAt = parseTime(message.internal_date)
-        if (!Number.isFinite(receivedAt) || receivedAt < input.window.start || receivedAt >= input.window.end) continue
-        const sender = message.head_from ?? {}
-        const recipients = message.to?.map(value => `${value.name ?? ''} <${value.mail_address ?? ''}>`).join(', ') ?? ''
-        const content = [
-          '---', `source: "lark/email"`, `message_id: ${JSON.stringify(message.message_id)}`,
-          `thread_id: ${JSON.stringify(message.thread_id ?? null)}`, `received_at: ${JSON.stringify(new Date(receivedAt).toISOString())}`,
-          `time_zone: ${JSON.stringify(input.window.timeZone)}`, '---', '', `# ${oneLine(message.subject || '(no subject)')}`, '',
-          `- From: ${oneLine(sender.name)} <${oneLine(sender.mail_address)}>`, `- To: ${oneLine(recipients)}`,
-          `- Folder: ${oneLine(message.folder_id)}`, '', oneLine(message.body_plain_text || message.body_preview || '(empty body)'), ''
-        ].join('\n')
-        await writeFile(join(input.outputDirectory, `${safeId(message.message_id)}.md`), content, { mode: 0o600, signal })
-      }
-    },
-    catch: () => new IntegrationError({ message: 'Lark Mail ingestion could not write its raw projection.' })
-  })
+    if ([...ids].some(messageId => !returnedIds.has(messageId) && !unavailableIds.has(messageId))) {
+      return yield* new IntegrationError({ message: 'Lark returned incomplete mail bodies.' })
+    }
+    stage = 'write-raws'
+    yield* joinedTryPromise({
+      try: async (signal) => {
+        await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
+        for (const message of result.messages) {
+          const receivedAt = parseTime(message.internal_date)
+          if (!Number.isFinite(receivedAt) || receivedAt < input.window.start || receivedAt >= input.window.end) continue
+          const sender = message.head_from ?? {}
+          const recipients = message.to?.map(value => `${value.name ?? ''} <${value.mail_address ?? ''}>`).join(', ') ?? ''
+          const content = [
+            '---', `source: "lark/email"`, `message_id: ${JSON.stringify(message.message_id)}`,
+            `thread_id: ${JSON.stringify(message.thread_id ?? null)}`, `received_at: ${JSON.stringify(new Date(receivedAt).toISOString())}`,
+            `time_zone: ${JSON.stringify(input.window.timeZone)}`, '---', '', `# ${oneLine(message.subject || '(no subject)')}`, '',
+            `- From: ${oneLine(sender.name)} <${oneLine(sender.mail_address)}>`, `- To: ${oneLine(recipients)}`,
+            `- Folder: ${oneLine(message.folder_id)}`, '', oneLine(message.body_plain_text || message.body_preview || '(empty body)'), ''
+          ].join('\n')
+          await writeFile(join(input.outputDirectory, `${safeId(message.message_id)}.md`), content, { mode: 0o600, signal })
+        }
+      },
+      catch: () => new IntegrationError({ message: 'Lark Mail ingestion could not write its raw projection.' })
+    })
+  }).pipe(
+    Effect.tap(() => Effect.logInfo('Lark Mail ingestion completed', { pages, selectedCount })),
+    Effect.tapError(error => Effect.logError('Lark Mail ingestion failed', {
+      stage, pages, selectedCount, window: input.window,
+      reason: error instanceof IntegrationError ? error.message : 'Provider operation failed'
+    }))
+  )
 }, Effect.mapError(error => error instanceof IntegrationError ? error
   : new IntegrationError({ message: 'Lark Mail ingestion failed. Check authorization and retry the same window.' })))

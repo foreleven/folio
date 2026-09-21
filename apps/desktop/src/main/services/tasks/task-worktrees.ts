@@ -302,9 +302,28 @@ export class TaskWorktrees extends Context.Service<
         const reopen = (taskId: string) => lock.withLock(reopenLocked(taskId))
         const resetIngestion = (taskId: string, namespace: string) => lock.withLock(Effect.gen(function* () {
           if (!/^raws\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+\/\d{4}-\d{2}-\d{2}$/.test(namespace)) return yield* invalid()
-          const checkout = yield* ensureLocked(taskId)
           const task = yield* store.task(taskId)
-          if (task.type !== 'ingestion' || task.worktreeBase !== checkout.baselineCommit) return yield* invalid()
+          if (task.type !== 'ingestion') return yield* invalid()
+          if (task.worktreeState === 'pending' && task.worktreeBase === null) {
+            const checkout = yield* ensureLocked(taskId)
+            if (checkout.baselineCommit !== (yield* store.task(taskId)).worktreeBase) return yield* invalid()
+            return checkout
+          }
+          const base = yield* Schema.decodeUnknownEffect(Commit)(task.worktreeBase).pipe(Effect.mapError(invalid))
+          const marker = yield* fs.readFileString(join(main, '.git', 'folio-workspace.json')).pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({ version: Schema.Literal(1), initialCommit: Commit }))))
+          )
+          const mainHead = (yield* git(main, ['rev-parse', 'refs/heads/main'])).trim()
+          if (
+            !(yield* isRegisteredGitCommit('main', mainHead, marker.initialCommit).pipe(Effect.provideService(SqlClient.SqlClient, sql))) ||
+            (yield* git(main, ['merge-base', base, mainHead])).trim() !== base
+          )
+            return yield* invalid()
+          // A failed window remains frozen at its original Task baseline while unrelated
+          // successful Tasks may advance registered main. Synchronization will merge the
+          // retried raw commit into that newer main after provider ingestion succeeds.
+          const checkout = yield* ensureLocked(taskId, { taskHead: base, mainHead })
+          if (checkout.baselineCommit !== base) return yield* invalid()
           // This checkout is never exposed to an Agent or editor. Resetting its frozen
           // baseline is therefore the retry contract, not a user-file recovery action.
           yield* git(checkout.path, ['reset', '--hard', checkout.baselineCommit])

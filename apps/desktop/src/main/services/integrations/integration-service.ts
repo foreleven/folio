@@ -259,22 +259,35 @@ export class IntegrationService extends Context.Service<IntegrationService, {
       outputDirectory: string,
       window: IngestWindow
     ) {
-      if (!isAbsolute(outputDirectory) || !Number.isFinite(window.start) || !Number.isFinite(window.end) || window.end <= window.start) {
-        return yield* new IntegrationSettingsError({ message: 'The ingestion request is invalid.' })
-      }
-      const integration = catalog.find(item => item.id === integrationId)
-      const implementation = integration?.resources.find(item => item.id === resourceId)
-      let installed = (yield* store.list).find(item => item.id === integrationId)
-      if (!integration || !implementation || !installed?.resources.some(item => item.id === resourceId)) return yield* failure()
-      for (let attempt = 0; running.has(integrationId) && attempt < 300; attempt++) yield* Effect.sleep(100)
-      installed = (yield* store.list).find(item => item.id === integrationId)
-      if (!installed || integration.states[installed.state]?.kind !== 'ready') return yield* failure()
-      yield* withContext(integrationId, integration.check())
-      yield* withContext(integrationId, implementation.ingest({
-        integrationDirectory: join(config.directory, 'integrations', integrationId),
-        outputDirectory,
-        window
-      }))
+      let stage = 'validate-request'
+      let state: string | undefined
+      return yield* Effect.gen(function* () {
+        if (!isAbsolute(outputDirectory) || !Number.isFinite(window.start) || !Number.isFinite(window.end) || window.end <= window.start) {
+          return yield* new IntegrationSettingsError({ message: 'The ingestion request is invalid.' })
+        }
+        const integration = catalog.find(item => item.id === integrationId)
+        const implementation = integration?.resources.find(item => item.id === resourceId)
+        stage = 'lookup-resource'
+        let installed = (yield* store.list).find(item => item.id === integrationId)
+        if (!integration || !implementation || !installed?.resources.some(item => item.id === resourceId)) return yield* failure()
+        for (let attempt = 0; running.has(integrationId) && attempt < 300; attempt++) yield* Effect.sleep(100)
+        installed = (yield* store.list).find(item => item.id === integrationId)
+        stage = 'check-ready'
+        state = installed?.state
+        if (!installed || integration.states[installed.state]?.kind !== 'ready') return yield* failure()
+        stage = 'check-provider'
+        yield* withContext(integrationId, integration.check())
+        stage = 'ingest-provider'
+        yield* withContext(integrationId, implementation.ingest({
+          integrationDirectory: join(config.directory, 'integrations', integrationId),
+          outputDirectory,
+          window
+        }))
+      }).pipe(Effect.tapError(error => Effect.logError('Integration ingestion failed', {
+        integration: integrationId, resource: resourceId, stage, state, window,
+        reason: error instanceof IntegrationError || error instanceof IntegrationSettingsError
+          ? error.message : 'Integration operation failed'
+      })))
     }, commands.withPermit, Effect.mapError(failure))
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
