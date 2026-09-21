@@ -37,7 +37,7 @@ vi.mock('imapflow', () => ({
 
 import { ingestGmail } from '../src/gmail/ingest.ts'
 import { ingestImap } from '../src/imap/ingest.ts'
-import { ingestLarkIm } from '../src/lark/ingest.ts'
+import { ingestLarkEmail, ingestLarkIm } from '../src/lark/ingest.ts'
 
 let root: string
 beforeEach(async () => {
@@ -57,6 +57,17 @@ afterEach(async () => {
 })
 
 const window = { start: Date.parse('2026-09-21T00:00:00.000Z'), end: Date.parse('2026-09-21T01:00:00.000Z'), timeZone: 'Asia/Shanghai' }
+
+const prepareLarkIntegration = async (name: string): Promise<string> => {
+  const directory = join(root, name)
+  await mkdir(directory, { recursive: true })
+  await writeFile(join(directory, 'private.json'), JSON.stringify({
+    version: 1, installed: true,
+    app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
+    userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
+  }))
+  return directory
+}
 
 describe('provider-hosted ingestion', () => {
   it('writes only Gmail messages inside the exact half-open window', async () => {
@@ -80,13 +91,7 @@ describe('provider-hosted ingestion', () => {
   })
 
   it('normalizes Lark epoch seconds and writes frontmatter plus one compact line per message', async () => {
-    const integrationDirectory = join(root, 'lark')
-    await mkdir(integrationDirectory, { recursive: true })
-    await writeFile(join(integrationDirectory, 'private.json'), JSON.stringify({
-      version: 1, installed: true,
-      app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
-      userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
-    }))
+    const integrationDirectory = await prepareLarkIntegration('lark')
     mocks.runCli.mockImplementation((_directory, args) => Effect.succeed(JSON.stringify(args[1] === 'chat.user_setting'
       ? { data: { items: [{ chat_id: 'oc_1', is_muted: false }] } }
       : { data: { messages: [{
@@ -103,13 +108,7 @@ describe('provider-hosted ingestion', () => {
   })
 
   it('excludes muted Lark chats and removes their existing daily projection', async () => {
-    const integrationDirectory = join(root, 'lark-muted')
-    await mkdir(integrationDirectory, { recursive: true })
-    await writeFile(join(integrationDirectory, 'private.json'), JSON.stringify({
-      version: 1, installed: true,
-      app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
-      userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
-    }))
+    const integrationDirectory = await prepareLarkIntegration('lark-muted')
     mocks.runCli.mockImplementation((_directory, args) => Effect.succeed(JSON.stringify(args[1] === 'chat.user_setting'
       ? { data: { items: [{ chat_id: 'oc_muted', is_muted: true }, { chat_id: 'oc_visible', is_muted: false }] } }
       : { data: { messages: [
@@ -129,13 +128,7 @@ describe('provider-hosted ingestion', () => {
   })
 
   it('batches Lark mute lookups and fails closed when any chat status is missing', async () => {
-    const integrationDirectory = join(root, 'lark-incomplete-mute')
-    await mkdir(integrationDirectory, { recursive: true })
-    await writeFile(join(integrationDirectory, 'private.json'), JSON.stringify({
-      version: 1, installed: true,
-      app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
-      userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
-    }))
+    const integrationDirectory = await prepareLarkIntegration('lark-incomplete-mute')
     const chats = Array.from({ length: 11 }, (_, index) => `oc_${String(index).padStart(2, '0')}`)
     const batchSizes: number[] = []
     mocks.runCli.mockImplementation((_directory, args) => {
@@ -156,6 +149,97 @@ describe('provider-hosted ingestion', () => {
 
     expect(error).toMatchObject({ _tag: 'IntegrationError', message: 'Lark returned incomplete mute status.' })
     expect(batchSizes.sort((left, right) => left - right)).toEqual([1, 10])
+  })
+
+  it('paginates Lark mail summaries and fetches their bodies in one batch', async () => {
+    const integrationDirectory = await prepareLarkIntegration('lark-mail')
+    const commands: string[][] = []
+    mocks.runCli.mockImplementation((_directory, args: readonly string[]) => {
+      commands.push([...args])
+      if (args[1] === '+triage') {
+        const nextPage = args.includes('--page-token')
+        return Effect.succeed(JSON.stringify({ ok: true, data: {
+          messages: [{ message_id: nextPage ? 'om_mail_2' : 'om_mail_1' }],
+          mailbox_id: 'shared@example.com', has_more: !nextPage,
+          page_token: nextPage ? '' : 'search:next'
+        } }))
+      }
+      return Effect.succeed(JSON.stringify({ ok: true, data: {
+        messages: [
+          { message_id: 'om_mail_1', thread_id: 'thread_1', subject: 'First',
+            internal_date: String(window.start + 10_000), folder_id: 'INBOX',
+            head_from: { name: 'Alice', mail_address: 'alice@example.com' },
+            to: [{ name: 'Feng', mail_address: 'feng@example.com' }], body_plain_text: 'First body' },
+          { message_id: 'om_mail_2', thread_id: 'thread_2', subject: 'Second',
+            internal_date: String(window.start + 20_000), folder_id: 'INBOX',
+            head_from: { name: 'Bob', mail_address: 'bob@example.com' },
+            to: [{ name: 'Feng', mail_address: 'feng@example.com' }], body_plain_text: 'Second body' }
+        ], total: 2, unavailable_message_ids: []
+      } }))
+    })
+
+    const outputDirectory = join(root, 'lark-mail-output')
+    await Effect.runPromise(ingestLarkEmail({ integrationDirectory, outputDirectory, window }).pipe(Effect.provide(NodeServices.layer)))
+
+    expect(await readdir(outputDirectory)).toEqual(['om_mail_1.md', 'om_mail_2.md'])
+    expect(await readFile(join(outputDirectory, 'om_mail_1.md'), 'utf8')).toContain('First body')
+    const triage = commands.filter(args => args[1] === '+triage')
+    expect(triage).toHaveLength(2)
+    expect(triage[0]).toEqual(expect.arrayContaining(['--as', 'user', '--max', '400']))
+    expect(triage[0]).not.toContain('--page-size')
+    expect(JSON.parse(triage[0]![triage[0]!.indexOf('--filter') + 1]!)).toEqual({
+      time_range: { start_time: '2026-09-21T00:00:00.000Z', end_time: '2026-09-21T01:00:00.000Z' }
+    })
+    expect(triage[1]).toEqual(expect.arrayContaining(['--page-token', 'search:next']))
+    const bodies = commands.filter(args => args[1] === '+messages')
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toEqual(expect.arrayContaining([
+      '--as', 'user', '--mailbox', 'shared@example.com', '--message-ids', 'om_mail_1,om_mail_2', '--html=false'
+    ]))
+  })
+
+  it('fails closed when Lark mail pagination is incomplete', async () => {
+    const integrationDirectory = await prepareLarkIntegration('lark-mail-incomplete')
+    mocks.runCli.mockReturnValue(Effect.succeed(JSON.stringify({ ok: true, data: {
+      messages: [], mailbox_id: 'me', has_more: true, page_token: ''
+    } })))
+
+    const error = await Effect.runPromise(ingestLarkEmail({
+      integrationDirectory, outputDirectory: join(root, 'lark-mail-incomplete-output'), window
+    }).pipe(Effect.flip, Effect.provide(NodeServices.layer)))
+
+    expect(error).toMatchObject({ _tag: 'IntegrationError', message: 'Lark mail pagination was incomplete.' })
+  })
+
+  it('fails closed when Lark omits an unaccounted mail body', async () => {
+    const integrationDirectory = await prepareLarkIntegration('lark-mail-missing-body')
+    mocks.runCli.mockImplementation((_directory, args: readonly string[]) => Effect.succeed(JSON.stringify(args[1] === '+triage'
+      ? { ok: true, data: { messages: [{ message_id: 'om_mail_1' }, { message_id: 'om_mail_2' }],
+        mailbox_id: 'me', has_more: false, page_token: '' } }
+      : { ok: true, data: { messages: [{ message_id: 'om_mail_1', subject: 'First',
+        internal_date: String(window.start + 10_000), body_plain_text: 'First body' }],
+      total: 1, unavailable_message_ids: [] } })))
+
+    const error = await Effect.runPromise(ingestLarkEmail({
+      integrationDirectory, outputDirectory: join(root, 'lark-mail-missing-body-output'), window
+    }).pipe(Effect.flip, Effect.provide(NodeServices.layer)))
+
+    expect(error).toMatchObject({ _tag: 'IntegrationError', message: 'Lark returned incomplete mail bodies.' })
+  })
+
+  it('accepts Lark mail bodies that are explicitly unavailable', async () => {
+    const integrationDirectory = await prepareLarkIntegration('lark-mail-unavailable-body')
+    mocks.runCli.mockImplementation((_directory, args: readonly string[]) => Effect.succeed(JSON.stringify(args[1] === '+triage'
+      ? { ok: true, data: { messages: [{ message_id: 'om_mail_1' }, { message_id: 'om_mail_unavailable' }],
+        mailbox_id: 'me', has_more: false, page_token: '' } }
+      : { ok: true, data: { messages: [{ message_id: 'om_mail_1', subject: 'Available',
+        internal_date: String(window.start + 10_000), body_plain_text: 'Available body' }],
+      total: 1, unavailable_message_ids: ['om_mail_unavailable'] } })))
+
+    const outputDirectory = join(root, 'lark-mail-unavailable-body-output')
+    await Effect.runPromise(ingestLarkEmail({ integrationDirectory, outputDirectory, window }).pipe(Effect.provide(NodeServices.layer)))
+
+    expect(await readdir(outputDirectory)).toEqual(['om_mail_1.md'])
   })
 
   it('writes stable IMAP projections directly and always closes the client', async () => {

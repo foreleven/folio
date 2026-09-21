@@ -64,6 +64,33 @@ const MuteStatusResponse = Schema.Struct({
   items: Schema.Array(Schema.Struct({ chat_id: Schema.NonEmptyString, is_muted: Schema.Boolean }))
 })
 
+const MailTriageResponse = Schema.Struct({
+  messages: Schema.Array(Schema.Struct({ message_id: Schema.NonEmptyString })),
+  mailbox_id: Schema.NonEmptyString,
+  has_more: Schema.Boolean,
+  page_token: Schema.optional(Schema.String)
+})
+const MailAddress = Schema.Struct({
+  name: Schema.optional(Schema.String),
+  mail_address: Schema.optional(Schema.String)
+})
+const MailMessage = Schema.Struct({
+  message_id: Schema.NonEmptyString,
+  thread_id: Schema.optional(Schema.Unknown),
+  subject: Schema.optional(Schema.Unknown),
+  internal_date: Schema.Union([Schema.String, Schema.Number]),
+  folder_id: Schema.optional(Schema.Unknown),
+  head_from: Schema.optional(MailAddress),
+  to: Schema.optional(Schema.Array(MailAddress)),
+  body_plain_text: Schema.optional(Schema.Unknown),
+  body_preview: Schema.optional(Schema.Unknown)
+})
+const MailMessagesResponse = Schema.Struct({
+  messages: Schema.Array(MailMessage),
+  total: Schema.Int,
+  unavailable_message_ids: Schema.Array(Schema.NonEmptyString)
+})
+
 /** Message search ignores per-user notification settings, so muted chats must be filtered explicitly. */
 const readMutedChatIds = Effect.fn('Lark.readMutedChatIds')(function* (session: IngestSession, chatIds: readonly string[]) {
   const batches: string[][] = []
@@ -182,29 +209,54 @@ export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: I
   const session = yield* openIngestSession(input.integrationDirectory)
   const filter = JSON.stringify({ time_range: { start_time: new Date(input.window.start).toISOString(), end_time: new Date(input.window.end).toISOString() } })
   const ids = new Set<string>()
+  let mailboxId: string | undefined
   let pageToken: string | undefined
+  let pages = 0
   do {
-    const args = ['mail', '+triage', '--query', '', '--filter', filter, '--page-size', '50', '--format', 'json']
+    const args = ['mail', '+triage', '--as', 'user', '--filter', filter, '--max', '400', '--format', 'json']
     if (pageToken) args.push('--page-token', pageToken)
-    const page = object(yield* command(session, args), 'mail triage')
-    const values = Array.isArray(page.messages) ? page.messages : Array.isArray(page.items) ? page.items : []
-    for (const value of values) if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).message_id === 'string') ids.add(String((value as Record<string, unknown>).message_id))
-    pageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
+    const page = yield* Schema.decodeUnknownEffect(MailTriageResponse)(envelope(yield* command(session, args))).pipe(
+      Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail summaries.' }))
+    )
+    if (mailboxId !== undefined && page.mailbox_id !== mailboxId) {
+      return yield* new IntegrationError({ message: 'Lark returned inconsistent mailboxes.' })
+    }
+    mailboxId = page.mailbox_id
+    for (const value of page.messages) ids.add(value.message_id)
+    const nextPageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
+    if (page.has_more === true && !nextPageToken) return yield* new IntegrationError({ message: 'Lark mail pagination was incomplete.' })
+    pageToken = page.has_more === true ? nextPageToken : undefined
+    if (++pages > 1000) return yield* new IntegrationError({ message: 'Lark mail pagination exceeded its safe limit.' })
   } while (pageToken)
   if (!ids.size) return
-  const result = object(yield* command(session, ['mail', '+messages', '--message-ids', [...ids].join(','), '--html=false', '--format', 'json']), 'mail messages')
+  const selectedMailbox = mailboxId ?? 'me'
+  const result = yield* Schema.decodeUnknownEffect(MailMessagesResponse)(envelope(yield* command(session, [
+    'mail', '+messages', '--as', 'user', '--mailbox', selectedMailbox,
+    '--message-ids', [...ids].join(','), '--html=false', '--format', 'json'
+  ]))).pipe(Effect.mapError(() => new IntegrationError({ message: 'Lark returned invalid mail bodies.' })))
+  const returnedIds = new Set<string>()
+  for (const message of result.messages) {
+    if (returnedIds.has(message.message_id) || !ids.has(message.message_id)) {
+      return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
+    }
+    returnedIds.add(message.message_id)
+  }
+  const unavailableIds = new Set(result.unavailable_message_ids)
+  if (result.total !== result.messages.length || unavailableIds.size !== result.unavailable_message_ids.length ||
+    result.unavailable_message_ids.some(messageId => !ids.has(messageId) || returnedIds.has(messageId))) {
+    return yield* new IntegrationError({ message: 'Lark returned invalid mail bodies.' })
+  }
+  if ([...ids].some(messageId => !returnedIds.has(messageId) && !unavailableIds.has(messageId))) {
+    return yield* new IntegrationError({ message: 'Lark returned incomplete mail bodies.' })
+  }
   yield* joinedTryPromise({
     try: async (signal) => {
       await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
-      for (const raw of rows(result, 'messages')) {
-        if (!raw || typeof raw !== 'object') continue
-        const message = raw as Record<string, unknown>
-        if (typeof message.message_id !== 'string') continue
+      for (const message of result.messages) {
         const receivedAt = parseTime(message.internal_date)
         if (!Number.isFinite(receivedAt) || receivedAt < input.window.start || receivedAt >= input.window.end) continue
-        const sender = message.head_from && typeof message.head_from === 'object' ? message.head_from as Record<string, unknown> : {}
-        const recipients = Array.isArray(message.to) ? message.to.map(value => value && typeof value === 'object'
-          ? `${(value as Record<string, unknown>).name ?? ''} <${(value as Record<string, unknown>).mail_address ?? ''}>` : '').join(', ') : ''
+        const sender = message.head_from ?? {}
+        const recipients = message.to?.map(value => `${value.name ?? ''} <${value.mail_address ?? ''}>`).join(', ') ?? ''
         const content = [
           '---', `source: "lark/email"`, `message_id: ${JSON.stringify(message.message_id)}`,
           `thread_id: ${JSON.stringify(message.thread_id ?? null)}`, `received_at: ${JSON.stringify(new Date(receivedAt).toISOString())}`,
