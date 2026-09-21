@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   gmailCredentials: vi.fn(),
+  openCli: vi.fn(),
   runCli: vi.fn(),
   imapClose: vi.fn(),
   imapLogout: vi.fn()
@@ -18,6 +19,7 @@ vi.mock('../src/gmail/oauth.ts', async importOriginal => ({
 }))
 vi.mock('../src/lark/cli.ts', async importOriginal => ({
   ...await importOriginal<typeof import('../src/lark/cli.ts')>(),
+  openCli: mocks.openCli,
   runCli: mocks.runCli
 }))
 vi.mock('imapflow', () => ({
@@ -41,6 +43,10 @@ let root: string
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'folio-provider-ingestion-'))
   mocks.gmailCredentials.mockReset().mockReturnValue(Effect.succeed({ accessToken: 'access-token' }))
+  mocks.openCli.mockReset().mockImplementation(directory => Effect.succeed({
+    run: (args: readonly string[], token: string, environment?: Readonly<Record<string, string>>) =>
+      mocks.runCli(directory, args, token, environment)
+  }))
   mocks.runCli.mockReset()
   mocks.imapClose.mockReset()
   mocks.imapLogout.mockReset().mockResolvedValue(undefined)

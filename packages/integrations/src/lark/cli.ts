@@ -89,11 +89,14 @@ Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSp
 /** Executes only the Folio-managed CLI and injects the short-lived user token via its environment. */
 export const LARK_USER_ACCESS_TOKEN_ENV = 'LARKSUITE_CLI_USER_ACCESS_TOKEN' as const
 
-export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string,
+export interface LarkCli {
+  readonly run: (args: readonly string[], userToken: string, environment?: Readonly<Record<string, string>>) =>
+    Effect.Effect<string, IntegrationError, ChildProcessSpawner.ChildProcessSpawner>
+}
+
+const runVerifiedCli = Effect.fn('Lark.runCli')(function*(executable: string, args: readonly string[], userToken: string,
   environment: Readonly<Record<string, string>> = {}) {
   yield* Effect.logDebug('Lark CLI command started').pipe(Effect.annotateLogs({ argumentCount: args.length }))
-  const executable = yield* findCli(directory)
-  if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const command = ChildProcess.make(executable, [...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', extendEnv: true }).pipe(
     ChildProcess.setEnv({ ...environment, [LARK_USER_ACCESS_TOKEN_ENV]: userToken })
@@ -105,3 +108,20 @@ export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args
   return output
 }, Effect.tapError(() => Effect.logWarning('Lark CLI command failed')),
 Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSpan('lark.runCli'))
+
+/** Opens one verified CLI runner for a complete Integration operation. */
+export const openCli = Effect.fn('Lark.openCli')(function*(directory: string) {
+  const executable = yield* findCli(directory)
+  if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
+  const cli: LarkCli = {
+    run: (args, userToken, environment) => runVerifiedCli(executable, args, userToken, environment)
+  }
+  return cli
+}, Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }))
+
+/** Convenience wrapper for callers that execute only one command. */
+export const runCli = Effect.fn('Lark.runCliOnce')(function*(directory: string, args: readonly string[], userToken: string,
+  environment: Readonly<Record<string, string>> = {}) {
+  const cli = yield* openCli(directory)
+  return yield* cli.run(args, userToken, environment)
+})

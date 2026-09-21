@@ -2,7 +2,7 @@ import { Effect, Schema } from 'effect'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { IntegrationError, joinedTryPromise, type IngestInput } from '../base/index.ts'
-import { runCli } from './cli.ts'
+import { openCli, type LarkCli } from './cli.ts'
 import { readPrivateState } from './state.ts'
 
 const envelope = (value: unknown): unknown => value && typeof value === 'object' && 'data' in value ? (value as { data: unknown }).data : value
@@ -40,9 +40,20 @@ const credentials = Effect.fn('Lark.ingestCredentials')(function* (directory: st
   }
 })
 
-const command = (input: IngestInput, args: readonly string[]) => Effect.gen(function* () {
-  const auth = yield* credentials(input.integrationDirectory)
-  const text = yield* runCli(input.integrationDirectory, args, auth.token, auth.environment)
+interface IngestSession {
+  readonly auth: { readonly token: string, readonly environment: Readonly<Record<string, string>> }
+  readonly cli: LarkCli
+}
+
+/** Resolves credentials and verifies the CLI once for every provider ingestion operation. */
+const openIngestSession = Effect.fn('Lark.openIngestSession')(function*(directory: string) {
+  const auth = yield* credentials(directory)
+  const cli = yield* openCli(directory)
+  return { auth, cli }
+})
+
+const command = (session: IngestSession, args: readonly string[]) => Effect.gen(function* () {
+  const text = yield* session.cli.run(args, session.auth.token, session.auth.environment)
   return yield* Effect.try({
     try: () => JSON.parse(text) as unknown,
     catch: () => new IntegrationError({ message: 'The managed lark-cli returned invalid data.' })
@@ -54,10 +65,10 @@ const MuteStatusResponse = Schema.Struct({
 })
 
 /** Message search ignores per-user notification settings, so muted chats must be filtered explicitly. */
-const readMutedChatIds = Effect.fn('Lark.readMutedChatIds')(function* (input: IngestInput, chatIds: readonly string[]) {
+const readMutedChatIds = Effect.fn('Lark.readMutedChatIds')(function* (session: IngestSession, chatIds: readonly string[]) {
   const batches: string[][] = []
   for (let index = 0; index < chatIds.length; index += 10) batches.push(chatIds.slice(index, index + 10))
-  const responses = yield* Effect.forEach(batches, batch => command(input, [
+  const responses = yield* Effect.forEach(batches, batch => command(session, [
     'im', 'chat.user_setting', 'batch_query', '--as', 'user',
     '--data', JSON.stringify({ chat_ids: batch }), '--format', 'json'
   ]).pipe(
@@ -92,6 +103,7 @@ const formatZoned = (epoch: number, timeZone: string): string => {
 
 /** Writes one file per chat with frontmatter and compact one-line messages. */
 export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestInput) {
+  const session = yield* openIngestSession(input.integrationDirectory)
   const start = new Date(Math.floor(input.window.start / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const end = new Date(Math.ceil(input.window.end / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const messages: Array<Record<string, unknown>> = []
@@ -101,7 +113,7 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
     const args = ['im', '+messages-search', '--as', 'user', '--query', '', '--start', start, '--end', end,
       '--page-size', '50', '--format', 'json', '--no-reactions']
     if (pageToken) args.push('--page-token', pageToken)
-    const page = object(yield* command(input, args), 'messages')
+    const page = object(yield* command(session, args), 'messages')
     for (const row of rows(page, 'messages')) {
       if (!row || typeof row !== 'object') throw new IntegrationError({ message: 'Lark returned an invalid message.' })
       const message = row as Record<string, unknown>
@@ -121,7 +133,7 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
     group.push(message)
     grouped.set(message.chat_id, group)
   }
-  const mutedChatIds = yield* readMutedChatIds(input, [...grouped.keys()])
+  const mutedChatIds = yield* readMutedChatIds(session, [...grouped.keys()])
   yield* joinedTryPromise({
     try: async (signal) => {
       await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
@@ -167,19 +179,20 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
 
 /** Uses Lark Mail triage for the exact window, then writes stable message projections. */
 export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: IngestInput) {
+  const session = yield* openIngestSession(input.integrationDirectory)
   const filter = JSON.stringify({ time_range: { start_time: new Date(input.window.start).toISOString(), end_time: new Date(input.window.end).toISOString() } })
   const ids = new Set<string>()
   let pageToken: string | undefined
   do {
     const args = ['mail', '+triage', '--query', '', '--filter', filter, '--page-size', '50', '--format', 'json']
     if (pageToken) args.push('--page-token', pageToken)
-    const page = object(yield* command(input, args), 'mail triage')
+    const page = object(yield* command(session, args), 'mail triage')
     const values = Array.isArray(page.messages) ? page.messages : Array.isArray(page.items) ? page.items : []
     for (const value of values) if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).message_id === 'string') ids.add(String((value as Record<string, unknown>).message_id))
     pageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
   } while (pageToken)
   if (!ids.size) return
-  const result = object(yield* command(input, ['mail', '+messages', '--message-ids', [...ids].join(','), '--html=false', '--format', 'json']), 'mail messages')
+  const result = object(yield* command(session, ['mail', '+messages', '--message-ids', [...ids].join(','), '--html=false', '--format', 'json']), 'mail messages')
   yield* joinedTryPromise({
     try: async (signal) => {
       await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
