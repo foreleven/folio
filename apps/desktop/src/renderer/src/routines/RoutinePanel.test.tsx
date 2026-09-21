@@ -42,6 +42,7 @@ afterEach(() => {
 describe('Routine details', () => {
   it('refreshes background execution results and releases the timer on unmount', () => {
     vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
     mocks.routines = [{ id: 'imap', name: 'IMAP', prompt: 'Review mail', agent: 'codex', model: null,
       skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 1440, timeZone: 'UTC',
       enabled: true, revision: 1, nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
@@ -70,6 +71,8 @@ describe('Routine details', () => {
   })
 
   it('shows a stop action for an active Agent execution', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
     mocks.routines = [{ id: 'imap', name: 'IMAP', prompt: 'Review mail', agent: 'codex', model: null,
       skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'UTC', enabled: true, revision: 1,
       nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
