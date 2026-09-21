@@ -35,6 +35,8 @@ export const TaskRpcHandlersLive = TaskRpcs.toLayer(
       'tasks.startConflictResolution': (input) => Effect.flatMap(TaskService, (service) => service.startConflictResolution(input)),
       'tasks.inspectRun': ({ taskId, runId }) => Effect.flatMap(TaskService, (service) => service.inspectRun(taskId, runId)),
       'tasks.cancelRun': ({ taskId, runId }) => Effect.flatMap(TaskService, (service) => service.cancelRun(taskId, runId)),
+      'tasks.cancelIngestion': ({ taskId }) => Effect.flatMap(TaskService, service => service.cancelIngestion(taskId)),
+      'tasks.retryIngestion': ({ taskId }) => Effect.flatMap(TaskService, service => service.retryIngestion(taskId)),
       'tasks.get': ({ id }) => Effect.flatMap(TaskService, (service) => service.get(id)),
       'tasks.openSession': (input) => Effect.flatMap(TaskService, (service) => service.openSession(input)),
       'tasks.closeSession': ({ taskId, sessionId }) => Effect.flatMap(TaskService, (service) => service.closeSession(taskId, sessionId))

@@ -119,6 +119,15 @@ export const SaveTaskWikiFiles = Schema.Struct({
 })
 export type SaveTaskWikiFiles = typeof SaveTaskWikiFiles.Type
 
+/** Host-owned Ingestion save; TaskService additionally checks the exact dated resource namespace. */
+export const SaveTaskRawFiles = Schema.Struct({
+  id: SaveGitFiles.fields.id,
+  taskId: Identity,
+  expectedParent: GitObjectId,
+  paths: Schema.NonEmptyArray(GitSelectedPath.check(Schema.makeFilter((value) => value.startsWith('raws/'))))
+})
+export type SaveTaskRawFiles = typeof SaveTaskRawFiles.Type
+
 /** Explicit user acceptance of selected wiki output attributed to one or more successful Runs. */
 export const SaveRunWikiFiles = Schema.Struct({
   ...SaveTaskWikiFiles.fields,

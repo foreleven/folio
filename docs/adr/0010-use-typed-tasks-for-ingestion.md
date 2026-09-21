@@ -1,0 +1,9 @@
+# Use typed Tasks for Ingestion and Agent work
+
+Folio keeps one `tasks` identity and worktree lifecycle for both Agent and Ingestion work, discriminated by an explicit Task type. Agent Tasks own Session/Run execution, while Ingestion Tasks are executed directly by the host and cannot own Sessions or Runs; type-specific immutable inputs, including the Agent goal, live in a discriminated configuration. This reuses the existing Routine window and Git-worktree ownership model without pretending that Ingestion invoked an Agent, and new Vaults use the final schema without historical-data migration.
+
+Configuration contains only inputs frozen at Task creation. An Ingestion Task stores one schema-validated `receipt` JSON column with `state`, `attemptCount`, `cancelRequested`, `startedAt`, `endedAt`, `error`, `changeId`, and `observedHead`; Agent Tasks keep this column null and continue deriving execution state from Runs. A published change carries `changeId` only, a no-change success carries `observedHead` only, and a conflict links to its retained Git operation through `changeId`. Commit, tree, and conflict facts remain in the existing Git journal and synchronization tables rather than being copied into Task columns.
+
+The outer `tasks.type` column is the sole discriminator; configuration JSON does not repeat it. Application schemas decode the row as the corresponding `{ type, configuration }` union member.
+
+The outer Task lifecycle remains deliberately coarser than the receipt: pending, running, failed, interrupted, and conflicted Ingestion receipts keep `tasks.state` active; success, including no-change, completes the Task; only an acknowledged user stop cancels it. Manual retry reactivates the same cancelled Task, while a conflicted Task remains active until explicitly repaired.

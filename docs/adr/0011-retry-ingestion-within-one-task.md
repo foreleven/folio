@@ -1,0 +1,7 @@
+# Retry an Ingestion window within one Task
+
+An Ingestion Task identifies one frozen source window and is reused for ordinary retries and retained Git-conflict repair. Before rerunning an attempt that failed, was cancelled, or was interrupted before an Ingestion commit, the host restores the same worktree to the Task's frozen baseline; Task identity survives, but partial files never become implicit continuation state. Its current receipt stores attempt count and the latest outcome; creating another Task for the same window was rejected because it fragments one processing boundary and makes successful window advancement ambiguous, while provider-specific checkpoint recovery was rejected because it makes partial output correctness depend on every Integration. Detailed attempt-log storage is outside this refactor.
+
+The receipt is a current-attempt snapshot rather than an embedded ledger. Claiming a retry atomically increments `attemptCount`, sets running state and a fresh start time, and clears the previous terminal fields and stop intent; terminal handling then replaces the snapshot once with the latest outcome. The database does not embed an attempt-history array.
+
+One UI Retry action is phase-aware: failed, interrupted, and cancelled provider attempts reactivate the same Task, restore its baseline, and call the Integration again, while a conflicted Task retries publication of its retained commit without fetching the provider window again. Pending, running, and successful Tasks reject retry, and repeated requests are idempotent.

@@ -10,9 +10,10 @@ import { ensureCli, findCli, LARK_USER_ACCESS_TOKEN_ENV } from './cli.ts'
 import { larkMetadata } from './metadata.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { LarkPrivateState, migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
+import { ingestLarkEmail, ingestLarkIm } from './ingest.ts'
 /** Mounts only the capability selected for this Task resource. */
-const onIngest = (skill: 'folio-lark-im' | 'lark-mail') => (context: IngestContext) => Effect.gen(function* () {
-  const skills = skill === 'folio-lark-im' ? [skill] : ['lark-shared', skill]
+const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) => Effect.gen(function* () {
+  const skills = ['lark-shared', skill]
   for (const name of skills) {
     const entrypoint = join(context.integrationDirectory, 'skills', name, 'SKILL.md')
     if (!context.skills.includes(entrypoint)) context.skills.push(entrypoint)
@@ -48,8 +49,8 @@ const onIngest = (skill: 'folio-lark-im' | 'lark-mail') => (context: IngestConte
   })
 })
 const resources = [
-  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('folio-lark-im') },
-  { id: 'email', type: 'email' as const, name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest: onIngest('lark-mail') }
+  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('lark-im'), ingest: ingestLarkIm },
+  { id: 'email', type: 'email' as const, name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest: onIngest('lark-mail'), ingest: ingestLarkEmail }
 ] as const
 const actions = [
   { id: 'open_authorization', label: { en: 'Continue in browser', 'zh-CN': '前往授权' } },

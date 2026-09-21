@@ -126,7 +126,11 @@ export class GitChangeJournal extends Context.Service<
             if (task.state !== 'active' || task.worktreeState !== 'ready' || task.worktree !== path || task.branch !== branch) return yield* invalid()
             if ((yield* store.runs(value.taskId)).some((run) => run.state === 'preparing' || run.state === 'running')) return yield* invalid()
           }
-          if (value.kind === 'user' ? value.runIds.length !== 0 : value.taskId === null || value.runIds.length === 0) return yield* invalid()
+          // Raw projections are host-owned Task changes and therefore have no Agent Run
+          // provenance. Wiki changes require one or more successful Runs; user changes do not.
+          if (value.kind === 'user'
+            ? value.runIds.length !== 0
+            : value.taskId === null || (value.kind === 'wiki' ? value.runIds.length === 0 : value.runIds.length !== 0)) return yield* invalid()
           if (value.runIds.length !== 0) {
             const runs = yield* store.runs(value.taskId!)
             if (

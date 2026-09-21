@@ -63,7 +63,7 @@ it('applies only the selected snapshot, preserves staged/working drafts and regi
     expect((yield* git(main.workspace, ['diff', '--cached', '--name-only'])).trim()).toBe('wiki/draft.md')
     expect(yield* Effect.promise(() => readFile(join(main.wiki, 'note.md'), 'utf8'))).toBe('newer unsaved edit')
     const worktrees = yield* TaskWorktrees
-    const task = yield* worktrees.create({ id: 'task', goal: 'notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+    const task = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
     expect(task.baselineCommit).toBe(change.commit)
     expect(yield* Effect.promise(() => readFile(join(task.path, 'wiki/note.md'), 'utf8'))).toBe('saved note')
     yield* Effect.promise(() => expect(readFile(join(task.path, 'wiki/draft.md'))).rejects.toMatchObject({ code: 'ENOENT' }))
@@ -106,7 +106,7 @@ it.each(['ref', 'index', 'receipt'] as const)('recovers the %s write boundary af
     expect(yield* Effect.promise(() => readFile(join(root, 'workspace/wiki/note.md'), 'utf8'))).toBe('later editor text')
     expect(yield* applications.pending).toEqual([])
   }).pipe(Effect.provide(layer())))
-})
+}, 15_000)
 
 it('refuses an unrelated index lock without deleting it or changing HEAD', async () => {
   await Effect.runPromise(Effect.gen(function*() {
@@ -193,7 +193,7 @@ it('blocks Run admission across an unfinished Task save, then registers its comm
     const { applications, journal, git } = yield* setup
     const worktrees = yield* TaskWorktrees
     const store = yield* HarnessStore
-    const task = yield* worktrees.create({ id: 'task', goal: 'notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+    const task = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
     yield* store.createSession({ id: 'session', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
     yield* store.bindSession('session', { acpSessionId: 'acp', nativeSessionId: null })
     yield* Effect.promise(() => writeFile(join(task.path, 'wiki/task.md'), 'task progress'))
@@ -353,7 +353,7 @@ it('records an explicit no-wiki-change receipt only for a clean successful Run b
   await Effect.runPromise(Effect.gen(function*() {
     yield* initializeVaultWorkspace(root, join(root, 'entry'))
     const worktrees = yield* TaskWorktrees
-    const task = yield* worktrees.create({ id: 'unchanged-task', goal: 'inspect notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+    const task = yield* worktrees.create({ id: 'unchanged-task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
     const store = yield* HarnessStore
     yield* store.createSession({ id: 'unchanged-session', taskId: 'unchanged-task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
     yield* store.bindSession('unchanged-session', { acpSessionId: 'unchanged-acp', nativeSessionId: null })

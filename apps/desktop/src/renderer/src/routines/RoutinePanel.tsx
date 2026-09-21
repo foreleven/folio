@@ -34,7 +34,8 @@ function statusLabel(status: ExecutionStatus, chinese: boolean): string {
     succeeded: chinese ? '已完成' : 'Succeeded',
     failed: chinese ? '失败' : 'Failed',
     cancelled: chinese ? '已取消' : 'Cancelled',
-    interrupted: chinese ? '已中断' : 'Interrupted'
+    interrupted: chinese ? '已中断' : 'Interrupted',
+    conflict: chinese ? '存在冲突' : 'Conflict'
   }
   return labels[status]
 }
@@ -42,7 +43,7 @@ function statusLabel(status: ExecutionStatus, chinese: boolean): string {
 function statusVariant(status: ExecutionStatus): 'success' | 'progress' | 'destructive' | 'outline' {
   if (status === 'succeeded') return 'success'
   if (status === 'preparing' || status === 'running') return 'progress'
-  if (status === 'failed' || status === 'interrupted') return 'destructive'
+  if (status === 'failed' || status === 'interrupted' || status === 'conflict') return 'destructive'
   return 'outline'
 }
 
@@ -317,13 +318,15 @@ function RoutineCard({
           <div className="min-w-0">
             <h4 className="truncate text-ui font-semibold">{record.name}</h4>
             <p className="mt-0.5 truncate text-support text-muted-foreground">
-              {record.agent} · {record.intervalMinutes} min
+              {record.type === 'agent' ? record.configuration.agent : 'Ingestion'} · {record.intervalMinutes} min
             </p>
           </div>
         </div>
         <ArrowUpRightIcon className="size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" aria-hidden="true" />
       </div>
-      <p className="mt-4 line-clamp-2 min-h-9 whitespace-pre-wrap text-support text-muted-foreground">{record.prompt}</p>
+      <p className="mt-4 line-clamp-2 min-h-9 whitespace-pre-wrap text-support text-muted-foreground">{record.type === 'agent'
+        ? record.configuration.goal
+        : `${record.configuration.integrationId} / ${record.configuration.resourceId}`}</p>
       <div className="mt-auto flex items-end justify-between gap-3 border-t pt-3">
         <div className="min-w-0">
           <p className="text-support text-muted-foreground">{chinese ? '最近执行' : 'Last execution'}</p>
@@ -365,6 +368,8 @@ function RoutineDetail({
   const run = useAtomSet(TaskRpcClient.runRoutine, { mode: 'promise' })
   const prepare = useAtomSet(TaskRpcClient.prepareRoutine, { mode: 'promise' })
   const cancel = useAtomSet(TaskRpcClient.cancelRun, { mode: 'promise' })
+  const cancelIngestion = useAtomSet(TaskRpcClient.cancelIngestion, { mode: 'promise' })
+  const retryIngestion = useAtomSet(TaskRpcClient.retryIngestion, { mode: 'promise' })
   const [busy, setBusy] = useState(false)
   const stopInFlight = useRef(false)
   const [stopRequestedTaskId, setStoppingTaskId] = useState<string | null>(null)
@@ -406,23 +411,19 @@ function RoutineDetail({
     setBusy(true)
     setMessage('')
     try {
+      const schedule = {
+        id: record.id,
+        expectedRevision: record.revision,
+        name: record.name,
+        intervalMinutes: record.intervalMinutes,
+        timeZone: record.timeZone,
+        enabled: !record.enabled
+      }
+      const input = record.type === 'agent'
+        ? { ...schedule, type: 'agent' as const, configuration: record.configuration }
+        : { ...schedule, type: 'ingestion' as const, configuration: record.configuration }
       await save({
-        payload: {
-          input: {
-            id: record.id,
-            expectedRevision: record.revision,
-            name: record.name,
-            prompt: record.prompt,
-            agent: record.agent,
-            model: record.model,
-            skillIds: record.skillIds,
-            integrationIds: record.integrationIds,
-            resourceIds: record.resourceIds ?? [],
-            intervalMinutes: record.intervalMinutes,
-            timeZone: record.timeZone,
-            enabled: !record.enabled
-          }
-        }
+        payload: { input }
       })
       refresh()
     } catch {
@@ -433,19 +434,35 @@ function RoutineDetail({
   }
 
   async function stopExecution(execution: RoutineExecution): Promise<void> {
-    if (!execution.runId || execution.cancelRequested || stoppingTaskId !== null || stopInFlight.current) return
+    if ((execution.type === 'agent' && !execution.runId) || execution.cancelRequested || stoppingTaskId !== null || stopInFlight.current) return
     stopInFlight.current = true
     setStoppingTaskId(execution.taskId)
     setMessage('')
     try {
-      await cancel({ payload: { taskId: execution.taskId, runId: execution.runId } })
-      setMessage(chinese ? '已请求停止 Agent，正在等待退出。' : 'Stop requested. Waiting for the Agent to exit.')
+      if (execution.type === 'ingestion') await cancelIngestion({ payload: { taskId: execution.taskId } })
+      else await cancel({ payload: { taskId: execution.taskId, runId: execution.runId! } })
+      setMessage(chinese ? '已请求停止执行，正在等待退出。' : 'Stop requested. Waiting for execution to exit.')
       refresh()
     } catch {
       setMessage(chinese ? '停止请求未确认，请重试。' : 'The stop request was not confirmed. Retry.')
       setStoppingTaskId(null)
     } finally {
       stopInFlight.current = false
+    }
+  }
+
+  async function retryExecution(execution: RoutineExecution): Promise<void> {
+    if (execution.type !== 'ingestion' || busy) return
+    setBusy(true)
+    setMessage('')
+    try {
+      await retryIngestion({ payload: { taskId: execution.taskId } })
+      setMessage(chinese ? '已重新开始 Ingestion。' : 'Ingestion restarted.')
+      refresh()
+    } catch {
+      setMessage(chinese ? '重试请求未确认，请重试。' : 'The retry request was not confirmed. Retry.')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -470,9 +487,9 @@ function RoutineDetail({
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void toggle()}>
             {record.enabled ? (chinese ? '暂停' : 'Pause') : chinese ? '启用' : 'Enable'}
           </Button>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => void invoke('prepare')}>
+          {record.type === 'agent' ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void invoke('prepare')}>
             {chinese ? '准备任务' : 'Prepare task'}
-          </Button>
+          </Button> : null}
           <Button size="sm" disabled={busy || !record.enabled} onClick={() => void invoke('run')}>
             <PlayIcon aria-hidden="true" />
             {chinese ? '运行一次' : 'Run once'}
@@ -494,11 +511,13 @@ function RoutineDetail({
             </div>
             <DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
             <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.timeZone} />
-            <DetailItem label="Agent" value={record.agent} />
-            {record.model ? <DetailItem label={chinese ? '模型' : 'Model'} value={`${record.model.providerId} / ${record.model.modelId}`} /> : null}
+            {record.type === 'agent' ? <>
+              <DetailItem label="Agent" value={record.configuration.agent} />
+              {record.configuration.model ? <DetailItem label={chinese ? '模型' : 'Model'} value={`${record.configuration.model.providerId} / ${record.configuration.model.modelId}`} /> : null}
+            </> : <DetailItem label={chinese ? '数据源' : 'Source'} value={`${record.configuration.integrationId} / ${record.configuration.resourceId}`} />}
             <DetailItem label={chinese ? '下次检查' : 'Next check'} value={formatNextTrigger(record, chinese)} />
           </div>
-          <div className="border-b p-4">
+          {record.type === 'agent' ? <div className="border-b p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="text-support font-medium">{chinese ? '任务说明' : 'Prompt'}</p>
               <Button
@@ -512,8 +531,8 @@ function RoutineDetail({
                 <Maximize2Icon aria-hidden="true" />
               </Button>
             </div>
-            <p className="line-clamp-5 whitespace-pre-wrap break-words text-support text-muted-foreground">{record.prompt}</p>
-          </div>
+            <p className="line-clamp-5 whitespace-pre-wrap break-words text-support text-muted-foreground">{record.configuration.goal}</p>
+          </div> : null}
           <div className="p-2">
             <div className="flex items-center justify-between px-2 py-1.5">
               <p className="text-support font-medium">{chinese ? '执行日期' : 'Execution dates'}</p>
@@ -565,7 +584,7 @@ function RoutineDetail({
             ) : null}
           </div>
           {activeDate && activeRows.length ? (
-            <ExecutionProcess rows={activeRows} chinese={chinese} stoppingTaskId={stoppingTaskId} onStop={(row) => void stopExecution(row)} />
+            <ExecutionProcess rows={activeRows} chinese={chinese} stoppingTaskId={stoppingTaskId} onStop={(row) => void stopExecution(row)} onRetry={(row) => void retryExecution(row)} />
           ) : (
             <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
               {activeDate ? (
@@ -589,17 +608,17 @@ function RoutineDetail({
           )}
         </main>
       </div>
-      <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
+      {record.type === 'agent' ? <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
         <DialogContent className="h-[70vh] max-h-[calc(100dvh-2rem)] min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{chinese ? '完整任务说明' : 'Full prompt'}</DialogTitle>
             <DialogDescription>{record.name}</DialogDescription>
           </DialogHeader>
           <div className="min-h-0 overflow-y-auto rounded-md border bg-muted/20 p-3">
-            <p className="whitespace-pre-wrap break-words text-support">{record.prompt}</p>
+            <p className="whitespace-pre-wrap break-words text-support">{record.configuration.goal}</p>
           </div>
         </DialogContent>
-      </Dialog>
+      </Dialog> : null}
     </section>
   )
 }
@@ -615,11 +634,12 @@ function DetailItem({ label, value }: { label: string; value: string }): React.J
   )
 }
 
-function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop }: {
+function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
   rows: readonly RoutineExecution[]
   chinese: boolean
   stoppingTaskId: string | null
   onStop: (row: RoutineExecution) => void
+  onRetry: (row: RoutineExecution) => void
 }): React.JSX.Element {
   return (
     <ol className="relative space-y-4 before:absolute before:bottom-4 before:left-3 before:top-4 before:w-px before:bg-border">
@@ -642,7 +662,7 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop }: {
               </div>
               {row.taskId ? (
                 <div className="flex items-center gap-2">
-                  {(row.status === 'preparing' || row.status === 'running') && row.runId ? (
+                  {(row.status === 'preparing' || row.status === 'running') && (row.type === 'ingestion' || row.runId) ? (
                     <Button
                       type="button"
                       variant="outline"
@@ -651,9 +671,12 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop }: {
                       onClick={() => onStop(row)}
                     >
                       <StopCircleIcon aria-hidden="true" />
-                      {stoppingTaskId === row.taskId || row.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : chinese ? '停止 Agent' : 'Stop Agent'}
+                      {stoppingTaskId === row.taskId || row.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : chinese ? '停止执行' : 'Stop'}
                     </Button>
                   ) : null}
+                  {row.type === 'ingestion' && ['failed', 'interrupted', 'cancelled', 'conflict'].includes(row.status) ? <Button
+                    type="button" variant="outline" size="sm" onClick={() => onRetry(row)}
+                  ><RefreshCwIcon aria-hidden="true" />{chinese ? '重试' : 'Retry'}</Button> : null}
                   <span className="font-mono text-support text-muted-foreground" title={row.taskId}>
                     Task {row.taskId.slice(0, 8)}
                   </span>

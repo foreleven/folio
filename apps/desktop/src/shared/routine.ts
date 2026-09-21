@@ -2,46 +2,68 @@ import { DateTime, Option, Schema } from 'effect'
 import { AgentKind } from './harness'
 import { SessionModelSelection } from './model'
 
-const Id = Schema.String.check(Schema.isUUID())
+export const RoutineId = Schema.String.check(Schema.isUUID())
 const Text = Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim().length > 0))
 const RoutineDate = Schema.String.check(Schema.makeFilter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)))
+export const RoutineTimeZone = Schema.NonEmptyString.check(Schema.makeFilter(value => Option.isSome(DateTime.zoneFromString(value)), { message: 'Invalid Routine time zone' }))
 
-/** Flat editable Routine configuration. Historical executions retain the revision used at dispatch. */
-export const RoutineRecord = Schema.Struct({
-  id: Id, name: Text, prompt: Text, agent: AgentKind, model: Schema.NullOr(SessionModelSelection),
+export const AgentRoutineConfiguration = Schema.Struct({
+  goal: Text,
+  agent: AgentKind,
+  model: Schema.NullOr(SessionModelSelection),
   skillIds: Schema.Array(Schema.NonEmptyString), integrationIds: Schema.Array(Schema.NonEmptyString),
-  resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
-  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)), timeZone: Schema.NonEmptyString.check(Schema.makeFilter(value => Option.isSome(DateTime.zoneFromString(value)), { message: 'Invalid Routine time zone' })),
+  resourceIds: Schema.Array(Schema.NonEmptyString)
+})
+export type AgentRoutineConfiguration = typeof AgentRoutineConfiguration.Type
+export const IngestionRoutineConfiguration = Schema.Struct({
+  integrationId: Schema.NonEmptyString,
+  resourceId: Schema.NonEmptyString
+})
+export type IngestionRoutineConfiguration = typeof IngestionRoutineConfiguration.Type
+export const RoutineConfiguration = Schema.Union([AgentRoutineConfiguration, IngestionRoutineConfiguration])
+export type RoutineConfiguration = typeof RoutineConfiguration.Type
+
+const RoutineIdentity = { id: RoutineId, name: Text }
+const RoutineSchedule = {
+  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)), timeZone: RoutineTimeZone,
   enabled: Schema.Boolean, revision: Schema.Int.check(Schema.isGreaterThan(0)),
   nextTriggerAt: Schema.NullOr(Schema.Number), lastTriggerAt: Schema.NullOr(Schema.Number),
   createdAt: Schema.Number, updatedAt: Schema.Number
-})
+}
+/** Typed editable Routine definition. Historical Tasks retain the revision used at dispatch. */
+export const RoutineRecord = Schema.Union([
+  Schema.Struct({ ...RoutineIdentity, ...RoutineSchedule, type: Schema.Literal('agent'), configuration: AgentRoutineConfiguration }),
+  Schema.Struct({ ...RoutineIdentity, ...RoutineSchedule, type: Schema.Literal('ingestion'), configuration: IngestionRoutineConfiguration })
+])
 export type RoutineRecord = typeof RoutineRecord.Type
 
-export const SaveRoutine = Schema.Struct({
-  id: Id, expectedRevision: Schema.NullOr(RoutineRecord.fields.revision), name: Text, prompt: Text, agent: AgentKind,
-  model: Schema.NullOr(SessionModelSelection), skillIds: Schema.Array(Schema.NonEmptyString),
-  integrationIds: Schema.Array(Schema.NonEmptyString), intervalMinutes: RoutineRecord.fields.intervalMinutes,
-  resourceIds: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
-  timeZone: RoutineRecord.fields.timeZone, enabled: Schema.Boolean
-})
+const SaveIdentity = { id: RoutineId, expectedRevision: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))), name: Text }
+const SaveSchedule = {
+  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)),
+  timeZone: RoutineTimeZone,
+  enabled: Schema.Boolean
+}
+export const SaveRoutine = Schema.Union([
+  Schema.Struct({ ...SaveIdentity, ...SaveSchedule, type: Schema.Literal('agent'), configuration: AgentRoutineConfiguration }),
+  Schema.Struct({ ...SaveIdentity, ...SaveSchedule, type: Schema.Literal('ingestion'), configuration: IngestionRoutineConfiguration })
+])
 export type SaveRoutine = typeof SaveRoutine.Type
 
-export const RoutineExecutionStatus = Schema.Literals(['pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted'])
+export const RoutineExecutionStatus = Schema.Literals(['pending', 'preparing', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted', 'conflict'])
 export type RoutineExecutionStatus = typeof RoutineExecutionStatus.Type
 
 /** Read projection of a Routine Task and its latest Run; taskId is its only identity. */
 export const RoutineExecution = Schema.Struct({
-  routineId: Id, taskId: Id, runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean, routineDate: RoutineDate, triggerTime: Schema.Number,
+  routineId: RoutineId, taskId: RoutineId, type: Schema.Literals(['agent', 'ingestion']), runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean, routineDate: RoutineDate, triggerTime: Schema.Number,
   firstTriggerTime: Schema.Number, triggerCount: Schema.Int.check(Schema.isGreaterThan(0)), isEnd: Schema.Boolean,
   windowStart: Schema.NullOr(Schema.Number), windowEnd: Schema.NullOr(Schema.Number),
-  model: Schema.NullOr(SessionModelSelection), timeZone: RoutineRecord.fields.timeZone,
+  model: Schema.NullOr(SessionModelSelection), timeZone: RoutineTimeZone,
   routineRevision: Schema.Int.check(Schema.isGreaterThan(0)), status: RoutineExecutionStatus,
   startedAt: Schema.NullOr(Schema.Number), endedAt: Schema.NullOr(Schema.Number), createdAt: Schema.Number, updatedAt: Schema.Number
 })
 export type RoutineExecution = typeof RoutineExecution.Type
 
-export const RunRoutine = Schema.Struct({ routineId: Id, requestId: Schema.optionalKey(Id) })
+export const RunRoutine = Schema.Struct({ routineId: RoutineId, requestId: Schema.optionalKey(RoutineId) })
 export type RunRoutine = typeof RunRoutine.Type
 
 /** Formats an execution instant in the Routine's named timezone for Agent-facing boundaries. */
@@ -93,6 +115,6 @@ export function routineGapDates(record: Pick<RoutineRecord, 'createdAt' | 'timeZ
 /** A successful daytime window alone cannot establish that the whole day was processed. */
 export function routineDateState(rows: readonly Pick<RoutineExecution, 'isEnd' | 'status'>[]): 'success' | 'progress' | 'attention' {
   if (rows.some(row => row.isEnd && row.status === 'succeeded')) return 'success'
-  if (rows.some(row => ['failed', 'interrupted', 'cancelled'].includes(row.status))) return 'attention'
+  if (rows.some(row => ['failed', 'interrupted', 'cancelled', 'conflict'].includes(row.status))) return 'attention'
   return 'progress'
 }

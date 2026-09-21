@@ -1,0 +1,3 @@
+# Stop and retain raw merge conflicts
+
+When an Ingestion commit conflicts with the canonical Vault workspace, Folio retains the commit and ingestion worktree, marks the execution as conflicted, and does not advance either the source window or the raw records. Automatic overwrite and Agent conflict resolution were rejected because each resource has one provider-owned writer, so a conflict signals an ownership or storage anomaly that must remain inspectable. Manual Retry reapplies that same retained commit against the current canonical workspace; it never invokes the Integration or replaces the evidence with a fresh extraction.

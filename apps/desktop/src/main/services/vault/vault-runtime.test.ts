@@ -4,7 +4,7 @@ import { RunFileStore } from '../execution/run-files'
 import { ExecutionNotifications } from '../execution/execution-scheduler'
 import { NodeServices } from '@effect/platform-node'
 import { ConfigProvider, Context, Deferred, Effect, Fiber, Layer, ManagedRuntime, Stream } from 'effect'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
@@ -18,10 +18,14 @@ import { IntegrationService } from '../integrations/integration-service'
 import { ModelService } from '../models/model-service'
 import type { IntegrationView } from '../../../shared/integration'
 import { imap } from '@folio/integrations/imap'
-import { lark } from '@folio/integrations/lark'
 import { routineTimestampAt } from '../../../shared/routine'
 
-function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle')), integrations: readonly IntegrationView[] = []) {
+function createRuntime(
+  root: string,
+  agent = AgentRuntime.layer(join(root, 'missing-agent-bundle')),
+  integrations: readonly IntegrationView[] = [],
+  ingest: IntegrationService['Service']['ingest'] = () => Effect.void
+) {
   return ManagedRuntime.make(
     Layer.merge(VaultRuntime.layer, VaultService.layer).pipe(
       Layer.provide(AgentWorkerPool.layer),
@@ -35,7 +39,8 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
           install: () => Effect.void,
           inspect: () => Effect.void,
           action: () => Effect.void,
-          prepare: () => Effect.succeed({ skillPaths: [], executableDirectories: [], instructions: [] })
+          prepare: () => Effect.succeed({ skillPaths: [], executableDirectories: [], instructions: [] }),
+          ingest
         })
       ),
       Layer.provideMerge(ConfigService.layer),
@@ -45,11 +50,37 @@ function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'miss
   )
 }
 
-it('creates one daily IMAP Routine after installation and preserves user edits', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-imap-routine-'))
+const readyImap = (): IntegrationView => {
   const resources = imap.resources.map(({ id, type, name }) => ({ id, type, name }))
-  const runtime = createRuntime(root, undefined, [{ ...imap, resources, busy: false,
-    record: { id: 'imap', state: 'login_required', data: {}, actions: [], resources, error: null, createdAt: 1, updatedAt: 1 } }])
+  return { ...imap, resources, busy: false,
+    record: { id: 'imap', state: 'ready', data: {}, actions: [], resources, error: null, createdAt: 1, updatedAt: 1 } }
+}
+
+/** Keeps service tests near local midnight so successful ingestion does not start a long catch-up chain. */
+const nearMidnightTimeZone = () => {
+  const utcHour = new Date().getUTCHours()
+  const offset = -utcHour
+  return offset === 0 ? 'Etc/GMT' : `Etc/GMT${offset > 0 ? '-' : '+'}${Math.abs(offset)}`
+}
+
+const waitForIngestion = Effect.fnUntraced(function* (
+  tasks: TaskService['Service'],
+  taskId: string,
+  states: ReadonlySet<string>
+) {
+  let last: unknown
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const task = (yield* tasks.get(taskId)).task
+    last = task
+    if (task.type === 'ingestion' && states.has(task.receipt.state)) return task
+    yield* Effect.sleep(20)
+  }
+  return yield* Effect.die(new Error(`Timed out waiting for Ingestion Task ${taskId}: ${JSON.stringify(last)}`))
+})
+
+it('creates one hourly IMAP Ingestion Routine after the resource is ready and preserves user edits', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-imap-routine-')))
+  const runtime = createRuntime(root, undefined, [readyImap()])
   try {
     await mkdir(join(root, 'vault'))
     await runtime.runPromise(Effect.gen(function* () {
@@ -60,52 +91,226 @@ it('creates one daily IMAP Routine after installation and preserves user edits',
       yield* tasks.ensureDefaultRoutine
       const routines = yield* tasks.routines
       expect(routines).toHaveLength(1)
-      expect(routines[0]).toMatchObject({ integrationIds: ['imap'], resourceIds: ['imap/email'], intervalMinutes: 1440 })
-      expect(routines[0]!.prompt).toContain('raws/imap/_workflow.md')
+      expect(routines[0]).toMatchObject({ type: 'ingestion', configuration: { integrationId: 'imap', resourceId: 'email' }, intervalMinutes: 60 })
       const routine = routines[0]!
+      if (routine.type !== 'ingestion') throw new Error('Expected Ingestion Routine')
       yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: false, name: 'My mailbox',
-        prompt: routine.prompt, agent: routine.agent, model: routine.model, skillIds: routine.skillIds,
-        integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
-        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
+        type: routine.type, configuration: routine.configuration, intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
       yield* tasks.ensureDefaultRoutine
       expect(yield* tasks.routines).toMatchObject([{ name: 'My mailbox', enabled: false }])
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-it('upgrades only the unchanged generated Lark IM Routine prompt to the dedicated Skill', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-lark-routine-upgrade-'))
-  const resources = lark.resources.map(({ id, type, name }) => ({ id, type, name }))
-  const runtime = createRuntime(root, undefined, [{ ...lark, resources, busy: false,
-    record: { id: 'lark', state: 'ready', data: {}, actions: [], resources, error: null, createdAt: 1, updatedAt: 1 } }])
-  const legacyPrompt = 'Review the current Routine window of Lark IM. Read raws/lark-im/_workflow.md first, then run the extraction workflow it describes and review raws/lark-im/_updated.md and the updated conversation files. Summarize actionable items and decisions.'
+it('executes Ingestion without a Session and records changed raws at the canonical commit', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-success-')))
+  let outputDirectory = ''
+  let vaultId = ''
+  const runtime = createRuntime(root, undefined, [readyImap()], (_integrationId, _resourceId, output, window) =>
+    Effect.tryPromise(async () => {
+      outputDirectory = output
+      expect(window.timeZone).toBe(nearMidnightTimeZone())
+      await mkdir(output, { recursive: true })
+      await writeFile(join(output, 'message.md'), '# Message\n')
+    }).pipe(Effect.orDie))
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      vaultId = vault.id
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      expect(submitted.run).toBeNull()
+      expect(yield* tasks.openSession({ taskId: submitted.task.id,
+        sessionId: '33333333-3333-4333-8333-333333333333', agent: 'codex' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 1,
+        changeId: expect.any(String), observedHead: null })
+      expect((yield* tasks.get(submitted.task.id)).sessions).toEqual([])
+      expect((yield* tasks.get(submitted.task.id)).runs).toEqual([])
+    }).pipe(Effect.timeout('20 seconds')))
+    const rawNamespace = outputDirectory.slice(outputDirectory.indexOf(`${join('raws', 'imap', 'email')}`))
+    expect(await readFile(join(root, 'config/vaults', vaultId, 'workspace', rawNamespace, 'message.md'), 'utf8')).toBe('# Message\n')
+    await vi.waitFor(() => {
+      const database = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
+      try {
+        expect(database.prepare('SELECT integration_id, resource_id, path, state, current_commit FROM raws').all()).toMatchObject([{
+          integration_id: 'imap', resource_id: 'email', path: expect.stringMatching(/^raws\/imap\/email\/\d{4}-\d{2}-\d{2}\/message\.md$/),
+          state: 'present', current_commit: expect.any(String)
+        }])
+      } finally { database.close() }
+    })
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it('advances a no-change Ingestion window without creating a raw row', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-empty-')))
+  let vaultId = ''
+  const runtime = createRuntime(root, undefined, [readyImap()])
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      vaultId = vault.id
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 1,
+        changeId: null, observedHead: expect.any(String) })
+    }).pipe(Effect.timeout('20 seconds')))
+    const database = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
+    try { expect(database.prepare('SELECT id FROM raws').all()).toEqual([]) } finally { database.close() }
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it('retries a failed Ingestion attempt on the same Task and exact window', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-retry-')))
+  const windows: Array<{ start: number; end: number; timeZone: string }> = []
+  let attempts = 0
+  const runtime = createRuntime(root, undefined, [readyImap()], (_integrationId, _resourceId, output, window) => {
+    attempts++
+    windows.push(window)
+    if (attempts === 1) return Effect.die(new Error('fixture provider failure'))
+    return Effect.tryPromise(async () => {
+      await mkdir(output, { recursive: true })
+      await writeFile(join(output, 'retried.md'), 'retried\n')
+    }).pipe(Effect.orDie)
+  })
   try {
     await mkdir(join(root, 'vault'))
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      yield* tasks.ensureDefaultRoutine
-      let routine = (yield* tasks.routines)[0]!
-      yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: routine.enabled,
-        name: routine.name, prompt: legacyPrompt, agent: routine.agent, model: routine.model,
-        skillIds: routine.skillIds, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
-        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
-      yield* tasks.ensureDefaultRoutine
-      routine = (yield* tasks.routines)[0]!
-      expect(routine.prompt).toContain('folio-lark-im Skill')
-      expect(routine.prompt).not.toContain('_workflow.md')
-      yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: routine.enabled,
-        name: routine.name, prompt: 'My custom IM review', agent: routine.agent, model: routine.model,
-        skillIds: routine.skillIds, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
-        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
-      yield* tasks.ensureDefaultRoutine
-      expect((yield* tasks.routines)[0]!.prompt).toBe('My custom IM review')
-    }))
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      const failed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['failed']))
+      expect(failed.receipt).toMatchObject({ state: 'failed', attemptCount: 1 })
+      expect((yield* tasks.routineExecutions(routine.id))).toMatchObject([{ taskId: submitted.task.id, status: 'failed' }])
+      yield* tasks.retryIngestion(submitted.task.id)
+      const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      expect(completed.id).toBe(submitted.task.id)
+      expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 2 })
+      expect(windows).toHaveLength(2)
+      expect(windows[1]).toEqual(windows[0])
+    }).pipe(Effect.timeout('20 seconds')))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
-})
+}, 25_000)
+
+it('cancels a running Ingestion without advancing its window', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-cancel-')))
+  const runtime = createRuntime(root, undefined, [readyImap()], () => Effect.never)
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      yield* waitForIngestion(tasks, submitted.task.id, new Set(['running']))
+      yield* tasks.cancelIngestion(submitted.task.id)
+      const cancelled = yield* waitForIngestion(tasks, submitted.task.id, new Set(['cancelled']))
+      expect(cancelled.receipt).toMatchObject({ state: 'cancelled', cancelRequested: true, attemptCount: 1 })
+      expect(yield* tasks.routineExecutions(routine.id)).toMatchObject([{
+        taskId: submitted.task.id, status: 'cancelled', cancelRequested: true,
+        windowStart: submitted.execution.windowStart, windowEnd: submitted.execution.windowEnd
+      }])
+    }).pipe(Effect.timeout('20 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it('rejects provider writes outside the exact dated raw namespace', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-namespace-')))
+  const runtime = createRuntime(root, undefined, [readyImap()], (_integrationId, _resourceId, output) =>
+    Effect.tryPromise(async () => {
+      const worktree = resolve(output, '../../../..')
+      await mkdir(join(worktree, 'wiki'), { recursive: true })
+      await writeFile(join(worktree, 'wiki/provider-escape.md'), 'must not publish\n')
+    }).pipe(Effect.orDie))
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      const failed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['failed']))
+      expect(failed.receipt).toMatchObject({ state: 'failed', changeId: null, observedHead: null })
+      expect(yield* Effect.promise(() => readFile(join(root, 'config/vaults', vault.id, 'workspace/wiki/provider-escape.md'), 'utf8').catch(() => null))).toBeNull()
+    }).pipe(Effect.timeout('20 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it('retries a retained Ingestion conflict without invoking the provider again', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-ingestion-conflict-')))
+  let entered!: () => void
+  let release!: () => void
+  const providerEntered = new Promise<void>(resolveEntered => { entered = resolveEntered })
+  const providerRelease = new Promise<void>(resolveRelease => { release = resolveRelease })
+  let attempts = 0
+  let outputDirectory = ''
+  const runtime = createRuntime(root, undefined, [readyImap()], (_integrationId, _resourceId, output) => Effect.promise(async () => {
+    attempts++
+    outputDirectory = output
+    await mkdir(output, { recursive: true })
+    await writeFile(join(output, 'same.md'), 'provider version\n')
+    entered()
+    await providerRelease
+  }))
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const routine = (yield* tasks.routines)[0]!
+      if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
+      yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
+        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: routine.id })
+      yield* Effect.promise(() => providerEntered)
+      const relative = `${outputDirectory.slice(outputDirectory.indexOf(join('raws', 'imap', 'email')))}/same.md`
+      const workspace = join(root, 'config/vaults', vault.id, 'workspace')
+      yield* Effect.promise(async () => {
+        await mkdir(join(workspace, relative, '..'), { recursive: true })
+        await writeFile(join(workspace, relative), 'canonical version\n')
+      })
+      const initial = yield* tasks.workspace.inspect
+      yield* tasks.saveWorkspaceFiles({ id: 'conflicting-main-save', expectedParent: initial.head, paths: [relative] })
+      release()
+      const conflicted = yield* waitForIngestion(tasks, submitted.task.id, new Set(['conflict']))
+      expect(conflicted.receipt).toMatchObject({ state: 'conflict', changeId: expect.any(String) })
+      expect(attempts).toBe(1)
+
+      yield* Effect.promise(() => rm(join(workspace, relative)))
+      const current = yield* tasks.workspace.inspect
+      yield* tasks.saveWorkspaceFiles({ id: 'remove-conflicting-main-save', expectedParent: current.head, paths: [relative] })
+      yield* tasks.retryIngestion(submitted.task.id)
+      const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 2, changeId: conflicted.receipt.changeId })
+      expect(attempts).toBe(1)
+      expect(yield* Effect.promise(() => readFile(join(workspace, relative), 'utf8'))).toBe('provider version\n')
+    }).pipe(Effect.timeout('30 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 35_000)
 
 it('keeps Routine admission and retries on the reserved Task revision after edits', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-routine-revision-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-routine-revision-')))
   const runtime = createRuntime(root)
   try {
     await mkdir(join(root, 'wiki'))
@@ -113,34 +318,34 @@ it('keeps Routine admission and retries on the reserved Task revision after edit
       const vault = yield* (yield* VaultService).register(join(root, 'wiki'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
       const input = { id: '11111111-1111-4111-8111-111111111111', expectedRevision: null,
-        name: 'Original', prompt: 'Original prompt', agent: 'codex' as const, model: null,
-        skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'Asia/Shanghai', enabled: true }
+        name: 'Original', type: 'agent' as const, configuration: { goal: 'Original prompt', agent: 'codex' as const, model: null,
+          skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 60, timeZone: 'Asia/Shanghai', enabled: true }
       yield* tasks.saveRoutine(input)
       const reserved = yield* tasks.prepareRoutine({ routineId: input.id })
-      yield* tasks.saveRoutine({ ...input, expectedRevision: 1, prompt: 'Edited prompt', agent: 'codex', model: null })
+      yield* tasks.saveRoutine({ ...input, expectedRevision: 1, configuration: { ...input.configuration, goal: 'Edited prompt' } })
       const submitted = yield* tasks.runRoutine({ routineId: input.id })
       expect(submitted.task).toEqual(reserved.task)
       expect(submitted.execution.routineRevision).toBe(1)
-      expect(submitted.run.prompt).toMatch(/^Original prompt\n/)
-      expect(submitted.run.prompt).toContain('- time-zone: Asia/Shanghai')
-      expect(submitted.run.prompt).toContain(`- start: ${routineTimestampAt(submitted.execution.windowStart!, input.timeZone)}`)
-      expect(submitted.run.prompt).toContain(`- end: ${routineTimestampAt(submitted.execution.windowEnd!, input.timeZone)}`)
+      expect(submitted.run!.prompt).toMatch(/^Original prompt\n/)
+      expect(submitted.run!.prompt).toContain('- time-zone: Asia/Shanghai')
+      expect(submitted.run!.prompt).toContain(`- start: ${routineTimestampAt(submitted.execution.windowStart!, input.timeZone)}`)
+      expect(submitted.run!.prompt).toContain(`- end: ${routineTimestampAt(submitted.execution.windowEnd!, input.timeZone)}`)
       expect((yield* tasks.get(reserved.task.id)).sessions).toMatchObject([{ agent: 'codex', modelProfile: null }])
-      expect((yield* tasks.runRoutine({ routineId: input.id })).run.id).toBe(submitted.run.id)
-      yield* tasks.cancelRun(reserved.task.id, submitted.run.id)
+      expect((yield* tasks.runRoutine({ routineId: input.id })).run!.id).toBe(submitted.run!.id)
+      yield* tasks.cancelRun(reserved.task.id, submitted.run!.id)
       const retry = yield* tasks.runRoutine({ routineId: input.id })
       expect(retry.task.id).not.toBe(reserved.task.id)
-      expect(retry.run.id).not.toBe(submitted.run.id)
-      expect(retry.run.prompt).toMatch(/^Edited prompt\n/)
-      yield* tasks.cancelRun(reserved.task.id, submitted.run.id)
-      expect((yield* tasks.runRoutine({ routineId: input.id })).run.id).toBe(retry.run.id)
-      yield* tasks.cancelRun(retry.task.id, retry.run.id)
+      expect(retry.run!.id).not.toBe(submitted.run!.id)
+      expect(retry.run!.prompt).toMatch(/^Edited prompt\n/)
+      yield* tasks.cancelRun(reserved.task.id, submitted.run!.id)
+      expect((yield* tasks.runRoutine({ routineId: input.id })).run!.id).toBe(retry.run!.id)
+      yield* tasks.cancelRun(retry.task.id, retry.run!.id)
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
 it('builds reusable isolated Vault services without starting an Agent', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-vault-context-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-vault-context-')))
   const runtime = createRuntime(root)
   try {
     await mkdir(join(root, 'a'))
@@ -161,12 +366,8 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
           id: '11111111-1111-4111-8111-111111111111',
           expectedRevision: null,
           name: 'Only A',
-          prompt: 'Review notes',
-          agent: 'codex',
-          model: null,
-          skillIds: [],
-          integrationIds: [],
-          resourceIds: [],
+          type: 'agent',
+          configuration: { goal: 'Review notes', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
           intervalMinutes: 60,
           timeZone: 'UTC',
           enabled: false
@@ -196,21 +397,21 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         expect(failed.runs).toMatchObject([{ state: 'failed', baselineCommit: null }])
         expect(yield* tasks.claimExecution('next-worker')).toBeNull()
         const routine = (yield* tasks.routines)[0]!
-        yield* tasks.saveRoutine({ id: routine.id, name: routine.name, prompt: routine.prompt, agent: routine.agent,
-          model: routine.model, skillIds: routine.skillIds, integrationIds: routine.integrationIds,
+        if (routine.type !== 'agent') throw new Error('Expected Agent Routine')
+        yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
           intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone, expectedRevision: routine.revision, enabled: true })
         const routineIntent = { routineId: routine.id, requestId: '55555555-5555-4555-8555-555555555555' }
         const queuedRoutine = yield* tasks.runRoutine(routineIntent)
-        expect(queuedRoutine.run.state).toBe('queued')
+        expect(queuedRoutine.run!.state).toBe('queued')
         expect(queuedRoutine.task.worktreeState).toBe('pending')
         expect(yield* tasks.runRoutine(routineIntent)).toEqual(queuedRoutine)
         const coalesced = yield* tasks.runRoutine({ routineId: routine.id })
-        expect(coalesced.run.id).toBe(queuedRoutine.run.id)
+        expect(coalesced.run!.id).toBe(queuedRoutine.run!.id)
         expect(coalesced.execution.windowEnd).toBe(queuedRoutine.execution.windowEnd)
-        expect(yield* tasks.cancelRun(taskId, queuedRoutine.run.id).pipe(Effect.flip)).toMatchObject({ reason: 'not-found' })
+        expect(yield* tasks.cancelRun(taskId, queuedRoutine.run!.id).pipe(Effect.flip)).toMatchObject({ reason: 'not-found' })
         expect((yield* tasks.get(queuedRoutine.task.id)).runs[0]?.cancelRequested).toBe(false)
-        yield* tasks.cancelRun(queuedRoutine.task.id, queuedRoutine.run.id)
-        expect((yield* tasks.runRoutine(routineIntent)).run.state).toBe('cancelled')
+        yield* tasks.cancelRun(queuedRoutine.task.id, queuedRoutine.run!.id)
+        expect((yield* tasks.runRoutine(routineIntent)).run!.state).toBe('cancelled')
         const followUp = yield* tasks.claimExecution('after-cancellation')
         expect(followUp?.source).toBe('routine')
         if (followUp) {
@@ -228,7 +429,7 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
 })
 
 it.skipIf(process.platform === 'win32')('executes queued requests through the real Agent Worker and joins cancellation before releasing ownership', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-queued-agent-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-queued-agent-')))
   const fixture = (await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8'))
     .replace('id: "native-thread"', 'id: process.cwd()')
   await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
@@ -280,7 +481,7 @@ it.skipIf(process.platform === 'win32')('executes queued requests through the re
 }, 25000)
 
 it('retains a claim with a missing recovery file and preserves queued requests across restart', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-queue-restart-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-queue-restart-')))
   let runtime = createRuntime(root)
   let vaultId = ''
   const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -316,7 +517,7 @@ it('retains a claim with a missing recovery file and preserves queued requests a
 })
 
 it('retains unreconciled live process ownership after restart instead of redispatching its Task', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-live-recovery-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-live-recovery-')))
   let runtime = createRuntime(root)
   let vaultId = ''
   const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -351,7 +552,7 @@ it('retains unreconciled live process ownership after restart instead of redispa
 
 it.skipIf(process.platform === 'win32')(
   'recovers a failed terminal database commit after real process cleanup without another Agent dispatch', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'folio-terminal-recovery-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-terminal-recovery-')))
     const fixture = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
     await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
     const agent = Layer.succeed(AgentRuntime)({ get: Effect.succeed({
@@ -398,7 +599,7 @@ it.skipIf(process.platform === 'win32')(
 )
 
 it('retires old services before deletion, allows other Vaults, and recovers from a failed deletion callback', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-vault-retire-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-vault-retire-')))
   const closedFiles: Array<string | null> = []
   const originalClose = DatabaseSync.prototype.close
   const closeDatabase = vi.spyOn(DatabaseSync.prototype, 'close').mockImplementation(function (this: DatabaseSync) {
@@ -438,7 +639,7 @@ it('retires old services before deletion, allows other Vaults, and recovers from
 
 
 it('serializes reopening with deletion and rejects deletion while a claimed Run is unverified', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-vault-retire-race-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-vault-retire-race-')))
   const runtime = createRuntime(root)
   try {
     await mkdir(join(root, 'a'))
@@ -473,7 +674,7 @@ it('serializes reopening with deletion and rejects deletion while a claimed Run 
 })
 
 it.skipIf(process.platform === 'win32')('stops a live Agent and joins its receipt before deleting Vault files', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'folio-delete-live-agent-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-delete-live-agent-')))
   const fixture = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
   await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
   const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({

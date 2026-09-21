@@ -19,10 +19,13 @@ const layer = () => RoutineStore.layer.pipe(Layer.provide(TaskWorktrees.layer(ro
 const routineId = '11111111-1111-4111-8111-111111111111'
 const sessionId = '22222222-2222-4222-8222-222222222222'
 const runId = (n: number) => `33333333-3333-4333-8333-${n.toString().padStart(12, '0')}`
+const agentConfiguration = (goal: string, agent: 'pi' | 'codex' = 'codex', model: { providerId: string; modelId: string; thinkingLevel: 'off' } | null = null) => ({
+  goal, agent, model, skillIds: [], integrationIds: ['lark'], resourceIds: ['lark/im']
+})
 
 const setup = Effect.gen(function* () {
   const store = yield* RoutineStore
-  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', prompt: 'Process today', agent: 'codex', model: null, skillIds: [], integrationIds: ['lark'], resourceIds: ['lark/im'], intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Process today'), intervalMinutes: 30, timeZone: 'UTC', enabled: true })
 })
 
 const finish = (id: string, state: 'succeeded' | 'failed' | 'interrupted' | 'cancelled') => Effect.gen(function* () {
@@ -128,11 +131,13 @@ describe('RoutineStore bounded execution windows', () => {
     await Effect.runPromise(Effect.gen(function* () {
       const store = yield* RoutineStore
       const model = { providerId: 'anthropic', modelId: 'original-model', thinkingLevel: 'off' as const }
-      yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', prompt: 'Original prompt', agent: 'pi', model, skillIds: [], integrationIds: ['lark'], resourceIds: ['lark/im'], intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+      yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Original prompt', 'pi', model), intervalMinutes: 30, timeZone: 'UTC', enabled: true })
       const first = (yield* store.schedule(routineId, Date.parse('2026-09-11T10:00:00Z')))!
-      yield* store.save({ id: routineId, expectedRevision: 1, name: 'Inbox', prompt: 'New prompt', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 30, timeZone: 'America/Los_Angeles', enabled: true })
+      yield* store.save({ id: routineId, expectedRevision: 1, name: 'Inbox', type: 'agent', configuration: { ...agentConfiguration('New prompt'), integrationIds: [], resourceIds: [] }, intervalMinutes: 30, timeZone: 'America/Los_Angeles', enabled: true })
       const task = yield* (yield* HarnessStore).task(first.taskId)
-      expect(task.goal).toBe('Original prompt')
+      expect(task.type).toBe('agent')
+      if (task.type !== 'agent') throw new Error('Expected Agent Task')
+      expect(task.configuration.goal).toBe('Original prompt')
       expect(task.configuration.agent).toBe('pi')
       expect(first.routineRevision).toBe(1)
       expect(first.model).toEqual(model)
@@ -200,16 +205,38 @@ describe('RoutineStore bounded execution windows', () => {
     }).pipe(Effect.provide(layer())))
   })
 
+  it.each(['cancelled', 'conflict'] as const)('keeps an Ingestion %s window blocked for manual retry', async (status) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const ingestionRoutineId = '99999999-9999-4999-8999-999999999999'
+      const store = yield* RoutineStore
+      yield* store.save({ id: ingestionRoutineId, expectedRevision: null, name: 'Mailbox', type: 'ingestion',
+        configuration: { integrationId: 'imap', resourceId: 'email' }, intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+      const first = (yield* store.schedule(ingestionRoutineId, Date.parse('2026-09-11T00:30:00Z')))!
+      const tasks = yield* HarnessStore
+      const task = yield* tasks.task(first.taskId)
+      if (task.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Task'))
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`UPDATE tasks SET receipt=${JSON.stringify({ ...task.receipt, state: status,
+        cancelRequested: status === 'cancelled', endedAt: Date.parse('2026-09-11T00:31:00Z') })},
+        state=${status === 'cancelled' ? 'cancelled' : 'active'} WHERE id=${task.id}`
+      expect(yield* store.schedule(ingestionRoutineId, Date.parse('2026-09-11T03:00:00Z'))).toBeNull()
+      expect(yield* store.schedule(ingestionRoutineId, Date.parse('2026-09-11T03:00:00Z'), 'settled')).toBeNull()
+      expect(yield* store.executions(ingestionRoutineId)).toMatchObject([{ taskId: first.taskId, status }])
+      expect((yield* tasks.tasks).filter(candidate => candidate.type === 'ingestion')).toHaveLength(1)
+    }).pipe(Effect.provide(layer())))
+  })
+
   it('normalizes resource lists and preserves save idempotency', async () => {
     await Effect.runPromise(Effect.gen(function* () {
       yield* setup
       const store = yield* RoutineStore
       const previous = yield* store.get(routineId)
+      if (previous.type !== 'agent') throw new Error('Expected Agent Routine')
       const { revision, createdAt: _created, updatedAt: _updated, nextTriggerAt: _next, lastTriggerAt: _last, ...input } = previous
-      const updated = { ...input, expectedRevision: revision, resourceIds: ['lark/im', 'lark/im'] }
+      const updated = { ...input, expectedRevision: revision, configuration: { ...input.configuration, resourceIds: ['lark/im', 'lark/im'] } }
       const saved = yield* store.save(updated)
-      expect(yield* store.save({ ...updated, resourceIds: ['lark/im'] })).toEqual(saved)
-      expect(yield* store.save({ ...updated, prompt: 'different' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
+      expect(yield* store.save({ ...updated, configuration: { ...updated.configuration, resourceIds: ['lark/im'] } })).toEqual(saved)
+      expect(yield* store.save({ ...updated, configuration: { ...updated.configuration, goal: 'different' } }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     }).pipe(Effect.provide(layer())))
   })
 

@@ -1,11 +1,9 @@
 import { Context, Effect, FileSystem } from 'effect'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { IntegrationError } from '../base/index.ts'
 
-export const skillNames = ['folio-lark-im', 'lark-shared', 'lark-mail'] as const
-const upstreamSkillNames = ['lark-shared', 'lark-mail'] as const
-const folioImFiles = ['SKILL.md', 'scripts/extract-window.mjs'] as const
+export const skillNames = ['lark-shared', 'lark-im', 'lark-mail'] as const
 
 /** Source-tree default; Electron injects the unpacked bundled skills directory. */
 export const LarkSkillsDirectory = Context.Reference<string>('@folio/integrations/lark/SkillsDirectory', {
@@ -23,48 +21,9 @@ export const hasSkills = Effect.fn('Lark.hasSkills')(function*(directory: string
       return false
     }
   }
-  if (!(yield* fs.exists(join(directory, 'skills', 'folio-lark-im', 'scripts', 'extract-window.mjs')))) return false
   yield* Effect.logDebug('Lark skills installation found').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
   return true
 }, Effect.annotateLogs({ integration: 'lark', subsystem: 'skills' }))
-
-/** Refreshes the Folio-owned Skill in place so existing integrations follow app upgrades. */
-const refreshFolioImSkill = Effect.fn('Lark.refreshFolioImSkill')(function*(directory: string) {
-  const fs = yield* FileSystem.FileSystem
-  const source = join(yield* LarkSkillsDirectory, 'folio-lark-im')
-  const installed = join(directory, 'skills', 'folio-lark-im')
-  let changed = false
-  for (const relative of folioImFiles) {
-    if (!(yield* fs.exists(join(source, relative)))) {
-      return yield* new IntegrationError({ message: `The bundled Lark IM Skill is incomplete: ${relative}.` })
-    }
-    const bundled = yield* fs.readFileString(join(source, relative))
-    const current = yield* fs.readFileString(join(installed, relative)).pipe(
-      Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed(undefined)))
-    if (current !== bundled) changed = true
-  }
-  if (!changed) return
-  const staging = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.folio-lark-im-' })
-  const next = join(staging, 'next')
-  const previous = join(staging, 'previous')
-  yield* fs.copy(source, next)
-  yield* fs.makeDirectory(dirname(installed), { recursive: true, mode: 0o700 })
-  let previousMoved = false
-  yield* Effect.gen(function* () {
-    if (yield* fs.exists(installed)) {
-      yield* fs.rename(installed, previous)
-      previousMoved = true
-    }
-    yield* fs.rename(next, installed)
-    previousMoved = false
-    yield* fs.remove(previous, { recursive: true, force: true })
-  }).pipe(
-    Effect.uninterruptible,
-    Effect.catch(error => previousMoved
-      ? fs.rename(previous, installed).pipe(Effect.andThen(Effect.fail(error)))
-      : Effect.fail(error))
-  )
-}, Effect.scoped)
 
 /** Copies bundled skills after confirmation; stages complete trees before publication. */
 export const installSkills = Effect.fn('Lark.installSkills')(function*(directory: string) {
@@ -72,12 +31,11 @@ export const installSkills = Effect.fn('Lark.installSkills')(function*(directory
   const source = yield* LarkSkillsDirectory
   const destination = join(directory, 'skills')
   if (yield* fs.exists(destination)) {
-    for (const name of upstreamSkillNames) {
+    for (const name of skillNames) {
       if (!(yield* fs.exists(join(destination, name, 'SKILL.md')))) {
         return yield* new IntegrationError({ message: 'Incomplete skills directory. Move it aside before retrying installation.' })
       }
     }
-    yield* refreshFolioImSkill(directory)
   }
   if (yield* hasSkills(directory)) {
     yield* Effect.logDebug('Reusing installed Lark skills')

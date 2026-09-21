@@ -20,8 +20,8 @@ beforeEach(async () => {
   await mkdir(bin)
   await mkdir(worktree, { recursive: true })
   await writeFile(skill, 'original skill')
-  task = { id: 'task', goal: 'Use resources', branch: 'folio/task/task', worktree,
-    configuration: { agent: 'pi', skillIds: [], integrationIds: ['notes'], resourceIds: ['notes/im'] },
+  task = { id: 'task', type: 'agent', receipt: null, branch: 'folio/task/task', worktree,
+    configuration: { goal: 'Use resources', agent: 'pi', model: null, skillIds: [], integrationIds: ['notes'], resourceIds: ['notes/im'] },
     state: 'active', worktreeState: 'ready', worktreeBase: null, createdAt: 1 }
   mounted = { skillPaths: [skill], executableDirectories: [bin], instructions: [] }
 })
@@ -31,7 +31,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 function fixture(prepare = vi.fn<IntegrationService['Service']['prepare']>(() => Effect.succeed(mounted))) {
   const layer = TaskResources.layer.pipe(Layer.provide(Layer.succeed(IntegrationService)({
     list: Effect.succeed([]), watch: Stream.empty, install: () => Effect.void,
-    inspect: () => Effect.void, action: () => Effect.void, prepare
+    inspect: () => Effect.void, action: () => Effect.void, prepare, ingest: () => Effect.void
   })))
   return { prepare, run: () => Effect.runPromise(Effect.gen(function*() {
     return yield* (yield* TaskResources).prepare(task)
@@ -63,6 +63,7 @@ describe('Task resources', () => {
   })
 
   it('does not prepare providers when no integration is selected', async () => {
+    if (task.type !== 'agent') throw new Error('Expected Agent Task fixture')
     task = { ...task, configuration: { ...task.configuration, integrationIds: [], resourceIds: [] } }
     const f = fixture()
     expect(await f.run()).toEqual({ skillPaths: [], executableDirectories: [] })

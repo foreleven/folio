@@ -1,0 +1,3 @@
+# Migrate all Ingestion resources at once
+
+The existing `lark/im`, `lark/email`, `gmail/email`, and `imap/email` resources all move directly to Integration-hosted Ingestion in one change. Folio removes their extraction-only Skills, workflow scripts and mounting, and `_updated.md` generation without retaining a legacy or dual execution path. The refactor does not migrate, inspect, or clean old Vault rows, raw paths, worktrees, or installed asset copies; new Vaults use only the final model. General Lark action Skills remain source assets but are not mounted by Ingestion, because deleting unrelated send, reply, and chat-management capabilities belongs to the later Agent Integration design.

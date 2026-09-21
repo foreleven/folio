@@ -277,11 +277,7 @@ describe('Google Gmail integration', () => {
         env: {} as Record<string, string>
       }
       await runtime.runPromise(gmail.resources[0]!.onIngest(mounted).pipe(Effect.provideService(IntegrationContext, context)))
-      expect(mounted.skills).toEqual([join(root, 'skills', 'gmail-mail', 'SKILL.md')])
-      expect(mounted.env).toEqual({ GMAIL_ACCESS_TOKEN: 'access' })
-      expect(mounted.workspaceFiles.map((file) => file.path)).toEqual(['raws/gmail/_workflow.md', 'raws/gmail/extract-window.mjs'])
-      expect(mounted.workspaceFiles.find((file) => file.path === 'raws/gmail/_workflow.md')?.content).toContain('--use-env-proxy')
-      expect(await readFile(join(root, 'workflows', 'gmail', 'extract-window.mjs'), 'utf8')).toContain('GMAIL_ACCESS_TOKEN')
+      expect(mounted).toMatchObject({ skills: [], executableDirectories: [], workspaceFiles: [], env: {} })
     } finally {
       await runtime.dispose()
     }

@@ -16,6 +16,8 @@ export function TaskPanel(): React.JSX.Element {
   const refresh = useAtomRefresh(query)
   const create = useAtomSet(TaskRpcClient.create, { mode: 'promise' })
   const reopen = useAtomSet(TaskRpcClient.reopen, { mode: 'promise' })
+  const cancelIngestion = useAtomSet(TaskRpcClient.cancelIngestion, { mode: 'promise' })
+  const retryIngestion = useAtomSet(TaskRpcClient.retryIngestion, { mode: 'promise' })
   const [selectedTask, setSelectedTask] = useState<string | null>(null)
   const [goal, setGoal] = useState('')
   const [agent, setAgent] = useState<'pi' | 'codex'>('pi')
@@ -53,6 +55,21 @@ export function TaskPanel(): React.JSX.Element {
     try { await reopen({ payload: { taskId } }) }
     catch { setReopenFailure(taskId) }
     finally { setReopeningTask(null); refresh() }
+  }
+
+  async function updateIngestion(taskId: string, action: 'cancel' | 'retry'): Promise<void> {
+    if (reopeningTask) return
+    setReopeningTask(taskId)
+    setReopenFailure(null)
+    try {
+      if (action === 'cancel') await cancelIngestion({ payload: { taskId } })
+      else await retryIngestion({ payload: { taskId } })
+    } catch {
+      setReopenFailure(taskId)
+    } finally {
+      setReopeningTask(null)
+      refresh()
+    }
   }
 
   return <section className="mt-8 space-y-4" aria-labelledby="tasks-title">
@@ -96,17 +113,23 @@ export function TaskPanel(): React.JSX.Element {
       : (chinese ? '正在加载任务…' : 'Loading tasks…')}</p>
       : tasks.value.length === 0 ? <p className="text-support text-muted-foreground">{chinese ? '还没有任务。' : 'No tasks yet.'}</p>
       : <ul className="divide-y rounded-lg border">{tasks.value.map(task => <li key={task.id} className="space-y-2 p-4">
-        <p className="whitespace-pre-wrap break-words text-ui">{task.goal}</p>
+        <p className="whitespace-pre-wrap break-words text-ui">{task.type === 'agent'
+          ? task.configuration.goal
+          : `${task.configuration.integrationId} / ${task.configuration.resourceId}`}</p>
         <div className="flex items-center justify-between gap-3 text-support text-muted-foreground">
-          <span>{task.configuration.agent === 'pi' ? 'pi' : 'Codex'} · {task.state === 'completed'
+          <span>{task.type === 'agent' ? (task.configuration.agent === 'pi' ? 'pi' : 'Codex') : `Ingestion · ${task.receipt.state}`} · {task.state === 'completed'
             ? (chinese ? '已完成' : 'Completed') : task.worktreeState === 'ready'
               ? (chinese ? '工作区已就绪' : 'Workspace ready') : (chinese ? '工作区待准备' : 'Workspace pending')}</span>
-          {task.state === 'active' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
-          {task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
+          {task.type === 'agent' && task.state === 'active' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
+          {task.type === 'agent' && task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
             onClick={() => void reopenTask(task.id)}>{reopeningTask === task.id ? (chinese ? '正在重开…' : 'Reopening…') : (chinese ? '重开' : 'Reopen')}</Button> : null}
+          {task.type === 'ingestion' && ['pending', 'running'].includes(task.receipt.state) ? <Button variant="outline" size="sm" disabled={reopeningTask !== null || task.receipt.cancelRequested}
+            onClick={() => void updateIngestion(task.id, 'cancel')}>{reopeningTask === task.id || task.receipt.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : (chinese ? '停止' : 'Stop')}</Button> : null}
+          {task.type === 'ingestion' && ['failed', 'interrupted', 'cancelled', 'conflict'].includes(task.receipt.state) ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
+            onClick={() => void updateIngestion(task.id, 'retry')}>{reopeningTask === task.id ? (chinese ? '正在重试…' : 'Retrying…') : (chinese ? '重试' : 'Retry')}</Button> : null}
         </div>
         {reopenFailure === task.id ? <p role="alert" className="text-support text-destructive">{chinese ? '任务无法重开，原历史已保留。' : 'Could not reopen the task. Its history is retained.'}</p> : null}
-        {selectedTask === task.id ? <TaskSessions key={task.id} task={task} /> : null}
+        {task.type === 'agent' && selectedTask === task.id ? <TaskSessions key={task.id} task={task} /> : null}
       </li>)}</ul>}
   </section>
 }

@@ -2,9 +2,10 @@
 
 An `Integration` owns a provider connection. Its resources describe ingestion
 capabilities; Lark registers `im` and `email`, while Google Gmail registers
-`email`. Their `onIngest` hooks declare the corresponding installed Skills,
-shared rules, and workflow assets. They do not start an Agent; the harness
-mounts these resources for the Task.
+`email`. Each resource implements `ingest({ integrationDirectory,
+outputDirectory, window })` and writes provider-native Markdown directly into
+the exact dated raw namespace selected by the host. Ingestion does not start an
+Agent or mount an extraction workflow.
 
 ## Ownership
 
@@ -29,7 +30,8 @@ src/lark/
   auth.ts                 # SDK/HTTP authorization transport
   state.ts                # Schemas, consolidated private state and legacy migration
 src/gmail/
-  integration.ts          # Gmail connection, resource mount, and workflow
+  integration.ts          # Gmail connection and email resource
+  ingest.ts               # Direct window ingestion and Markdown projection
   oauth.ts                # Google OAuth desktop flow and token refresh
   state.ts                # Private credential state
 ```
@@ -143,11 +145,11 @@ a different user identity can publish a newly rotated pair as ready.
 
 Lark uses the Folio-managed `lark-cli`; it never executes a global PATH copy.
 Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64 or Linux
-x64). The email resource uses bundled `lark-shared` and `lark-mail` Skills from
+x64). Agent Tasks may use bundled `lark-shared`, `lark-im`, and `lark-mail` Skills from
 `larksuite/cli` commit `f065bf5b645af381f9b7475ce721451e6ca36a23`, with
-complete trees and license. The IM resource mounts only Folio's purpose-built
-`folio-lark-im` Skill; it does not expose general message sending or chat-management
-instructions to Routine Agents. An incomplete existing upstream skills directory is
+complete trees and license. Ingestion does not depend on those Skills: the Lark
+resources invoke the managed CLI from provider code and materialize raws before
+any later Agent analysis. An incomplete existing upstream skills directory is
 not overwritten. Electron injects packaged asset paths at the composition boundary.
 
 SDK 1.73.3 handles application registration, app token exchange, and user identity
@@ -168,21 +170,14 @@ starts or state next changes. Files use atomic replacement with mode `0600` insi
 `0700` directory. They are not encrypted. Vault linkage and ingestion are outside
 this change. The historical `lark-im` directory is not automatically migrated.
 
-The self-contained `folio-lark-im` Skill owns `scripts/extract-window.mjs`, its
-window-extraction procedure, and analysis safety rules. The script writes each
-changed chat to a Markdown file
-with YAML frontmatter: `source`, `chat_id`, `chat_name`, `chat_description`,
-`chat_mode`, `owner_id`, `p2p_target_type`, `p2p_target_id`, `window_start`,
-`window_end`, and `message_count`. Chat fields come from the CLI message search;
-missing fields are `null`. Values are JSON-quoted YAML to preserve names and
-descriptions containing punctuation or newlines. The body contains the chat
-heading and one line per message: `- <ISO time> | <sender name> (<sender ID>) | <content>`.
-Message line breaks become `↵`; rich text and resource placeholders use the CLI's
-readable rendering. Original JSON payloads are not repeated in the body.
-Routine timestamps are accepted in any valid ISO form. The extractor converts
-them to the whole-second RFC3339 values required by Lark, queries a safe superset,
-then reapplies the original exact half-open window locally. It requests
-`search:message` for search and `im:chat.user_setting:read` for muted-chat filtering.
+The `lark/im` resource writes one Markdown file per chat. YAML frontmatter keeps
+`source`, `chat_id`, `chat_name`, `chat_type`, and `time_zone`; the body contains
+one compact line per message:
+`- <zoned time> | <sender name> (<sender ID>) | <message ID> | <content>`.
+Line breaks become `↵`, and the original JSON payload is not repeated. The
+provider converts Routine bounds to the whole-second RFC3339 values required by
+Lark, queries a safe superset, then reapplies the original exact half-open window
+locally. Both Routine bounds and rendered message times use the captured timezone.
 
 ## Verification
 
@@ -223,16 +218,15 @@ clients. Folio listens on a temporary loopback (`127.0.0.1`) callback, shows the
 verified Google URL as an external action, and exchanges the returned code for
 offline credentials. Access tokens are refreshed before a Task is prepared.
 
-The `email` resource mounts a small Skill and `extract-window.mjs`. A default
-Vault Routine is created after the resource is installed and runs once per day.
-It exports the exact Routine window to `raws/gmail/messages/`, then asks the
-Agent to classify urgent replies, tasks/deadlines, newsletters, waiting items,
-and archive candidates. Email content is treated as untrusted input and the
-workflow never sends, deletes, or relabels Gmail messages. OAuth token refresh
-and profile verification use Google's official `googleapis`/`google-auth-library`
-clients; the tiny mounted extractor intentionally remains a standalone REST
-script and only receives the short-lived access token through its process
-environment.
+After the `email` resource becomes ready, Folio creates one default hourly
+Ingestion Routine. Provider code fetches the exact half-open window and writes
+one Markdown projection per message below
+`raws/gmail/email/<routine-date>/`. Frontmatter records stable source identity,
+thread ID, received time, and timezone. No Agent is involved in this step, and
+the read-only integration never sends, deletes, or relabels Gmail messages.
+OAuth token refresh and profile verification use Google's official
+`googleapis`/`google-auth-library` clients; ingestion uses the short-lived access
+token only inside the integration process.
 
 ### Gmail OAuth client configuration
 
@@ -272,8 +266,8 @@ integration snapshots; the provider keeps them in its private state.
 OAuth authorization-code, token, refresh, and profile requests use the official
 Google SDK/Gaxios transport. Folio explicitly checks `HTTPS_PROXY` (then
 lowercase/`HTTP_PROXY` variants) for every request and passes the selected proxy
-to Gaxios; `NO_PROXY` remains respected. The mounted extractor is invoked with
-Node's `--use-env-proxy` flag so its native `fetch` follows the same settings.
+to Gaxios; `NO_PROXY` remains respected. Ingestion uses native `fetch` in the
+integration process and follows the same proxy environment.
 If Google is unreachable without a proxy, set one before launching the desktop
 app (GUI launches may not inherit the shell's environment). When an OAuth call fails, the development terminal prints
 `[Folio][Gmail OAuth]` with the endpoint, HTTP status, Google error code and
@@ -316,19 +310,19 @@ enter the server's exact folder path using the custom connection form; INBOX
 does not include archived mail. The existing Gmail API connector remains
 available and its authorization is not migrated automatically.
 
-### State, extraction, and packaging
+### State and ingestion
 
 Connection details stay in `~/.folio/integrations/imap/private.json` (directory
 0700, file 0600), matching the existing integration storage pattern. This is
 local permission-restricted storage, not keychain encryption. A failed check
 retains the details for an explicit retry; Disconnect removes the saved details.
-Neither catalog snapshots nor workspace scripts contain credentials. Task
-processes receive connection details through their environment; unlike the
-Gmail API access token, an IMAP app password is a long-lived credential and is
-not restricted to read-only access by the server.
+Neither catalog snapshots nor raw files contain credentials. The provider reads
+connection details only from its private integration directory; unlike the Gmail
+API access token, an IMAP app password is a long-lived credential and is not
+restricted to read-only access by the server.
 
-Installation creates an `imap/email` resource and an idempotent daily review
-Routine. Extraction uses a read-only folder and ImapFlow's `BODY.PEEK` fetching,
+Installation creates an `imap/email` resource, and Folio creates one default
+hourly Ingestion Routine after it becomes ready. Ingestion uses a read-only folder and ImapFlow's `BODY.PEEK` fetching,
 so messages are not marked read. It searches a covering date range, then filters
 `INTERNALDATE` by the exact half-open Routine window. UID metadata is fetched in
 batches of 100 with no total-message cap. Filenames include a hash of the server,
@@ -337,13 +331,9 @@ folder UID reset or account change. MailParser converts HTML-only messages to
 text. Attachments are not exported, and messages larger than 25 MiB fail the
 window explicitly rather than being silently skipped.
 
-`raws/imap/_updated.md` is removed before each attempt and published only after
-complete extraction. Partial files are not a successful window; callers must
-check the exit status before using the summary. SDK diagnostics are not printed
-because raw IMAP responses may contain private data. Successful Routine raws
-are persisted alongside the existing Gmail and Lark raws.
-
-The desktop app ships `imap-assets` and both runtime SDK dependencies. The
-provider resolves SDK entrypoints relative to the app and passes their absolute
-unpacked paths to the standalone extractor, so it also works from a Task
-worktree outside the repository without installing packages there.
+Each message is written below `raws/imap/email/<routine-date>/` with stable
+account/folder/UID identity and timezone frontmatter. The Task publishes the
+complete Git diff only after provider success; partial attempts retain the exact
+window for retry and never advance the Routine boundary. SDK diagnostics are not
+printed because raw IMAP responses may contain private data. The desktop app
+ships the runtime SDK dependencies used directly by the integration.

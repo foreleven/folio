@@ -19,21 +19,23 @@ export const migrateVault = SqliteMigrator.run({
       yield* sql`CREATE INDEX wiki_pages_by_parent ON wiki_pages(parent_id)`
       // Routine definitions; execution windows live on Tasks.
       yield* sql`CREATE TABLE routines (
-        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL,
-        agent TEXT NOT NULL CHECK(agent IN ('pi', 'codex')), model_provider_id TEXT,
-        model_id TEXT, thinking_level TEXT, skill_ids TEXT NOT NULL DEFAULT '[]',
-        integration_ids TEXT NOT NULL DEFAULT '[]', interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0),
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('agent', 'ingestion')),
+        configuration TEXT NOT NULL CHECK(json_valid(configuration)),
+        interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0),
         time_zone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
         revision INTEGER NOT NULL CHECK(revision > 0), next_trigger_at INTEGER,
-        last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        resource_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(resource_ids)),
-        CHECK(json_valid(skill_ids)), CHECK(json_valid(integration_ids)),
-        CHECK((agent='pi') = (model_provider_id IS NOT NULL AND model_id IS NOT NULL AND thinking_level IS NOT NULL))
+        last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       )`
+      yield* sql`CREATE UNIQUE INDEX routines_one_ingestion_resource
+        ON routines(json_extract(configuration, '$.integrationId'), json_extract(configuration, '$.resourceId'))
+        WHERE type='ingestion'`
 
       // Tasks, external Sessions and their durable Run ledger.
       yield* sql`CREATE TABLE tasks (
-        id TEXT PRIMARY KEY NOT NULL, goal TEXT NOT NULL, configuration TEXT NOT NULL,
+        id TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL CHECK(type IN ('agent', 'ingestion')),
+        configuration TEXT NOT NULL CHECK(json_valid(configuration)),
+        receipt TEXT CHECK(receipt IS NULL OR json_valid(receipt)),
         branch TEXT NOT NULL UNIQUE, worktree TEXT NOT NULL UNIQUE,
         state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'cancelled')),
         created_at INTEGER NOT NULL,
@@ -49,9 +51,20 @@ export const migrateVault = SqliteMigrator.run({
         window_start INTEGER,
         window_end INTEGER CHECK(window_end >= window_start),
         routine_revision INTEGER CHECK(routine_revision > 0),
-        routine_model TEXT CHECK(routine_model IS NULL OR json_valid(routine_model)),
         routine_time_zone TEXT,
-        routine_updated_at INTEGER
+        routine_updated_at INTEGER,
+        CHECK((type='agent' AND receipt IS NULL) OR (type='ingestion' AND receipt IS NOT NULL))
+      )`
+      yield* sql`CREATE TABLE raws (
+        id TEXT PRIMARY KEY NOT NULL,
+        integration_id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK(state IN ('present', 'deleted')),
+        current_commit TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(integration_id, resource_id, path)
       )`
       yield* sql`CREATE TABLE sessions (
         id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -122,7 +135,7 @@ export const migrateVault = SqliteMigrator.run({
         run_id TEXT NOT NULL, PRIMARY KEY(preparation_id, run_id), UNIQUE(run_id, kind),
         FOREIGN KEY(preparation_id, task_id, kind) REFERENCES git_change_preparations(id, task_id, kind),
         FOREIGN KEY(run_id, task_id) REFERENCES runs(id, task_id),
-        CHECK(kind IN ('raws', 'wiki'))
+        CHECK(kind='wiki')
       )`
       yield* sql`CREATE TRIGGER git_change_preparation_immutable BEFORE UPDATE ON git_change_preparations
         WHEN NEW.id<>OLD.id OR NEW.task_id IS NOT OLD.task_id
@@ -132,8 +145,8 @@ export const migrateVault = SqliteMigrator.run({
         BEGIN SELECT RAISE(ABORT, 'Git change preparation is immutable'); END`
       yield* sql`CREATE TRIGGER git_change_preparation_complete BEFORE UPDATE OF state ON git_change_preparations
         WHEN NEW.state='prepared' AND (
-          (NEW.kind='user' AND EXISTS (SELECT 1 FROM git_change_preparation_runs r WHERE r.preparation_id=NEW.id))
-          OR (NEW.kind<>'user' AND NOT EXISTS (SELECT 1 FROM git_change_preparation_runs r WHERE r.preparation_id=NEW.id))
+          (NEW.kind<>'wiki' AND EXISTS (SELECT 1 FROM git_change_preparation_runs r WHERE r.preparation_id=NEW.id))
+          OR (NEW.kind='wiki' AND NOT EXISTS (SELECT 1 FROM git_change_preparation_runs r WHERE r.preparation_id=NEW.id))
         ) BEGIN SELECT RAISE(ABORT, 'Git change preparation has invalid Run ownership'); END`
       yield* sql`CREATE TRIGGER git_change_preparation_retained BEFORE DELETE ON git_change_preparations
         BEGIN SELECT RAISE(ABORT, 'Git change preparation must be retained'); END`
@@ -293,7 +306,7 @@ export const migrateVault = SqliteMigrator.run({
       // Session creation cannot bypass the service-level fixed-Agent check through another writer.
       yield* sql`CREATE TRIGGER session_uses_task_agent BEFORE INSERT ON sessions
         WHEN NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id=NEW.task_id
-          AND json_extract(t.configuration, '$.agent')=NEW.agent)
+          AND t.type='agent' AND json_extract(t.configuration, '$.agent')=NEW.agent)
         BEGIN SELECT RAISE(ABORT, 'Session Agent must match its Task'); END`
       yield* sql`CREATE TRIGGER session_conflict_target BEFORE INSERT ON sessions
         WHEN NEW.purpose='conflict-resolution' AND NOT EXISTS (

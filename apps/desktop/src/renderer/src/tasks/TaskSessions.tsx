@@ -10,7 +10,7 @@ import { modelCatalogAtom, modelsAtom } from '../rpc/model-rpc'
 import { TaskRpcClient } from '../rpc/task-rpc'
 
 /** Explicitly initializes/restores Sessions. No render, selection or retry sends a Prompt. */
-export function TaskSessions({ task }: { task: TaskRecord }): React.JSX.Element {
+export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agent' }> }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const query = TaskRpcClient.query('tasks.get', { id: task.id })
   const detail = useAtomValue(query)

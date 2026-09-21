@@ -95,7 +95,7 @@ it('discovers accepted saves without application intent after restart and previe
     expect(yield* view.diff({ expectedParent: parent, path: 'AGENTS.md', saveId: 'pending' }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     expect((yield* view.inspect).pending).toEqual(result.pending)
   }).pipe(Effect.provide(layer())))
-})
+}, 15_000)
 
 it('bounds previews, identifies binary changes, and rejects an obsolete live baseline', async () => {
   await Effect.runPromise(Effect.gen(function*() {

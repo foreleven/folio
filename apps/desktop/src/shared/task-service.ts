@@ -37,6 +37,8 @@ export class TaskService extends Context.Service<
     readonly reprepareTaskWiki: (input: ReprepareTaskWiki) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly resolveTaskWikiConflict: (taskId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly abortTaskWikiConflict: (taskId: string, id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
+    readonly cancelIngestion: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
+    readonly retryIngestion: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly pendingTaskSynchronizations: (taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly executionCounts: Effect.Effect<ExecutionCounts, HarnessStoreError>

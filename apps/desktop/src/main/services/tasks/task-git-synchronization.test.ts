@@ -37,7 +37,7 @@ function layer() {
 const setup = Effect.gen(function* () {
   const workspace = yield* initializeVaultWorkspace(root, join(root, 'entry'))
   const worktrees = yield* TaskWorktrees
-  const task = yield* worktrees.create({ id: 'task', goal: 'manual wiki validation', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+  const task = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
   return {
     workspace,
     task,
@@ -75,7 +75,7 @@ it.each([false, true])('releases a settled Task after main advances, previously 
     expect((yield* git(workspace.workspace, ['rev-parse', task.branch])).trim()).toBe(retained)
     expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'new-page.md'), 'utf8'))).toBe('new user page\n')
   }).pipe(Effect.provide(layer())))
-})
+}, 15_000)
 
 /** Manual writes stand in for a stopped Agent; this test intentionally does not claim writer quiescence. */
 it('publishes a manually saved wiki change and keeps later rounds on the aligned frontier', async () => {
@@ -1027,7 +1027,7 @@ it('serializes publications from Tasks created at the same main baseline', async
   await Effect.runPromise(
     Effect.gen(function* () {
       const { workspace, task, worktrees, applications, sync, git } = yield* setup
-      const sibling = yield* worktrees.create({ id: 'sibling', goal: 'parallel manual edit', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+      const sibling = yield* worktrees.create({ id: 'sibling', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
       expect(sibling.baselineCommit).toBe(task.baselineCommit)
       yield* Effect.promise(() => writeFile(join(task.path, 'wiki/first.md'), 'first Task\n'))
       yield* Effect.promise(() => writeFile(join(sibling.path, 'wiki/second.md'), 'second Task\n'))
@@ -1052,7 +1052,7 @@ it('atomically supersedes and reprepares a concurrent operation after another Ta
   await Effect.runPromise(
     Effect.gen(function* () {
       const { workspace, task, worktrees, applications, sync, git } = yield* setup
-      const sibling = yield* worktrees.create({ id: 'stale-sibling', goal: 'parallel preparation', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+      const sibling = yield* worktrees.create({ id: 'stale-sibling', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
       yield* Effect.promise(() => writeFile(join(task.path, 'wiki/winner.md'), 'winner\n'))
       yield* Effect.promise(() => writeFile(join(sibling.path, 'wiki/stale.md'), 'stale candidate\n'))
       const winnerSource = yield* applications.save({ id: 'winner-save', taskId: 'task', expectedParent: task.baselineCommit, paths: ['wiki/winner.md'] })

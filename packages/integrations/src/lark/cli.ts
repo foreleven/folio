@@ -89,13 +89,14 @@ Effect.annotateLogs({ integration: 'lark', subsystem: 'cli' }), Effect.withLogSp
 /** Executes only the Folio-managed CLI and injects the short-lived user token via its environment. */
 export const LARK_USER_ACCESS_TOKEN_ENV = 'LARKSUITE_CLI_USER_ACCESS_TOKEN' as const
 
-export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string) {
+export const runCli = Effect.fn('Lark.runCli')(function*(directory: string, args: readonly string[], userToken: string,
+  environment: Readonly<Record<string, string>> = {}) {
   yield* Effect.logDebug('Lark CLI command started').pipe(Effect.annotateLogs({ argumentCount: args.length }))
   const executable = yield* findCli(directory)
   if (!executable) return yield* new IntegrationError({ message: 'The Folio-managed lark-cli is not installed.' })
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const command = ChildProcess.make(executable, [...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', extendEnv: true }).pipe(
-    ChildProcess.setEnv({ [LARK_USER_ACCESS_TOKEN_ENV]: userToken })
+    ChildProcess.setEnv({ ...environment, [LARK_USER_ACCESS_TOKEN_ENV]: userToken })
   )
   const output = yield* spawner.string(command).pipe(
     Effect.mapError(() => new IntegrationError({ message: 'The managed lark-cli command failed.' }))

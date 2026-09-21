@@ -27,7 +27,7 @@ function fixture(background = false, form = false) {
   const checkStarted = Effect.runSync(Deferred.make<void>())
   const checkResume = Effect.runSync(Deferred.make<void>())
   const state = { installs: 0, healthChecks: 0, inspections: 0, actions: 0, failInstall: false, failHealthCheck: false, failInspect: false, holdCheck: false, context: undefined as IntegrationContext["Service"] | undefined, payload: undefined as unknown, starts: 0, stops: 0, url: 'https://accounts.notes.example/connect' }
-  const resource: IntegrationResource = { id: 'im', type: 'im', name: 'Messages', onIngest: () => Effect.void }
+  const resource: IntegrationResource = { id: 'im', type: 'im', name: 'Messages', onIngest: () => Effect.void, ingest: () => Effect.void }
   const integration: Integration = {
     id: 'notes', name: 'Notes', description: 'Test provider', states: { ready: { kind: 'ready', label: 'Ready' } }, logo: 'data:image/svg+xml,%3Csvg%2F%3E', homepage: 'https://example.test',
     setup: background ? () => Effect.gen(function*() { state.starts++; state.context = yield* IntegrationContext; yield* Effect.never }).pipe(Effect.ensuring(Effect.sync(() => { state.stops++ }))) : undefined,
@@ -118,11 +118,7 @@ describe('desktop integration lifecycle', () => {
       await runtime.runPromise(service.action('imap', 'connect', { user: 'test@126.com', password: 'fixture-password' }))
       await settled('ready')
       const mounted = await runtime.runPromise(service.prepare(['imap'], directory, ['imap/email']))
-      expect(mounted.workspaceFiles?.map(file => file.path)).toContain('raws/imap/extract-window.mjs')
-      expect(Object.keys(mounted.environment ?? {}).sort()).toEqual([
-        'IMAPFLOW_MODULE_PATH', 'IMAP_CONNECTION', 'IMAP_HTML_TO_TEXT_MODULE_PATH', 'IMAP_MAILPARSER_MODULE_PATH'
-      ])
-      expect(JSON.stringify(mounted.workspaceFiles)).not.toContain('fixture-password')
+      expect(mounted).toEqual({ skillPaths: [], executableDirectories: [], instructions: [] })
     } finally { await runtime.dispose(); vi.restoreAllMocks() }
   })
 

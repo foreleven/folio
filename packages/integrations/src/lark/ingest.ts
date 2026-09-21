@@ -1,0 +1,171 @@
+import { Effect } from 'effect'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { IntegrationError, joinedTryPromise, type IngestInput } from '../base/index.ts'
+import { runCli } from './cli.ts'
+import { readPrivateState } from './state.ts'
+
+const envelope = (value: unknown): unknown => value && typeof value === 'object' && 'data' in value ? (value as { data: unknown }).data : value
+const object = (value: unknown, label: string): Record<string, unknown> => {
+  const unwrapped = envelope(value)
+  if (!unwrapped || typeof unwrapped !== 'object') throw new Error(`Invalid ${label} response`)
+  return unwrapped as Record<string, unknown>
+}
+const rows = (value: Record<string, unknown>, key: string): unknown[] => {
+  if (!Array.isArray(value[key])) throw new Error(`Missing ${key}`)
+  return value[key]
+}
+/** Lark IM uses epoch seconds while Mail uses milliseconds; accept either without shifting Routine windows. */
+const parseTime = (value: unknown): number => {
+  const parsed = typeof value === 'number' ? value
+    : typeof value === 'string' && /^\d+$/.test(value) ? Number(value)
+      : typeof value === 'string' ? Date.parse(value) : Number.NaN
+  return Number.isFinite(parsed) && Math.abs(parsed) < 100_000_000_000 ? parsed * 1000 : parsed
+}
+const oneLine = (value: unknown) => String(value ?? '').replace(/\r\n|[\r\n\u2028\u2029]/g, ' ↵ ')
+const safeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '_')
+
+const credentials = Effect.fn('Lark.ingestCredentials')(function* (directory: string) {
+  const state = yield* readPrivateState(directory)
+  if (!state.app || !state.userAuth) return yield* new IntegrationError({ message: 'Lark user authorization is unavailable.' })
+  return {
+    token: state.userAuth.accessToken,
+    environment: {
+      LARKSUITE_CLI_APP_ID: state.app.clientId,
+      LARKSUITE_CLI_APP_SECRET: state.app.clientSecret,
+      LARKSUITE_CLI_BRAND: state.app.brand,
+      LARKSUITE_CLI_DEFAULT_AS: 'user',
+      ...(state.appAuth ? { LARKSUITE_CLI_TENANT_ACCESS_TOKEN: state.appAuth.tenantAccessToken ?? state.appAuth.appAccessToken } : {})
+    }
+  }
+})
+
+const command = (input: IngestInput, args: readonly string[]) => Effect.gen(function* () {
+  const auth = yield* credentials(input.integrationDirectory)
+  const text = yield* runCli(input.integrationDirectory, args, auth.token, auth.environment)
+  return yield* Effect.try({
+    try: () => JSON.parse(text) as unknown,
+    catch: () => new IntegrationError({ message: 'The managed lark-cli returned invalid data.' })
+  })
+})
+
+const formatZoned = (epoch: number, timeZone: string): string => {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone, calendar: 'iso8601', numberingSystem: 'latn', hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+  })
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(epoch)).filter(part => part.type !== 'literal').map(part => [part.type, part.value]))
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+}
+
+/** Writes one file per chat with frontmatter and compact one-line messages. */
+export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestInput) {
+  const start = new Date(Math.floor(input.window.start / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const end = new Date(Math.ceil(input.window.end / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+  const messages: Array<Record<string, unknown>> = []
+  let pageToken: string | undefined
+  let pages = 0
+  do {
+    const args = ['im', '+messages-search', '--as', 'user', '--query', '', '--start', start, '--end', end,
+      '--page-size', '50', '--format', 'json', '--no-reactions']
+    if (pageToken) args.push('--page-token', pageToken)
+    const page = object(yield* command(input, args), 'messages')
+    for (const row of rows(page, 'messages')) {
+      if (!row || typeof row !== 'object') throw new IntegrationError({ message: 'Lark returned an invalid message.' })
+      const message = row as Record<string, unknown>
+      const at = parseTime(message.create_time)
+      if (!Number.isFinite(at)) return yield* new IntegrationError({ message: 'Lark returned a message without a valid timestamp.' })
+      if (at >= input.window.start && at < input.window.end) messages.push(message)
+    }
+    pageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
+    if (page.has_more === true && !pageToken) return yield* new IntegrationError({ message: 'Lark message pagination was incomplete.' })
+    if (++pages > 1000) return yield* new IntegrationError({ message: 'Lark message pagination exceeded its safe limit.' })
+  } while (pageToken)
+
+  const grouped = new Map<string, Array<Record<string, unknown>>>()
+  for (const message of messages) {
+    if (typeof message.chat_id !== 'string' || !message.chat_id) continue
+    const group = grouped.get(message.chat_id) ?? []
+    group.push(message)
+    grouped.set(message.chat_id, group)
+  }
+  yield* joinedTryPromise({
+    try: async (signal) => {
+      await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
+      for (const [chatId, group] of grouped) {
+        group.sort((left, right) => parseTime(left.create_time) - parseTime(right.create_time))
+        const chatName = typeof group[0]?.chat_name === 'string' ? group[0].chat_name : chatId
+        const nextLines = group.map(message => {
+          const sender = message.sender && typeof message.sender === 'object' ? message.sender as Record<string, unknown> : {}
+          const rawContent = message.content
+          const content = message.deleted ? '[recalled]'
+            : typeof rawContent === 'string' ? rawContent
+              : rawContent && typeof rawContent === 'object' && typeof (rawContent as Record<string, unknown>).text === 'string'
+                ? String((rawContent as Record<string, unknown>).text) : `[${message.msg_type ?? 'message'}]`
+          return `- ${formatZoned(parseTime(message.create_time), input.window.timeZone)} | ${oneLine(sender.name || 'Unknown')} (${oneLine(sender.id || 'unknown id')}) | ${oneLine(message.message_id || 'unknown message id')} | ${oneLine(content)}`
+        })
+        const path = join(input.outputDirectory, `${safeId(chatId)}.md`)
+        const previous = await readFile(path, 'utf8').catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+          throw error
+        })
+        const merged = new Map<string, string>()
+        for (const line of [...previous.split('\n').filter(line => line.startsWith('- ')), ...nextLines]) {
+          const match = line.match(/^- [^|]+\|[^|]+\|\s*([^|]+)\s*\|/)
+          if (match) merged.set(match[1]!.trim(), line)
+        }
+        const lines = [...merged.values()].sort()
+        const content = [
+          '---', `source: "lark/im"`, `chat_id: ${JSON.stringify(chatId)}`, `chat_name: ${JSON.stringify(chatName)}`,
+          `chat_type: ${JSON.stringify(group[0]?.chat_type ?? null)}`, `time_zone: ${JSON.stringify(input.window.timeZone)}`,
+          '---', '', `# ${chatName}`, '', ...lines, ''
+        ].join('\n')
+        await writeFile(path, content, { mode: 0o600, signal })
+      }
+    },
+    catch: () => new IntegrationError({ message: 'Lark IM ingestion could not write its raw projection.' })
+  })
+}, Effect.mapError(error => error instanceof IntegrationError ? error
+  : new IntegrationError({ message: 'Lark IM ingestion failed. Check authorization and retry the same window.' })))
+
+/** Uses Lark Mail triage for the exact window, then writes stable message projections. */
+export const ingestLarkEmail = Effect.fn('Lark.ingestEmail')(function* (input: IngestInput) {
+  const filter = JSON.stringify({ time_range: { start_time: new Date(input.window.start).toISOString(), end_time: new Date(input.window.end).toISOString() } })
+  const ids = new Set<string>()
+  let pageToken: string | undefined
+  do {
+    const args = ['mail', '+triage', '--query', '', '--filter', filter, '--page-size', '50', '--format', 'json']
+    if (pageToken) args.push('--page-token', pageToken)
+    const page = object(yield* command(input, args), 'mail triage')
+    const values = Array.isArray(page.messages) ? page.messages : Array.isArray(page.items) ? page.items : []
+    for (const value of values) if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).message_id === 'string') ids.add(String((value as Record<string, unknown>).message_id))
+    pageToken = typeof page.page_token === 'string' && page.page_token ? page.page_token : undefined
+  } while (pageToken)
+  if (!ids.size) return
+  const result = object(yield* command(input, ['mail', '+messages', '--message-ids', [...ids].join(','), '--html=false', '--format', 'json']), 'mail messages')
+  yield* joinedTryPromise({
+    try: async (signal) => {
+      await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
+      for (const raw of rows(result, 'messages')) {
+        if (!raw || typeof raw !== 'object') continue
+        const message = raw as Record<string, unknown>
+        if (typeof message.message_id !== 'string') continue
+        const receivedAt = parseTime(message.internal_date)
+        if (!Number.isFinite(receivedAt) || receivedAt < input.window.start || receivedAt >= input.window.end) continue
+        const sender = message.head_from && typeof message.head_from === 'object' ? message.head_from as Record<string, unknown> : {}
+        const recipients = Array.isArray(message.to) ? message.to.map(value => value && typeof value === 'object'
+          ? `${(value as Record<string, unknown>).name ?? ''} <${(value as Record<string, unknown>).mail_address ?? ''}>` : '').join(', ') : ''
+        const content = [
+          '---', `source: "lark/email"`, `message_id: ${JSON.stringify(message.message_id)}`,
+          `thread_id: ${JSON.stringify(message.thread_id ?? null)}`, `received_at: ${JSON.stringify(new Date(receivedAt).toISOString())}`,
+          `time_zone: ${JSON.stringify(input.window.timeZone)}`, '---', '', `# ${oneLine(message.subject || '(no subject)')}`, '',
+          `- From: ${oneLine(sender.name)} <${oneLine(sender.mail_address)}>`, `- To: ${oneLine(recipients)}`,
+          `- Folder: ${oneLine(message.folder_id)}`, '', oneLine(message.body_plain_text || message.body_preview || '(empty body)'), ''
+        ].join('\n')
+        await writeFile(join(input.outputDirectory, `${safeId(message.message_id)}.md`), content, { mode: 0o600, signal })
+      }
+    },
+    catch: () => new IntegrationError({ message: 'Lark Mail ingestion could not write its raw projection.' })
+  })
+}, Effect.mapError(error => error instanceof IntegrationError ? error
+  : new IntegrationError({ message: 'Lark Mail ingestion failed. Check authorization and retry the same window.' })))

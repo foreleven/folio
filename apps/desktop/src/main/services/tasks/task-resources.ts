@@ -18,11 +18,12 @@ export class TaskResources extends Context.Service<TaskResources, {
   static readonly layer = Layer.effect(TaskResources, Effect.gen(function*() {
     const integrations = yield* IntegrationService
     const prepare = Effect.fn('TaskResources.prepare')(function*(task: TaskRecord) {
+      if (task.type !== 'agent') return yield* failure('Ingestion Tasks do not prepare Agent resources.')
       if (!task.configuration.integrationIds.length) return { skillPaths: [], executableDirectories: [] }
       let stage = 'prepare-integrations'
       return yield* Effect.gen(function*() {
         // Provider checks validate installed paths and refresh authorization for each Session.
-        const mounted = yield* integrations.prepare(task.configuration.integrationIds, task.worktree, task.configuration.resourceIds ?? [])
+        const mounted = yield* integrations.prepare(task.configuration.integrationIds, task.worktree, task.configuration.resourceIds)
         const workspaceFiles = [
           ...(mounted.workspaceFiles ?? []),
           ...(mounted.instructions.length
@@ -53,7 +54,7 @@ export class TaskResources extends Context.Service<TaskResources, {
       }).pipe(Effect.tapCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logError(
         'Task resource preparation failed',
         { taskId: task.id, worktree: task.worktree, stage,
-          integrationIds: task.configuration.integrationIds, resourceIds: task.configuration.resourceIds ?? [] },
+          integrationIds: task.configuration.integrationIds, resourceIds: task.configuration.resourceIds },
         Cause.pretty(cause)
       )))
     }, Effect.mapError(() => failure()))

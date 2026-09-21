@@ -69,13 +69,8 @@ describe('IMAP integration lifecycle', () => {
       const mounted: IngestContext = { integrationDirectory: root, workspaceDirectory: join(root, 'task'),
         instructions: [], skills: [], executableDirectories: [], workspaceFiles: [], env: {} }
       await Effect.runPromise(imap.resources[0]!.onIngest(mounted))
-      expect(mounted.workspaceFiles?.map(file => file.path)).toEqual(['raws/imap/_workflow.md', 'raws/imap/extract-window.mjs'])
-      expect(JSON.stringify(mounted.workspaceFiles)).not.toContain('secret')
+      expect(mounted).toMatchObject({ skills: [], executableDirectories: [], workspaceFiles: [], env: {} })
       expect(JSON.stringify(published)).not.toContain('secret')
-      expect(JSON.parse(mounted.env.IMAP_CONNECTION).password).toBe('secret')
-      expect(mounted.env.IMAPFLOW_MODULE_PATH).toContain('imapflow')
-      expect(mounted.env.IMAP_HTML_TO_TEXT_MODULE_PATH).toContain('html-to-text')
-      expect(mounted.env.IMAP_MAILPARSER_MODULE_PATH).toContain('mailparser')
       await provide(imap.setup!())
       expect((await provide(imap.inspect())).state).toBe('ready')
       connect.mockRejectedValueOnce(new Error('temporary'))
@@ -85,7 +80,7 @@ describe('IMAP integration lifecycle', () => {
       await provide(imap.onActionCallback('disconnect'))
       expect((await provide(imap.inspect())).state).toBe('login_required')
       expect(await readFile(join(root, 'private.json'), 'utf8')).not.toContain('secret')
-      await expect(Effect.runPromise(imap.resources[0]!.onIngest(mounted))).rejects.toThrow('Connect and verify')
+      await Effect.runPromise(imap.resources[0]!.onIngest(mounted))
     } finally { await runtime.dispose() }
   })
 

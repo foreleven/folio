@@ -1,6 +1,6 @@
 export * from './base/index.ts'
 export { lark, LarkApplication } from './lark/index.ts'
 export type { LarkApp } from './lark/index.ts'
-export { gmail, GmailAssetsDirectory, gmailScope, hasGmailScope } from './gmail/index.ts'
+export { gmail, gmailScope, hasGmailScope } from './gmail/index.ts'
 export type { GmailCredentials } from './gmail/index.ts'
-export { imap, ImapAssetsDirectory } from './imap/index.ts'
+export { imap } from './imap/index.ts'

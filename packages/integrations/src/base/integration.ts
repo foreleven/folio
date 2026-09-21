@@ -1,10 +1,27 @@
-import { Context, Schema } from 'effect'
-import type { Effect } from 'effect'
+import { Context, Effect, Schema } from 'effect'
 import type { IntegrationAction, IntegrationActionDefinition, IntegrationStatus, IntegrationText } from './protocol.ts'
 
 export class IntegrationError extends Schema.TaggedError<IntegrationError>()('IntegrationError', {
   message: Schema.String
 }) {}
+
+/** Aborts interruptible Promise work, then joins its cleanup before releasing Effect ownership. */
+export const joinedTryPromise = <A, E>(options: {
+  readonly try: (signal: AbortSignal) => PromiseLike<A>
+  readonly catch: (error: unknown) => E
+}): Effect.Effect<A, E> => Effect.callback<A, E>((resume, signal) => {
+  const promise = Promise.resolve().then(() => options.try(signal))
+  promise.then(
+    value => resume(Effect.succeed(value)),
+    cause => {
+      try { resume(Effect.fail(options.catch(cause))) }
+      catch (error) { resume(Effect.die(error)) }
+    }
+  )
+  // Effect aborts signal before running this finalizer. Waiting for the same Promise
+  // prevents a retry from racing provider writes that outlived their cancelled fiber.
+  return Effect.promise(() => promise.then(() => undefined, () => undefined))
+})
 export type IntegrationEffect<A, E = IntegrationError, R = never> = Effect.Effect<A, E, IntegrationContext | R>
 
 /** Static provider identity, safe to serialize for catalogs without loading credentials. */
@@ -37,6 +54,7 @@ export class IntegrationContext extends Context.Service<IntegrationContext, {
   /** Host upserts by integration ID + resource ID; repeated installation must be safe. */
   readonly registerResource: (resource: Pick<IntegrationResource, 'id' | 'type' | 'name'>) => Effect.Effect<void, IntegrationError>
 }>()('@folio/integrations/base/IntegrationContext') {}
+/** Legacy Agent mount context. Ingestion itself never exposes these capabilities. */
 export interface IngestContext {
   /** Host-resolved installation root; never supplied as an arbitrary renderer path. */
   readonly integrationDirectory: string
@@ -49,20 +67,34 @@ export interface IngestContext {
   readonly executableDirectories: string[]
   readonly env: Record<string, string>
 }
-export interface IntegrationResource {
+export interface IngestWindow {
+  readonly start: number
+  readonly end: number
+  readonly timeZone: string
+}
+export interface IngestInput {
+  /** Host-resolved installation root; renderer input can never select this path. */
+  readonly integrationDirectory: string
+  /** Exact dated raw namespace owned by this resource and Task. */
+  readonly outputDirectory: string
+  readonly window: IngestWindow
+}
+export interface IntegrationResource<R = never> {
   readonly id: string
   readonly type?: IntegrationResourceTypeValue
   readonly name: IntegrationText
   readonly description?: IntegrationText
-  /** Declares resources for the Agent; does not fetch data, start a Run, or modify the workspace. */
+  /** Optional legacy Agent capability mount; unrelated to host-owned ingestion. */
   readonly onIngest: (context: IngestContext) => Effect.Effect<void, IntegrationError>
+  /** Fetches one exact source window directly into a host-owned raw namespace. */
+  readonly ingest: (input: IngestInput) => IntegrationEffect<void, IntegrationError, R>
 }
 export interface Integration<R = never> extends IntegrationMetadata {
   /** Optional provider-owned background lifetime. Host starts setup once for installed integrations and interrupts it on exit. */
   readonly setup?: () => IntegrationEffect<void, IntegrationError, R>
   readonly actions: readonly IntegrationActionDefinition[]
   /** Static implementations allow the host to rebind persisted resources after restart. */
-  readonly resources: readonly IntegrationResource[]
+  readonly resources: readonly IntegrationResource<R>[]
   /** Called after user confirmation; prepares dependencies and registers resources only. */
   readonly install: () => IntegrationEffect<void, IntegrationError, R>
   /** Lightweight health check. Failure tells the host to rebuild state with inspect. */
@@ -78,7 +110,7 @@ export interface IntegrationDefinition<R = never> extends IntegrationMetadata {
   /** Starts the provider-owned background lifetime; it remains active until interrupted by the host. */
   readonly setup?: () => IntegrationEffect<void, unknown, R>
   readonly actions: readonly IntegrationActionDefinition[]
-  readonly resources: readonly IntegrationResource[]
+  readonly resources: readonly IntegrationResource<R>[]
   /** Installs dependencies and upserts resources; the base publishes the final inspect. */
   readonly install: () => IntegrationEffect<void, unknown, R>
   /** Performs a cheap health check; any failure asks the host to run inspect. */

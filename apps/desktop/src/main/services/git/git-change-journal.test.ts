@@ -186,7 +186,7 @@ it('rejects extra tree changes and associates Agent commits only with a successf
     expect(yield* journal.prepare({ ...input, paths: ['wiki/unrelated.md'] }).pipe(Effect.flip)).toMatchObject({ reason: 'invalid-state' })
     const worktrees = yield* TaskWorktrees
     const store = yield* HarnessStore
-    const task = yield* worktrees.create({ id: 'task', goal: 'notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] } })
+    const task = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
     yield* store.createSession({ id: 'session', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null })
     yield* store.bindSession('session', { acpSessionId: 'acp', nativeSessionId: null })
     yield* reserveClaimedRun({ id: 'run', taskId: 'task', sessionId: 'session', prompt: 'notes', purpose: 'execution',

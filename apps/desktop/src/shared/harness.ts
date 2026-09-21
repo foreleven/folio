@@ -1,27 +1,61 @@
 import { ModelProfile } from '@folio/agent/config/schema'
 import { Schema } from 'effect'
+import { SessionModelSelection } from './model'
 
 export const AgentKind = Schema.Literals(['pi', 'codex'])
 const Id = Schema.NonEmptyString
-/** Only capability references belong in snapshots; credentials remain in Agent/Integration stores. */
-export const TaskConfiguration = Schema.Struct({
+const Goal = Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim().length > 0))
+/** Immutable Agent inputs. Credentials remain in Agent and Integration stores. */
+export const AgentTaskConfiguration = Schema.Struct({
+  goal: Goal,
   agent: AgentKind,
+  model: Schema.NullOr(SessionModelSelection),
   skillIds: Schema.Array(Id),
   integrationIds: Schema.Array(Id),
-  resourceIds: Schema.optionalKey(Schema.Array(Id))
+  resourceIds: Schema.Array(Id)
 })
-export const NewTask = Schema.Struct({
-  id: Id, goal: Schema.NonEmptyString, configuration: TaskConfiguration,
-  branch: Id, worktree: Id
+export type AgentTaskConfiguration = typeof AgentTaskConfiguration.Type
+export const IngestionTaskConfiguration = Schema.Struct({
+  integrationId: Id,
+  resourceId: Id
 })
+export type IngestionTaskConfiguration = typeof IngestionTaskConfiguration.Type
+export const TaskConfiguration = Schema.Union([AgentTaskConfiguration, IngestionTaskConfiguration])
+export type TaskConfiguration = typeof TaskConfiguration.Type
+
+export const IngestionReceiptState = Schema.Literals(['pending', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled', 'conflict'])
+export const IngestionReceipt = Schema.Struct({
+  state: IngestionReceiptState,
+  attemptCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cancelRequested: Schema.Boolean,
+  startedAt: Schema.NullOr(Schema.Number),
+  endedAt: Schema.NullOr(Schema.Number),
+  error: Schema.NullOr(Schema.String),
+  changeId: Schema.NullOr(Id),
+  observedHead: Schema.NullOr(Schema.String)
+})
+export type IngestionReceipt = typeof IngestionReceipt.Type
+
+const TaskIdentity = {
+  id: Id,
+  branch: Id,
+  worktree: Id
+}
+export const NewTask = Schema.Union([
+  Schema.Struct({ ...TaskIdentity, type: Schema.Literal('agent'), configuration: AgentTaskConfiguration, receipt: Schema.Null }),
+  Schema.Struct({ ...TaskIdentity, type: Schema.Literal('ingestion'), configuration: IngestionTaskConfiguration, receipt: IngestionReceipt })
+])
 export type NewTask = typeof NewTask.Type
-export const TaskRecord = Schema.Struct({
-  ...NewTask.fields,
+const TaskLifecycle = {
   state: Schema.Literals(['active', 'completed', 'cancelled']),
   worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
   worktreeBase: Schema.NullOr(Schema.String),
   createdAt: Schema.Number
-})
+}
+export const TaskRecord = Schema.Union([
+  Schema.Struct({ ...TaskIdentity, ...TaskLifecycle, type: Schema.Literal('agent'), configuration: AgentTaskConfiguration, receipt: Schema.Null }),
+  Schema.Struct({ ...TaskIdentity, ...TaskLifecycle, type: Schema.Literal('ingestion'), configuration: IngestionTaskConfiguration, receipt: IngestionReceipt })
+])
 export type TaskRecord = typeof TaskRecord.Type
 
 export const SessionPurpose = Schema.Literals(['task', 'conflict-resolution'])

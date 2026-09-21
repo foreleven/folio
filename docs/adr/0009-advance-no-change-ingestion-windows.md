@@ -1,0 +1,3 @@
+# Advance successful Ingestion windows without raw changes
+
+An Ingestion window that checks the provider successfully but changes no raw file is still successful and advances the Routine boundary. After proving the worktree clean, Folio enters the Vault Git gate and records the then-current canonical HEAD as `observedHead`, not the Task's earlier worktree baseline; it creates no empty Git commit, changes no raw record, and schedules no Knowledge work. The Task completion and Routine boundary advance share one database transaction, while treating an empty result as failure would retry quiet source windows forever.

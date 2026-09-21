@@ -23,7 +23,7 @@ function layer() {
   return TaskWorktrees.layer(root).pipe(Layer.provideMerge(HarnessStore.layer),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
-const draft = (id: string) => ({ id, goal: 'Edit notes', configuration: { agent: 'pi' as const, skillIds: [], integrationIds: [] } })
+const draft = (id: string) => ({ id, type: 'agent' as const, receipt: null, configuration: { goal: 'Test task', agent: 'pi' as const, model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
 const initialize = Effect.suspend(() => initializeVaultWorkspace(root, join(root, 'entry')))
 
 describe('Task Git worktree creation checkpoints', () => {

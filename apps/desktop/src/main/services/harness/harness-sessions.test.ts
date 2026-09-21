@@ -44,7 +44,7 @@ const setup = Effect.gen(function*() {
   const worktrees = yield* TaskWorktrees
   const store = yield* HarnessStore
   for (const id of ['a', 'b']) {
-    yield* worktrees.create({ id, goal: 'notes', configuration: { agent: 'codex', skillIds: [], integrationIds: [] } })
+    yield* worktrees.create({ id, type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
     yield* store.createSession({ id, taskId: id, agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })
   }
   yield* store.createSession({ id: 'alternate', taskId: 'a', agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })

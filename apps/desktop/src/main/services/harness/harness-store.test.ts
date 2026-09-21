@@ -26,8 +26,8 @@ const setup = Effect.gen(function* () {
   const store = yield* HarnessStore
   yield* store.createTask({
     id: 'task',
-    goal: 'Summarize notes',
-    configuration: { agent: 'pi', skillIds: ['notes'], integrationIds: ['lark'] },
+    type: 'agent', receipt: null,
+    configuration: { goal: 'Summarize notes', agent: 'pi', model: null, skillIds: ['notes'], integrationIds: ['lark'], resourceIds: [] },
     branch: 'task/task',
     worktree: '/worktrees/task'
   })
@@ -80,8 +80,8 @@ describe('Vault harness execution ledger', () => {
         expect(yield* store.createSession({ id: 'third', taskId: 'task', agent: 'pi', adapterVersion: '1', purpose: 'task', syncOperationId: null }).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
         yield* store.createTask({
           id: 'other',
-          goal: 'Other',
-          configuration: { agent: 'pi', skillIds: [], integrationIds: [] },
+          type: 'agent', receipt: null,
+          configuration: { goal: 'Other', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
           branch: 'task/other',
           worktree: '/worktrees/other'
         })

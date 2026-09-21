@@ -64,6 +64,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
           return existing.ready
         }
         const task = yield* store.task(taskId)
+        if (task.type !== 'agent') return yield* failure('invalid-state')
         const saved = (yield* store.sessions(taskId)).find(session => session.id === sessionId)
         if (!saved) return yield* failure('not-found')
         if (task.state !== 'active' || task.worktreeState !== 'ready') return yield* failure('invalid-state')
@@ -143,6 +144,7 @@ export class HarnessSessions extends Context.Service<HarnessSessions, {
       ) {
         if (shuttingDown || [...entries.values()].some(entry => entry.taskId === taskId)) return yield* failure('task-busy')
         const task = yield* store.task(taskId)
+        if (task.type !== 'agent') return yield* failure('invalid-state')
         const saved = (yield* store.sessions(taskId)).find(session => session.id === sessionId)
         if (!saved?.acpSessionId || !saved.nativeSessionId) return yield* failure('invalid-state')
         // Main supplies this path separately so inspecting history never requires a working runtime bundle.

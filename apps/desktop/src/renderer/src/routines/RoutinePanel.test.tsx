@@ -26,7 +26,9 @@ vi.mock('../rpc/task-rpc', () => ({
     saveRoutine: {},
     runRoutine: {},
     prepareRoutine: {},
-    cancelRun: 'cancel'
+    cancelRun: 'cancel',
+    cancelIngestion: {},
+    retryIngestion: {}
   }
 }))
 vi.mock('../preferences', () => ({ useLocale: () => 'zh-CN' }))
@@ -43,11 +45,11 @@ describe('Routine details', () => {
   it('refreshes background execution results and releases the timer on unmount', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
-    mocks.routines = [{ id: 'imap', name: 'IMAP', prompt: 'Review mail', agent: 'codex', model: null,
-      skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 1440, timeZone: 'UTC',
+    mocks.routines = [{ id: 'imap', name: 'IMAP', type: 'agent', configuration: { goal: 'Review mail', agent: 'codex', model: null,
+      skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 1440, timeZone: 'UTC',
       enabled: true, revision: 1, nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
     const execution = { routineId: 'imap', taskId: 'task', routineDate: '2026-09-19', triggerTime: 1,
-      runId: '33333333-3333-4333-8333-333333333333',
+      runId: '33333333-3333-4333-8333-333333333333', type: 'agent', cancelRequested: false,
       firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
       timeZone: 'UTC', routineRevision: 1, model: null, startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }
     mocks.executions = [{ ...execution, status: 'preparing' }]
@@ -73,16 +75,16 @@ describe('Routine details', () => {
   it('shows a stop action for an active Agent execution', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
-    mocks.routines = [{ id: 'imap', name: 'IMAP', prompt: 'Review mail', agent: 'codex', model: null,
-      skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: 'UTC', enabled: true, revision: 1,
+    mocks.routines = [{ id: 'imap', name: 'IMAP', type: 'agent', configuration: { goal: 'Review mail', agent: 'codex', model: null,
+      skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 60, timeZone: 'UTC', enabled: true, revision: 1,
       nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
-    mocks.executions = [{ routineId: 'imap', taskId: 'task', runId: '33333333-3333-4333-8333-333333333333', routineDate: '2026-09-19',
+    mocks.executions = [{ routineId: 'imap', taskId: 'task', type: 'agent', cancelRequested: false, runId: '33333333-3333-4333-8333-333333333333', routineDate: '2026-09-19',
       triggerTime: 1, firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
       timeZone: 'UTC', routineRevision: 1, model: null, status: 'running', startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }]
     render(<RoutinePanel />)
     fireEvent.click(screen.getByRole('button', { name: '打开 IMAP Routine 详情' }))
-    expect(screen.getByRole('button', { name: '停止 Agent' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '停止 Agent' }))
+    expect(screen.getByRole('button', { name: '停止执行' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '停止执行' }))
     expect(mocks.cancel).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: '33333333-3333-4333-8333-333333333333' } })
   })
 
@@ -91,12 +93,9 @@ describe('Routine details', () => {
       {
         id: '00000000-0000-4000-8000-000000000001',
         name: '每日邮件整理',
-        prompt: '第一步：读取今天的邮件。\n第二步：整理行动项和截止时间。',
-        agent: 'codex',
-        model: null,
-        skillIds: [],
-        integrationIds: [],
-        resourceIds: [],
+        type: 'agent',
+        configuration: { goal: '第一步：读取今天的邮件。\n第二步：整理行动项和截止时间。', agent: 'codex', model: null,
+          skillIds: [], integrationIds: [], resourceIds: [] },
         intervalMinutes: 1440,
         timeZone: 'Asia/Shanghai',
         enabled: true,

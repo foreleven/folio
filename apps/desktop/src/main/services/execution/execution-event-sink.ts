@@ -64,8 +64,9 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
         if (current.owner !== run.owner || current.state !== 'preparing') return yield* invalid()
         const state = yield* fileEffect(() => files.begin(current))
         const task = yield* store.task(run.taskId)
+        if (task.type !== 'agent') return yield* invalid()
         const metadata = { agent: task.configuration.agent, source: run.source,
-          integrationIds: task.configuration.integrationIds, resourceIds: task.configuration.resourceIds ?? [] }
+          integrationIds: task.configuration.integrationIds, resourceIds: task.configuration.resourceIds }
         yield* Effect.logInfo('Agent execution claimed', { taskId: run.taskId, sessionId: run.sessionId, runId: run.id, ...metadata })
         yield* Effect.promise(() => files.log(state, 'claimed', metadata))
       }),

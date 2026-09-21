@@ -24,7 +24,7 @@ const vaultLayer = (id = 'a') => ExecutionEventSink.layer.pipe(
 )
 const setup = Effect.gen(function* () {
   const store = yield* HarnessStore
-  yield* store.createTask({ id: 'task', goal: 'notes', branch: 'task', worktree: '/worktrees/task', configuration: { agent: 'codex', skillIds: [], integrationIds: [] } })
+  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, branch: 'task', worktree: '/worktrees/task', configuration: { goal: 'notes', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
   const sql = yield* SqlClient.SqlClient
   yield* sql`UPDATE tasks SET worktree_state='ready' WHERE id='task'`
   yield* store.createSession({ id: 'session', taskId: 'task', agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })

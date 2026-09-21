@@ -52,7 +52,7 @@ export interface GitConflictResolutionContext extends GitConflictContext {
   readonly taskDiff: string
 }
 
-/** Synchronizes manually saved wiki commits; Agent writer ownership and raws remain outside this service. */
+/** Synchronizes validated Agent wiki commits and host-owned Ingestion raw commits. */
 export class TaskGitSynchronization extends Context.Service<
   TaskGitSynchronization,
   {
@@ -110,7 +110,8 @@ export class TaskGitSynchronization extends Context.Service<
         const checkouts = Effect.fn('TaskGitSynchronization.checkouts')(function* (taskId: string) {
           const task = yield* store.task(taskId)
           const taskPath = join(root, 'worktrees', taskId)
-          if (task.state !== 'active' || task.worktreeState !== 'ready' || task.worktree !== taskPath || task.branch !== `folio/task/${taskId}` || !task.worktreeBase)
+          const usableState = task.state === 'active' || (task.type === 'ingestion' && task.state === 'completed')
+          if (!usableState || task.worktreeState !== 'ready' || task.worktree !== taskPath || task.branch !== `folio/task/${taskId}` || !task.worktreeBase)
             return yield* invalid()
           if (
             (yield* fs.realPath(main)) !== main ||
@@ -139,6 +140,18 @@ export class TaskGitSynchronization extends Context.Service<
           )
             return yield* invalid()
           return { task, taskPath }
+        })
+
+        /** Derives the only source namespace this typed Task may publish. */
+        const taskPolicy = Effect.fn('TaskGitSynchronization.taskPolicy')(function* (taskId: string) {
+          const task = yield* store.task(taskId)
+          if (task.type === 'agent') return { kind: 'agent' as const, prefix: 'wiki/', pathspec: 'wiki' }
+          const rows = yield* sql<{ routineDate: string | null }>`SELECT routine_date AS routineDate FROM tasks WHERE id=${taskId}`
+          const routineDate = rows[0]?.routineDate
+          if (!routineDate || !/^\d{4}-\d{2}-\d{2}$/.test(routineDate)
+            || [task.configuration.integrationId, task.configuration.resourceId].some(value => !/^[a-zA-Z0-9_-]+$/.test(value))) return yield* invalid()
+          const pathspec = `raws/${task.configuration.integrationId}/${task.configuration.resourceId}/${routineDate}`
+          return { kind: 'ingestion' as const, prefix: `${pathspec}/`, pathspec }
         })
 
         /** Reads the repository object format so generated commit/ref bytes use the active hash algorithm. */
@@ -204,6 +217,7 @@ export class TaskGitSynchronization extends Context.Service<
             return prior
           }
           const { task, taskPath } = yield* checkouts(value.taskId)
+          const policy = yield* taskPolicy(value.taskId)
           const sourceHead = (yield* git(taskPath, ['rev-parse', 'HEAD'])).trim()
           if (sourceHead !== value.expectedSourceHead) return yield* invalid()
           const priorOperations = yield* sql<{ sourceHead: string; alignedHead: string | null; publishedHead: string | null; state: string }>`SELECT
@@ -237,9 +251,10 @@ export class TaskGitSynchronization extends Context.Service<
             if (ancestry.length !== 2 || ancestry[1] !== parent) return yield* invalid()
             const rows = yield* sql`SELECT p.id, p.commit_oid AS "commit", p.paths FROM git_change_preparations p
             JOIN git_change_applications a ON a.id=p.id
-            WHERE p.task_id=${value.taskId} AND p.branch=${task.branch} AND p.kind IN ('user', 'wiki')
+            WHERE p.task_id=${value.taskId} AND p.branch=${task.branch}
+              AND ((${policy.kind}='agent' AND p.kind IN ('user', 'wiki')) OR (${policy.kind}='ingestion' AND p.kind='raws'))
               AND p.commit_oid=${commit} AND a.state='applied'`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(ChangeRow))))
-            if (rows.length !== 1 || rows[0]!.paths.some((path) => !path.startsWith('wiki/'))) return yield* invalid()
+            if (rows.length !== 1 || rows[0]!.paths.some((path) => !path.startsWith(policy.prefix))) return yield* invalid()
             sourceChanges.push(rows[0]!.id)
             parent = commit
           }
@@ -266,7 +281,7 @@ export class TaskGitSynchronization extends Context.Service<
             tree,
             parent,
             createdAt: row.createdAt + index * 1000,
-            message: `Synchronize wiki change\n\nFolio-Sync-Operation: ${row.id}\nFolio-Source-Change: ${sourceChangeId}\nFolio-Source-Commit: ${sourceCommit}\nFolio-Task-Id: ${row.taskId}\n`
+            message: `Synchronize Task change\n\nFolio-Sync-Operation: ${row.id}\nFolio-Source-Change: ${sourceChangeId}\nFolio-Source-Commit: ${sourceCommit}\nFolio-Task-Id: ${row.taskId}\n`
           })
           const item: typeof GitSyncCanonicalCommit.Type = { sourceChangeId, sourceCommit, tree, commit: gitCommitHash(data, yield* objectFormat()), data }
           const previous = row.canonicalCommits[index]
@@ -455,6 +470,7 @@ export class TaskGitSynchronization extends Context.Service<
         /** Appends remaining source commits, retaining every prefix so a later conflict is restart-safe. */
         const continuePreparation = Effect.fn('TaskGitSynchronization.continuePreparation')(function* (input: Row, coordinator: string) {
           let row = input
+          const policy = yield* taskPolicy(row.taskId)
           for (let index = row.canonicalCommits.length; index < row.sourceCommits.length; index += 1) {
             const sourceCommit = row.sourceCommits[index]!
             // A previously accepted resolution is replayed as a three-way patch. This is the
@@ -493,7 +509,7 @@ export class TaskGitSynchronization extends Context.Service<
             }
             if (!applied) {
               const conflicts = (yield* git(coordinator, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean)
-              if (!conflicts.length || conflicts.some((path) => !path.startsWith('wiki/'))) return yield* invalid()
+              if (!conflicts.length || conflicts.some((path) => !path.startsWith(policy.prefix))) return yield* invalid()
               const changed = yield* sql`UPDATE git_sync_operations SET state='conflict', conflict_index=${index}
                 WHERE id=${row.id} AND state IN ('preparing', 'resolving')
                   AND canonical_commits=${JSON.stringify(row.canonicalCommits)} RETURNING id`
@@ -668,7 +684,8 @@ export class TaskGitSynchronization extends Context.Service<
           // A staged conflict result must be journaled before the old operation can be retired.
           // This remains safe when main has already advanced because it only reads the isolated
           // coordinator and inserts an immutable resolution input.
-          if (ownedPrevious.state === 'conflict') yield* captureResolutionInput(ownedPrevious)
+          const policy = yield* taskPolicy(value.taskId)
+          if (ownedPrevious.state === 'conflict' && policy.kind === 'agent') yield* captureResolutionInput(ownedPrevious)
           const replacement = yield* find(value.id)
           if (replacement) {
             if (

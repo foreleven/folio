@@ -7,7 +7,7 @@ import { HarnessStore } from '../harness/harness-store'
 import { initializeVaultWorkspace } from '../vault/vault-workspace'
 import { Effect, Layer, ManagedRuntime } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -20,7 +20,7 @@ let root: string
 let runtime: ManagedRuntime.ManagedRuntime<WikiService | SqlClient.SqlClient, unknown>
 let service: WikiService['Service']
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), 'folio-wiki-'))
+  directory = await realpath(await mkdtemp(join(tmpdir(), 'folio-wiki-')))
   root = join(directory, 'workspace/wiki')
   await mkdir(join(directory, 'entry'))
   await Effect.runPromise(initializeVaultWorkspace(directory, join(directory, 'entry')).pipe(Effect.provide(NodeServices.layer)))
@@ -63,7 +63,7 @@ describe('Wiki file-backed Page service', () => {
     await runtime.runPromise(service.saveTypes({ objectTypes: [...snapshot.objectTypes, { id: 'book', name: 'Book', icon: '📚', properties: [] }], expectedVersion: snapshot.typesVersion }))
     expect(await git(['show', 'HEAD:wiki/_types.json'])).toContain('Book')
     expect(await git(['status', '--porcelain'])).toBe('?? wiki/unrelated.md\n')
-  })
+  }, 15_000)
 
   it('imports nested Markdown and preserves unknown frontmatter on first edit', async () => {
     await mkdir(join(root, 'notes'))

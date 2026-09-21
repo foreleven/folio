@@ -1,6 +1,6 @@
-import { Context, Deferred, Effect, Layer } from 'effect'
+import { Context, Deferred, Effect, Fiber, Layer } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
-import { defineIntegration, IntegrationContext, IntegrationError } from './index.ts'
+import { defineIntegration, IntegrationContext, IntegrationError, joinedTryPromise } from './index.ts'
 
 /** Builds the callback protocol used by provider fixtures. */
 const callback = (id: string) => ({ id, type: 'callback' as const })
@@ -25,7 +25,7 @@ function provider(id = 'notes', form = false) {
       : Effect.sync(() => { writes.push({ state, data }) })),
     registerResource: (resource) => Effect.sync(() => { registered.push(resource.id) })
   }
-  const resource = { id: 'pages', name: 'Pages', onIngest: () => Effect.void }
+  const resource = { id: 'pages', name: 'Pages', onIngest: () => Effect.void, ingest: () => Effect.void }
   const integration = defineIntegration({
     id, name: 'Notes', description: 'Personal notes', homepage: 'https://notes.example',
     states: {}, logo: 'data:image/svg+xml,%3Csvg%2F%3E', resources: [resource],
@@ -53,6 +53,33 @@ function provider(id = 'notes', form = false) {
 }
 
 describe('integration base', () => {
+  it('joins aborted Promise work before releasing Effect ownership', async () => {
+    let release!: () => void
+    let started = false
+    let aborted = false
+    let finished = false
+    const pending = new Promise<void>(resolve => { release = resolve })
+    await Effect.runPromise(Effect.gen(function* () {
+      const worker = yield* joinedTryPromise({
+        try: async signal => {
+          started = true
+          signal.addEventListener('abort', () => { aborted = true }, { once: true })
+          await pending
+          finished = true
+        },
+        catch: cause => new IntegrationError({ message: String(cause) })
+      }).pipe(Effect.forkChild)
+      while (!started) yield* Effect.yieldNow
+      const stopping = yield* Fiber.interrupt(worker).pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(aborted).toBe(true)
+      expect(finished).toBe(false)
+      release()
+      yield* Fiber.join(stopping)
+      expect(finished).toBe(true)
+    }))
+  })
+
   it('preserves provider service requirements and scopes host overrides to each execution', async () => {
     class Account extends Context.Service<Account, { readonly name: string }>()('test/Account') {}
     const seen: string[] = []

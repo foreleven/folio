@@ -1,4 +1,4 @@
-import { RoutineExecution, RoutineRecord, RunRoutine, SaveRoutine } from '../routine'
+import { RoutineExecution, RoutineId, RoutineRecord, RunRoutine, SaveRoutine } from '../routine'
 import { MessageRecord } from '../harness-events'
 import { SessionModelSelection } from '../model'
 import { Schema } from 'effect'
@@ -61,7 +61,7 @@ export type StartConflictResolutionInput = typeof StartConflictResolutionInput.T
 export const SessionHistory = Schema.Struct({ messages: Schema.Array(MessageRecord) })
 export type SessionHistory = typeof SessionHistory.Type
 
-export const RoutineRunResult = Schema.Struct({ execution: RoutineExecution, task: TaskRecord, run: RunRecord })
+export const RoutineRunResult = Schema.Struct({ execution: RoutineExecution, task: TaskRecord, run: Schema.NullOr(RunRecord) })
 export type RoutineRunResult = typeof RoutineRunResult.Type
 
 /** Renderer supplies identities and intent only; main owns paths, branches and capability selection. */
@@ -71,7 +71,7 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('workspace.saveFiles', { payload: { input: SaveWorkspaceFiles }, success: GitChangeApplication, error: HarnessStoreError }),
   Rpc.make('routines.list', { payload: {}, success: Schema.Array(RoutineRecord), error: HarnessStoreError }),
   Rpc.make('routines.allExecutions', { payload: {}, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
-  Rpc.make('routines.executions', { payload: { routineId: RoutineRecord.fields.id }, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
+  Rpc.make('routines.executions', { payload: { routineId: RoutineId }, success: Schema.Array(RoutineExecution), error: HarnessStoreError }),
   Rpc.make('routines.save', { payload: { input: SaveRoutine }, success: RoutineRecord, error: HarnessStoreError }),
   Rpc.make('routines.run', { payload: { input: RunRoutine }, success: RoutineRunResult, error: HarnessStoreError }),
   Rpc.make('routines.prepare', {
@@ -130,5 +130,7 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('tasks.startConflictResolution', { payload: StartConflictResolutionInput, success: RunRecord, error: HarnessStoreError }),
   Rpc.make('tasks.inspectRun', { payload: { taskId: TaskId, runId: TaskId }, success: RunRecord, error: HarnessStoreError }),
   Rpc.make('tasks.cancelRun', { payload: { taskId: TaskId, runId: TaskId }, success: RunRecord, error: HarnessStoreError }),
+  Rpc.make('tasks.cancelIngestion', { payload: { taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),
+  Rpc.make('tasks.retryIngestion', { payload: { taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),
   Rpc.make('tasks.closeSession', { payload: SessionIdentity, success: Schema.Void, error: HarnessStoreError })
 ).middleware(VaultMiddleware) {}

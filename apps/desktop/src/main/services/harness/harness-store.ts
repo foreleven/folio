@@ -1,9 +1,33 @@
 import { ModelProfile } from '@folio/agent/config/schema'
 import { Context, DateTime, Effect, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
-import { HarnessStoreError, NewRun, NewSession, NewTask, RunRecord, SessionBinding, SessionRecord, TaskConfiguration, TaskRecord } from '../../../shared/harness'
+import {
+  AgentTaskConfiguration,
+  HarnessStoreError,
+  IngestionReceipt,
+  IngestionTaskConfiguration,
+  NewRun,
+  NewSession,
+  NewTask,
+  RunRecord,
+  SessionBinding,
+  SessionRecord,
+  TaskRecord
+} from '../../../shared/harness'
 
-const TaskRow = Schema.Struct({ ...TaskRecord.fields, configuration: Schema.fromJsonString(TaskConfiguration) })
+const TaskRowIdentity = {
+  id: Schema.NonEmptyString,
+  branch: Schema.NonEmptyString,
+  worktree: Schema.NonEmptyString,
+  state: Schema.Literals(['active', 'completed', 'cancelled']),
+  worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
+  worktreeBase: Schema.NullOr(Schema.String),
+  createdAt: Schema.Number
+}
+const TaskRow = Schema.Union([
+  Schema.Struct({ ...TaskRowIdentity, type: Schema.Literal('agent'), configuration: Schema.fromJsonString(AgentTaskConfiguration), receipt: Schema.Null }),
+  Schema.Struct({ ...TaskRowIdentity, type: Schema.Literal('ingestion'), configuration: Schema.fromJsonString(IngestionTaskConfiguration), receipt: Schema.fromJsonString(IngestionReceipt) })
+])
 const SessionRow = Schema.Struct({ ...SessionRecord.fields, modelProfile: Schema.NullOr(Schema.fromJsonString(ModelProfile)) })
 const now = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
 const failure = (reason: HarnessStoreError['reason']) =>
@@ -47,18 +71,19 @@ export class HarnessStore extends Context.Service<
       /** Creates a stable manual Task snapshot; resource creation is the caller's separate responsibility. */
       const createTask = Effect.fn('HarnessStore.createTask')(function* (input: NewTask) {
         const value = yield* Schema.decodeUnknownEffect(NewTask)(input)
-        yield* sql`INSERT INTO tasks (id, goal, configuration, branch, worktree, state, created_at)
-        VALUES (${value.id}, ${value.goal}, ${JSON.stringify(value.configuration)}, ${value.branch}, ${value.worktree}, 'active', ${yield* now})`
+        yield* sql`INSERT INTO tasks (id, type, configuration, receipt, branch, worktree, state, created_at)
+        VALUES (${value.id}, ${value.type}, ${JSON.stringify(value.configuration)}, ${value.receipt === null ? null : JSON.stringify(value.receipt)},
+          ${value.branch}, ${value.worktree}, 'active', ${yield* now})`
       }, Effect.mapError(storageError))
 
       /** Reads this Vault's immutable snapshot and independent Task lifecycle. */
-      const tasks = sql`SELECT id, goal, configuration, branch, worktree, state,
+      const tasks = sql`SELECT id, type, configuration, receipt, branch, worktree, state,
       worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt
       FROM tasks ORDER BY created_at DESC, id DESC`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow))), Effect.mapError(storageError))
 
       /** Retrieves one Task, distinguishing missing identity from a storage failure. */
       const task = Effect.fn('HarnessStore.task')(function* (id: string) {
-        const rows = yield* sql`SELECT id, goal, configuration, branch, worktree, state,
+        const rows = yield* sql`SELECT id, type, configuration, receipt, branch, worktree, state,
         worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt FROM tasks WHERE id=${id}`.pipe(
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow)))
         )
@@ -72,7 +97,7 @@ export class HarnessStore extends Context.Service<
         yield* sql.withTransaction(
           Effect.gen(function* () {
             const owner = yield* task(value.taskId)
-            if (owner.state !== 'active') return yield* failure('invalid-state')
+            if (owner.type !== 'agent' || owner.state !== 'active') return yield* failure('invalid-state')
             const active = yield* sql`SELECT id FROM runs WHERE task_id=${value.taskId} AND state IN ('preparing', 'running')`
             if (active.length) return yield* failure('task-busy')
             if (value.purpose === 'task' &&

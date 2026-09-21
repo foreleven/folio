@@ -36,7 +36,8 @@ describe('Task creation', () => {
   })
 
   it.each(['pending', 'creating', 'ready'])('opens Sessions before workspace preparation (%s) without resubmitting the Task', async worktreeState => {
-    mocks.tasks = [{ id: 'original', goal: 'Persisted intent', state: 'active', worktreeState, configuration: { agent: 'pi', integrationIds: ['notes'] } }]
+    mocks.tasks = [{ id: 'original', type: 'agent', receipt: null, state: 'active', worktreeState,
+      configuration: { goal: 'Persisted intent', agent: 'pi', model: null, skillIds: [], integrationIds: ['notes'], resourceIds: [] } }]
     render(<TaskPanel />)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sessions' })) })
     expect(screen.getByTestId('sessions').textContent).toBe('original')
@@ -66,7 +67,8 @@ describe('Task creation', () => {
   })
 
   it('offers reopen for a released Task and keeps the same identity', async () => {
-    mocks.tasks = [{ id: 'completed', goal: 'Inspect again', state: 'completed', worktreeState: 'released', configuration: { agent: 'pi', integrationIds: [] } }]
+    mocks.tasks = [{ id: 'completed', type: 'agent', receipt: null, state: 'completed', worktreeState: 'released',
+      configuration: { goal: 'Inspect again', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } }]
     mocks.create.mockResolvedValueOnce({})
     render(<TaskPanel />)
     expect(screen.getAllByText((_, element) => element?.textContent?.includes('Completed') ?? false).length).toBeGreaterThan(0)

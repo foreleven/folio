@@ -11,10 +11,12 @@ import {
   GitObjectId,
   SaveGitFiles,
   SaveRunWikiFiles,
+  SaveTaskRawFiles,
   type GitChangePreparation,
   type ConfirmRunWikiUnchanged as ConfirmRunWikiUnchangedValue,
   type SaveGitFiles as SaveGitFilesValue,
-  type SaveRunWikiFiles as SaveRunWikiFilesValue
+  type SaveRunWikiFiles as SaveRunWikiFilesValue,
+  type SaveTaskRawFiles as SaveTaskRawFilesValue
 } from '../../../shared/git-change'
 import { HarnessStoreError, type RunRecord } from '../../../shared/harness'
 import { GitChangeJournal } from './git-change-journal'
@@ -27,7 +29,9 @@ import { snapshotGitChange } from './git-change-snapshot'
 const Row = Schema.Struct({ ...GitChangeApplication.fields, before: Schema.Uint8Array, after: Schema.Uint8Array })
 type Row = typeof Row.Type
 const RunOwnerRow = Schema.Struct({ runId: Schema.String })
-type SaveRequest = (SaveGitFilesValue & { readonly kind: 'user'; readonly runIds: readonly [] }) | (SaveRunWikiFilesValue & { readonly kind: 'wiki' })
+type SaveRequest = (SaveGitFilesValue & { readonly kind: 'user'; readonly runIds: readonly [] })
+  | (SaveRunWikiFilesValue & { readonly kind: 'wiki' })
+  | (SaveTaskRawFilesValue & { readonly kind: 'raws'; readonly runIds: readonly [] })
 const existsError = Schema.is(Schema.Struct({ code: Schema.Literal('EEXIST') }))
 const invalid = () => new HarnessStoreError({ reason: 'invalid-state', message: 'Git save state changed. Its files and journal have been retained for inspection.' })
 const storage = (cause: unknown) =>
@@ -65,6 +69,7 @@ export class GitChangeApplications extends Context.Service<
     readonly editWorkspace: <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) => Effect.Effect<A, HarnessStoreError>
     readonly save: (input: SaveGitFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly saveRunWiki: (input: SaveRunWikiFilesValue) => Effect.Effect<GitChangeApplication, HarnessStoreError>
+    readonly saveTaskRaws: (input: SaveTaskRawFilesValue) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly confirmRunWikiUnchanged: (input: ConfirmRunWikiUnchangedValue) => Effect.Effect<RunRecord, HarnessStoreError>
     readonly apply: (id: string) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly recover: (id: string) => Effect.Effect<GitChangeApplication, HarnessStoreError>
@@ -324,6 +329,18 @@ export class GitChangeApplications extends Context.Service<
           lock.withLock
         )
 
+        /** Captures host-produced raw files without inventing Agent Run ownership. */
+        const saveTaskRaws = Effect.fn('GitChangeApplications.saveTaskRaws')(
+          function* (input: SaveTaskRawFilesValue) {
+            const decoded = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)(input, { onExcessProperty: 'error' })
+            const value = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)({ ...decoded, paths: [...new Set(decoded.paths)].sort() })
+            return yield* saveLocked({ ...value, kind: 'raws', runIds: [] })
+          },
+          Effect.provide(dependencies),
+          Effect.mapError(storage),
+          lock.withLock
+        )
+
         /** Records explicit acceptance only while the observed Run baseline still has no wiki delta. */
         const confirmRunWikiUnchanged = Effect.fn('GitChangeApplications.confirmRunWikiUnchanged')(
           function* (input: ConfirmRunWikiUnchangedValue) {
@@ -380,7 +397,7 @@ export class GitChangeApplications extends Context.Service<
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(GitChangeApplication))),
           Effect.mapError(storage)
         )
-        return GitChangeApplications.of({ editWorkspace, save, saveRunWiki, confirmRunWikiUnchanged, apply, recover, pending })
+        return GitChangeApplications.of({ editWorkspace, save, saveRunWiki, saveTaskRaws, confirmRunWikiUnchanged, apply, recover, pending })
       }).pipe(Effect.mapError(storage))
     ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
   }

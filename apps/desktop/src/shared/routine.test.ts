@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { RoutineRecord } from './routine'
+import { RoutineTimeZone } from './routine'
 import { describe, expect, it } from 'vitest'
 import { previousRoutineDate, routineDateAt, routineDayEnd, routineDateState, routineGapDates, routineTimestampAt } from './routine'
 
@@ -29,8 +29,8 @@ describe('Routine civil dates', () => {
   )
 
   it('rejects invalid time zones before storing a Routine', () => {
-    expect(() => Schema.decodeUnknownSync(RoutineRecord.fields.timeZone)('Invalid/Zone')).toThrow()
-    expect(Schema.decodeUnknownSync(RoutineRecord.fields.timeZone)('Asia/Shanghai')).toBe('Asia/Shanghai')
+    expect(() => Schema.decodeUnknownSync(RoutineTimeZone)('Invalid/Zone')).toThrow()
+    expect(Schema.decodeUnknownSync(RoutineTimeZone)('Asia/Shanghai')).toBe('Asia/Shanghai')
   })
 
   it('uses local day boundaries across DST changes', () => {

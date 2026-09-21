@@ -1,64 +1,120 @@
-import { useAtomSet } from '@effect/atom-react'
+import { useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@folio/ui/components/ui/card'
 import { Field, FieldGroup, FieldLabel } from '@folio/ui/components/ui/field'
 import { Input } from '@folio/ui/components/ui/input'
 import { useState } from 'react'
+import type { IntegrationView } from '../../../shared/integration'
 import type { RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
-import { TaskRpcClient } from '../rpc/task-rpc'
 import { IntegrationRpcClient } from '../rpc/integration-rpc'
-import { useAtomValue } from '@effect/atom-react'
+import { TaskRpcClient } from '../rpc/task-rpc'
 
-type Draft = { name: string; prompt: string; agent: 'pi' | 'codex'; model: RoutineRecord['model']; skillIds: string[]; integrationIds: string[]; resourceIds: string[]; intervalMinutes: number; timeZone: string; enabled: boolean }
+type AgentConfiguration = Extract<RoutineRecord, { type: 'agent' }>['configuration']
+type DraftBase = { name: string; intervalMinutes: number; timeZone: string; enabled: boolean }
+type AgentDraft = DraftBase & { type: 'agent'; configuration: AgentConfiguration }
+type IngestionDraft = DraftBase & { type: 'ingestion'; configuration: { integrationId: string; resourceId: string } }
+type Draft = AgentDraft | IngestionDraft
+
 const selectClass = 'h-8 w-full rounded-md border border-input bg-background px-2 text-ui'
+const defaultSchedule = (): DraftBase => ({ name: '', intervalMinutes: 60, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', enabled: true })
+const newAgentDraft = (): AgentDraft => ({ ...defaultSchedule(), type: 'agent', configuration: { goal: '', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+const newIngestionDraft = (): IngestionDraft => ({ ...defaultSchedule(), type: 'ingestion', configuration: { integrationId: '', resourceId: '' } })
 
-/** Flat editor for the current Routine contract; historical executions are never edited here. */
+/** Edits typed Routine intent; the executor type is immutable after creation. */
 export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const save = useAtomSet(TaskRpcClient.saveRoutine, { mode: 'promise' })
-  const integrations = useAtomValue(IntegrationRpcClient.integrations)
+  const integrationResult = useAtomValue(IntegrationRpcClient.integrations)
+  const integrations = integrationResult._tag === 'Success' ? integrationResult.value : null
   const [draft, setDraft] = useState<Draft>(() => {
-    const r = initial.record
-    return r ? { name: r.name, prompt: r.prompt, agent: r.agent, model: r.model, skillIds: [...r.skillIds], integrationIds: [...r.integrationIds], resourceIds: [...(r.resourceIds ?? [])], intervalMinutes: r.intervalMinutes, timeZone: r.timeZone, enabled: r.enabled } : { name: '', prompt: '', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [], intervalMinutes: 60, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', enabled: true }
+    const record = initial.record
+    if (!record) return newAgentDraft()
+    const schedule = { name: record.name, intervalMinutes: record.intervalMinutes, timeZone: record.timeZone, enabled: record.enabled }
+    return record.type === 'agent'
+      ? { ...schedule, type: 'agent', configuration: { ...record.configuration, skillIds: [...record.configuration.skillIds], integrationIds: [...record.configuration.integrationIds], resourceIds: [...record.configuration.resourceIds] } }
+      : { ...schedule, type: 'ingestion', configuration: { ...record.configuration } }
   })
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const valid = draft.name.trim() && draft.intervalMinutes >= 1 && (draft.type === 'ingestion'
+    ? draft.configuration.integrationId && draft.configuration.resourceId
+    : draft.configuration.goal.trim() && (draft.configuration.agent !== 'pi'
+      || Boolean(draft.configuration.model?.providerId && draft.configuration.model.modelId)))
+
   async function submit(): Promise<void> {
-    if (!draft.name.trim() || !draft.prompt.trim() || draft.intervalMinutes < 1 || (draft.agent === 'pi' && (!draft.model?.providerId || !draft.model.modelId)) || pending) return
-    setPending(true); setError(null)
+    if (!valid || pending) return
+    setPending(true)
+    setError(null)
     try {
-      // A resource is addressable as "integration/resource". Derive the integration
-      // list from the selected resources so a legacy routine cannot retain an
-      // unrelated integration and fail during resource preparation.
-      const integrationIds = draft.resourceIds.length
-        ? [...new Set(draft.resourceIds.map(resource => resource.slice(0, resource.indexOf('/'))).filter(Boolean))].sort()
-        : draft.integrationIds
-      await save({ payload: { input: { id: initial.id, expectedRevision: initial.record?.revision ?? null, ...draft, integrationIds, name: draft.name.trim(), prompt: draft.prompt.trim(), model: draft.agent === 'pi' ? draft.model : null } } })
+      const input = draft.type === 'agent' ? {
+        id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
+        intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone, enabled: draft.enabled, type: draft.type,
+        configuration: { ...draft.configuration, goal: draft.configuration.goal.trim(), model: draft.configuration.agent === 'pi' ? draft.configuration.model : null }
+      } as const : {
+        id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
+        intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone, enabled: draft.enabled, type: draft.type,
+        configuration: draft.configuration
+      } as const
+      await save({ payload: { input } })
       onSaved()
-    } catch { setError(chinese ? '保存未确认，请重试。' : 'Save was not confirmed. Please retry.') }
-    finally { setPending(false) }
+    } catch {
+      setError(chinese ? '保存未确认，请重试。' : 'Save was not confirmed. Please retry.')
+    } finally {
+      setPending(false)
+    }
   }
+
   return <Card><form onSubmit={event => { event.preventDefault(); void submit() }}>
-    <CardHeader className="border-b"><CardTitle>{initial.record ? (chinese ? '编辑 Routine' : 'Edit Routine') : (chinese ? '新建 Routine' : 'New Routine')}</CardTitle><CardDescription>{chinese ? 'Routine 只处理当前业务日；次日首次执行负责前一天收尾。' : 'A Routine processes the current business day; the next day closes the previous day.'}</CardDescription></CardHeader>
+    <CardHeader className="border-b"><CardTitle>{initial.record ? (chinese ? '编辑 Routine' : 'Edit Routine') : (chinese ? '新建 Routine' : 'New Routine')}</CardTitle><CardDescription>{chinese ? 'Ingestion 直接从一个集成资源生成 raws；Agent Routine 执行对话任务。' : 'Ingestion writes raws from one Integration resource; Agent Routines run conversational tasks.'}</CardDescription></CardHeader>
     <CardContent className="pt-4"><fieldset disabled={pending}><FieldGroup className="gap-4">
-      <Field><FieldLabel htmlFor="routine-name">{chinese ? '名称' : 'Name'}</FieldLabel><Input id="routine-name" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></Field>
-      <Field><FieldLabel htmlFor="routine-prompt">Prompt</FieldLabel><textarea id="routine-prompt" className="min-h-28 w-full rounded-md border border-input bg-background p-2 text-ui" value={draft.prompt} onChange={e => setDraft({ ...draft, prompt: e.target.value })} /></Field>
-      <div className="grid gap-4 sm:grid-cols-3"><Field><FieldLabel htmlFor="routine-agent">Agent</FieldLabel><select id="routine-agent" className={selectClass} value={draft.agent} onChange={e => setDraft({ ...draft, agent: e.target.value === 'codex' ? 'codex' : 'pi', model: e.target.value === 'codex' ? null : draft.model })}><option value="pi">pi</option><option value="codex">Codex</option></select></Field><Field><FieldLabel htmlFor="routine-interval">{chinese ? '频率（分钟）' : 'Interval (minutes)'}</FieldLabel><Input id="routine-interval" type="number" min={1} value={draft.intervalMinutes} onChange={e => setDraft({ ...draft, intervalMinutes: Number(e.target.value) })} /></Field><Field><FieldLabel htmlFor="routine-timezone">{chinese ? '时区' : 'Time zone'}</FieldLabel><Input id="routine-timezone" value={draft.timeZone} onChange={e => setDraft({ ...draft, timeZone: e.target.value })} /></Field></div>
-      {draft.agent === 'pi' ? <div className="grid gap-4 sm:grid-cols-3"><Field><FieldLabel htmlFor="routine-provider">{chinese ? 'Provider ID' : 'Provider ID'}</FieldLabel><Input id="routine-provider" value={draft.model?.providerId ?? ''} onChange={e => setDraft({ ...draft, model: { providerId: e.target.value, modelId: draft.model?.modelId ?? '', thinkingLevel: draft.model?.thinkingLevel ?? 'off' } })} /></Field><Field><FieldLabel htmlFor="routine-model">{chinese ? 'Model ID' : 'Model ID'}</FieldLabel><Input id="routine-model" value={draft.model?.modelId ?? ''} onChange={e => setDraft({ ...draft, model: { providerId: draft.model?.providerId ?? '', modelId: e.target.value, thinkingLevel: draft.model?.thinkingLevel ?? 'off' } })} /></Field><Field><FieldLabel htmlFor="routine-thinking">{chinese ? '思考强度' : 'Thinking level'}</FieldLabel><select id="routine-thinking" className={selectClass} value={draft.model?.thinkingLevel ?? 'off'} onChange={e => setDraft({ ...draft, model: { providerId: draft.model?.providerId ?? '', modelId: draft.model?.modelId ?? '', thinkingLevel: e.target.value as NonNullable<Draft['model']>['thinkingLevel'] } })}><option value="off">off</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></Field></div> : null}
-      {integrations._tag === 'Success' ? <fieldset className="space-y-2"><legend className="text-ui">{chinese ? '资源' : 'Resources'}</legend>{integrations.value.flatMap(integration => integration.resources.map(resource => {
-        const key = `${integration.id}/${resource.id}`
-        const registered = Boolean(integration.record?.resources.some(candidate => candidate.id === resource.id))
-        const ready = integration.record?.state !== undefined && integration.states[integration.record.state]?.kind === 'ready'
-        const available = registered && !integration.busy && ready
-        const checked = draft.resourceIds.includes(key)
-        const label = typeof resource.name === 'string' ? resource.name : resource.name[chinese ? 'zh-CN' : 'en']
-        const unavailableLabel = !registered ? (chinese ? '（未注册）' : ' (Not installed)') : !available ? (chinese ? '（请先连接）' : ' (Connect first)') : ''
-        return <label key={key} className="flex items-center gap-2 text-support"><input type="checkbox" disabled={!available && !checked} checked={checked} onChange={event => setDraft(current => { const resourceIds = event.target.checked ? [...current.resourceIds, key].sort() : current.resourceIds.filter(id => id !== key); const integrationIds = resourceIds.some(id => id.startsWith(`${integration.id}/`)) ? [...new Set([...current.integrationIds, integration.id])].sort() : current.integrationIds.filter(id => id !== integration.id); return { ...current, resourceIds, integrationIds } })} />{integration.name} / {label}{unavailableLabel ? <span className="text-muted-foreground">{unavailableLabel}</span> : null}</label>
-      }))}</fieldset> : null}
-      <label className="flex items-center gap-2 text-ui"><input type="checkbox" checked={draft.enabled} onChange={e => setDraft({ ...draft, enabled: e.target.checked })} />{chinese ? '启用 Routine' : 'Enable Routine'}</label>
+      <Field><FieldLabel htmlFor="routine-name">{chinese ? '名称' : 'Name'}</FieldLabel><Input id="routine-name" value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></Field>
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field><FieldLabel htmlFor="routine-type">{chinese ? '类型' : 'Type'}</FieldLabel><select id="routine-type" className={selectClass} value={draft.type} disabled={Boolean(initial.record)} onChange={event => setDraft(event.target.value === 'ingestion' ? newIngestionDraft() : newAgentDraft())}><option value="agent">Agent</option><option value="ingestion">Ingestion</option></select></Field>
+        <Field><FieldLabel htmlFor="routine-interval">{chinese ? '检查周期（分钟）' : 'Check interval (minutes)'}</FieldLabel><Input id="routine-interval" type="number" min={1} value={draft.intervalMinutes} onChange={event => setDraft({ ...draft, intervalMinutes: Number(event.target.value) })} /></Field>
+        <Field><FieldLabel htmlFor="routine-timezone">{chinese ? '时区' : 'Time zone'}</FieldLabel><Input id="routine-timezone" value={draft.timeZone} onChange={event => setDraft({ ...draft, timeZone: event.target.value })} /></Field>
+      </div>
+      {draft.type === 'agent' ? <AgentFields draft={draft} setDraft={setDraft} chinese={chinese} integrations={integrations} />
+        : <IngestionFields draft={draft} setDraft={setDraft} chinese={chinese} integrations={integrations} />}
+      <label className="flex items-center gap-2 text-ui"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />{chinese ? '启用 Routine' : 'Enable Routine'}</label>
     </FieldGroup></fieldset></CardContent>
-    <CardFooter className="flex gap-2"><Button type="submit" disabled={pending || !draft.name.trim() || !draft.prompt.trim() || draft.intervalMinutes < 1 || (draft.agent === 'pi' && (!draft.model?.providerId || !draft.model.modelId))}>{pending ? (chinese ? '保存中…' : 'Saving…') : (chinese ? '保存' : 'Save')}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{chinese ? '取消' : 'Cancel'}</Button></CardFooter>
+    <CardFooter className="flex gap-2"><Button type="submit" disabled={pending || !valid}>{pending ? (chinese ? '保存中…' : 'Saving…') : (chinese ? '保存' : 'Save')}</Button><Button type="button" variant="ghost" disabled={pending} onClick={onCancel}>{chinese ? '取消' : 'Cancel'}</Button></CardFooter>
     {error ? <p role="alert" className="px-4 pb-4 text-support text-destructive">{error}</p> : null}
   </form></Card>
+}
+
+function AgentFields({ draft, setDraft, chinese, integrations }: { draft: AgentDraft; setDraft: React.Dispatch<React.SetStateAction<Draft>>; chinese: boolean; integrations: readonly IntegrationView[] | null }): React.JSX.Element {
+  const configuration = draft.configuration
+  return <>
+    <Field><FieldLabel htmlFor="routine-goal">{chinese ? '任务目标' : 'Goal'}</FieldLabel><textarea id="routine-goal" className="min-h-28 w-full rounded-md border border-input bg-background p-2 text-ui" value={configuration.goal} onChange={event => setDraft({ ...draft, configuration: { ...configuration, goal: event.target.value } })} /></Field>
+    <Field><FieldLabel htmlFor="routine-agent">Agent</FieldLabel><select id="routine-agent" className={selectClass} value={configuration.agent} onChange={event => setDraft({ ...draft, configuration: { ...configuration, agent: event.target.value === 'codex' ? 'codex' : 'pi', model: event.target.value === 'codex' ? null : configuration.model } })}><option value="pi">pi</option><option value="codex">Codex</option></select></Field>
+    {configuration.agent === 'pi' ? <div className="grid gap-4 sm:grid-cols-3"><Field><FieldLabel htmlFor="routine-provider">Provider ID</FieldLabel><Input id="routine-provider" value={configuration.model?.providerId ?? ''} onChange={event => setDraft({ ...draft, configuration: { ...configuration, model: { providerId: event.target.value, modelId: configuration.model?.modelId ?? '', thinkingLevel: configuration.model?.thinkingLevel ?? 'off' } } })} /></Field><Field><FieldLabel htmlFor="routine-model">Model ID</FieldLabel><Input id="routine-model" value={configuration.model?.modelId ?? ''} onChange={event => setDraft({ ...draft, configuration: { ...configuration, model: { providerId: configuration.model?.providerId ?? '', modelId: event.target.value, thinkingLevel: configuration.model?.thinkingLevel ?? 'off' } } })} /></Field><Field><FieldLabel htmlFor="routine-thinking">{chinese ? '思考强度' : 'Thinking level'}</FieldLabel><select id="routine-thinking" className={selectClass} value={configuration.model?.thinkingLevel ?? 'off'} onChange={event => setDraft({ ...draft, configuration: { ...configuration, model: { providerId: configuration.model?.providerId ?? '', modelId: configuration.model?.modelId ?? '', thinkingLevel: event.target.value as NonNullable<AgentConfiguration['model']>['thinkingLevel'] } } })}><option value="off">off</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></Field></div> : null}
+    {integrations ? <fieldset className="space-y-2"><legend className="text-ui">{chinese ? 'Agent 可用资源' : 'Resources available to Agent'}</legend>{integrations.flatMap(integration => integration.resources.map(resource => {
+      const key = `${integration.id}/${resource.id}`
+      const registered = Boolean(integration.record?.resources.some(candidate => candidate.id === resource.id))
+      const ready = integration.record?.state !== undefined && integration.states[integration.record.state]?.kind === 'ready'
+      const available = registered && !integration.busy && ready
+      const checked = configuration.resourceIds.includes(key)
+      const label = typeof resource.name === 'string' ? resource.name : resource.name[chinese ? 'zh-CN' : 'en']
+      return <label key={key} className="flex items-center gap-2 text-support"><input type="checkbox" disabled={!available && !checked} checked={checked} onChange={event => {
+        const resourceIds = event.target.checked ? [...configuration.resourceIds, key].sort() : configuration.resourceIds.filter(id => id !== key)
+        const integrationIds = resourceIds.some(id => id.startsWith(`${integration.id}/`)) ? [...new Set([...configuration.integrationIds, integration.id])].sort() : configuration.integrationIds.filter(id => id !== integration.id)
+        setDraft({ ...draft, configuration: { ...configuration, resourceIds, integrationIds } })
+      }} />{integration.name} / {label}{!available ? <span className="text-muted-foreground">{chinese ? '（请先连接）' : ' (Connect first)'}</span> : null}</label>
+    }))}</fieldset> : null}
+  </>
+}
+
+function IngestionFields({ draft, setDraft, chinese, integrations }: { draft: IngestionDraft; setDraft: React.Dispatch<React.SetStateAction<Draft>>; chinese: boolean; integrations: readonly IntegrationView[] | null }): React.JSX.Element {
+  const selected = `${draft.configuration.integrationId}/${draft.configuration.resourceId}`
+  return <fieldset className="space-y-2"><legend className="text-ui">{chinese ? '数据源（单选）' : 'Source (choose one)'}</legend>
+    {integrations ? integrations.flatMap(integration => integration.resources.map(resource => {
+      const key = `${integration.id}/${resource.id}`
+      const registered = Boolean(integration.record?.resources.some(candidate => candidate.id === resource.id))
+      const ready = integration.record?.state !== undefined && integration.states[integration.record.state]?.kind === 'ready'
+      const available = registered && !integration.busy && ready
+      const label = typeof resource.name === 'string' ? resource.name : resource.name[chinese ? 'zh-CN' : 'en']
+      return <label key={key} className="flex items-center gap-2 text-support"><input type="radio" name="ingestion-resource" disabled={!available && selected !== key} checked={selected === key} onChange={() => setDraft({ ...draft, configuration: { integrationId: integration.id, resourceId: resource.id } })} />{integration.name} / {label}{!available ? <span className="text-muted-foreground">{chinese ? '（请先连接）' : ' (Connect first)'}</span> : null}</label>
+    })) : <p className="text-support text-muted-foreground">{chinese ? '正在加载集成资源…' : 'Loading Integration resources…'}</p>}
+  </fieldset>
 }

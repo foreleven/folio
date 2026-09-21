@@ -21,6 +21,8 @@ export class TaskRpcClient extends AtomRpc.Service<TaskRpcClient>()('folio/rende
   static readonly startConflictResolution = TaskRpcClient.mutation('tasks.startConflictResolution')
   static readonly inspectRun = TaskRpcClient.mutation('tasks.inspectRun')
   static readonly cancelRun = TaskRpcClient.mutation('tasks.cancelRun')
+  static readonly cancelIngestion = TaskRpcClient.mutation('tasks.cancelIngestion')
+  static readonly retryIngestion = TaskRpcClient.mutation('tasks.retryIngestion')
   static readonly create = TaskRpcClient.mutation('tasks.create')
   static readonly complete = TaskRpcClient.mutation('tasks.complete')
   static readonly reopen = TaskRpcClient.mutation('tasks.reopen')

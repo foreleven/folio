@@ -80,19 +80,11 @@
         "from": "../../packages/integrations/src/lark/assets/skills",
         "to": "lark-skills",
         "filter": [
-          "folio-lark-im/**/*",
+          "lark-im/**/*",
           "lark-shared/**/*",
           "lark-mail/**/*",
           "LICENSE"
         ]
-      },
-      {
-        "from": "../../packages/integrations/src/gmail/assets",
-        "to": "gmail-assets"
-      },
-      {
-        "from": "../../packages/integrations/src/imap/assets",
-        "to": "imap-assets"
       }
     ],
     "mac": {

@@ -18,7 +18,7 @@ const input = (id: string, taskId = 'task'): ExecutionSubmission => ({ id, taskI
 /** Unbound Sessions prove admission does not require an Agent connection. */
 const setup = (id = 'task') => Effect.gen(function* () {
   const store = yield* HarnessStore
-  yield* store.createTask({ id, goal: 'Notes', configuration: { agent: 'pi', skillIds: [], integrationIds: [] },
+  yield* store.createTask({ id, type: 'agent', receipt: null, configuration: { goal: 'Test task', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
     branch: `task/${id}`, worktree: `/tasks/${id}` })
   const sql = yield* SqlClient.SqlClient
   yield* sql`UPDATE tasks SET worktree_state='ready' WHERE id=${id}`

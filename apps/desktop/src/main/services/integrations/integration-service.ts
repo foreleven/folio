@@ -1,5 +1,5 @@
 import { IntegrationContext, IntegrationError } from '@folio/integrations/base'
-import type { Integration, IntegrationEffect, IngestContext } from '@folio/integrations/base'
+import type { Integration, IntegrationEffect, IngestContext, IngestWindow } from '@folio/integrations/base'
 import { Context, Effect, Fiber, FileSystem, Layer, Match, PubSub, Schema, Scope, Semaphore, Stream } from 'effect'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { basename, delimiter, isAbsolute, join } from 'node:path'
@@ -57,6 +57,7 @@ export class IntegrationService extends Context.Service<IntegrationService, {
   readonly inspect: (id: string) => Effect.Effect<void, IntegrationSettingsError>
   readonly action: (id: string, actionId: string, payload?: unknown) => Effect.Effect<void, IntegrationSettingsError>
   readonly prepare: (ids: readonly string[], workspaceDirectory: string, resourceIds?: readonly string[]) => Effect.Effect<PreparedIntegrationResources, IntegrationSettingsError>
+  readonly ingest: (integrationId: string, resourceId: string, outputDirectory: string, window: IngestWindow) => Effect.Effect<void, IntegrationSettingsError>
 }>()('folio/services/IntegrationService') {
   static readonly layer = Layer.effect(IntegrationService, Effect.gen(function*() {
     const catalog = yield* IntegrationCatalog
@@ -251,6 +252,30 @@ export class IntegrationService extends Context.Service<IntegrationService, {
         integrationIds: ids, resourceIds, error: operationErrorDetails(error)
       })))
     }, commands.withPermit, Effect.mapError(failure))
+    /** Runs one trusted provider resource directly; output paths are resolved by the Task host. */
+    const ingest = Effect.fn('IntegrationService.ingest')(function* (
+      integrationId: string,
+      resourceId: string,
+      outputDirectory: string,
+      window: IngestWindow
+    ) {
+      if (!isAbsolute(outputDirectory) || !Number.isFinite(window.start) || !Number.isFinite(window.end) || window.end <= window.start) {
+        return yield* new IntegrationSettingsError({ message: 'The ingestion request is invalid.' })
+      }
+      const integration = catalog.find(item => item.id === integrationId)
+      const implementation = integration?.resources.find(item => item.id === resourceId)
+      let installed = (yield* store.list).find(item => item.id === integrationId)
+      if (!integration || !implementation || !installed?.resources.some(item => item.id === resourceId)) return yield* failure()
+      for (let attempt = 0; running.has(integrationId) && attempt < 300; attempt++) yield* Effect.sleep(100)
+      installed = (yield* store.list).find(item => item.id === integrationId)
+      if (!installed || integration.states[installed.state]?.kind !== 'ready') return yield* failure()
+      yield* withContext(integrationId, integration.check())
+      yield* withContext(integrationId, implementation.ingest({
+        integrationDirectory: join(config.directory, 'integrations', integrationId),
+        outputDirectory,
+        window
+      }))
+    }, commands.withPermit, Effect.mapError(failure))
     /** Rechecks facts at the end of every stage and records exactly the actions currently available. */
     const reconcile = Effect.fn('IntegrationService.reconcile')(function*(integration: Integration<IntegrationPlatform>) {
       const revision = revisions.get(integration.id) ?? 0
@@ -413,6 +438,6 @@ export class IntegrationService extends Context.Service<IntegrationService, {
     }
     yield* Effect.logInfo('Integration service ready').pipe(Effect.annotateLogs({ integrationCount: catalog.length }))
     return IntegrationService.of({ list, watch, install: (id) => start(id, 'install'), inspect: (id) => start(id, 'inspect'),
-      action, prepare })
+      action, prepare, ingest })
   }))
 }
