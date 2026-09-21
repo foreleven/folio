@@ -1,5 +1,5 @@
-import { Effect } from 'effect'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { Effect, Schema } from 'effect'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { IntegrationError, joinedTryPromise, type IngestInput } from '../base/index.ts'
 import { runCli } from './cli.ts'
@@ -49,6 +49,38 @@ const command = (input: IngestInput, args: readonly string[]) => Effect.gen(func
   })
 })
 
+const MuteStatusResponse = Schema.Struct({
+  items: Schema.Array(Schema.Struct({ chat_id: Schema.NonEmptyString, is_muted: Schema.Boolean }))
+})
+
+/** Message search ignores per-user notification settings, so muted chats must be filtered explicitly. */
+const readMutedChatIds = Effect.fn('Lark.readMutedChatIds')(function* (input: IngestInput, chatIds: readonly string[]) {
+  const batches: string[][] = []
+  for (let index = 0; index < chatIds.length; index += 10) batches.push(chatIds.slice(index, index + 10))
+  const responses = yield* Effect.forEach(batches, batch => command(input, [
+    'im', 'chat.user_setting', 'batch_query', '--as', 'user',
+    '--data', JSON.stringify({ chat_ids: batch }), '--format', 'json'
+  ]).pipe(
+    Effect.flatMap(value => Schema.decodeUnknownEffect(MuteStatusResponse)(envelope(value))),
+    Effect.mapError(() => new IntegrationError({ message: 'Lark returned an invalid mute status.' }))
+  ), { concurrency: 4 })
+  const muted = new Set<string>()
+  for (let index = 0; index < batches.length; index++) {
+    const batch = batches[index]!
+    const response = responses[index]!
+    const statusByChat = new Map(response.items.map(item => [item.chat_id, item.is_muted]))
+    if (statusByChat.size !== response.items.length || response.items.some(item => !batch.includes(item.chat_id))) {
+      return yield* new IntegrationError({ message: 'Lark returned an invalid mute status.' })
+    }
+    for (const chatId of batch) {
+      const status = statusByChat.get(chatId)
+      if (status === undefined) return yield* new IntegrationError({ message: 'Lark returned incomplete mute status.' })
+      if (status) muted.add(chatId)
+    }
+  }
+  return muted
+})
+
 const formatZoned = (epoch: number, timeZone: string): string => {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone, calendar: 'iso8601', numberingSystem: 'latn', hourCycle: 'h23',
@@ -89,10 +121,16 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
     group.push(message)
     grouped.set(message.chat_id, group)
   }
+  const mutedChatIds = yield* readMutedChatIds(input, [...grouped.keys()])
   yield* joinedTryPromise({
     try: async (signal) => {
       await mkdir(input.outputDirectory, { recursive: true, mode: 0o700 })
       for (const [chatId, group] of grouped) {
+        const path = join(input.outputDirectory, `${safeId(chatId)}.md`)
+        if (mutedChatIds.has(chatId)) {
+          await rm(path, { force: true })
+          continue
+        }
         group.sort((left, right) => parseTime(left.create_time) - parseTime(right.create_time))
         const chatName = typeof group[0]?.chat_name === 'string' ? group[0].chat_name : chatId
         const nextLines = group.map(message => {
@@ -104,7 +142,6 @@ export const ingestLarkIm = Effect.fn('Lark.ingestIm')(function* (input: IngestI
                 ? String((rawContent as Record<string, unknown>).text) : `[${message.msg_type ?? 'message'}]`
           return `- ${formatZoned(parseTime(message.create_time), input.window.timeZone)} | ${oneLine(sender.name || 'Unknown')} (${oneLine(sender.id || 'unknown id')}) | ${oneLine(message.message_id || 'unknown message id')} | ${oneLine(content)}`
         })
-        const path = join(input.outputDirectory, `${safeId(chatId)}.md`)
         const previous = await readFile(path, 'utf8').catch(error => {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
           throw error

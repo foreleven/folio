@@ -81,17 +81,75 @@ describe('provider-hosted ingestion', () => {
       app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
       userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
     }))
-    mocks.runCli.mockReturnValue(Effect.succeed(JSON.stringify({ data: { messages: [{
-      message_id: 'om_1', chat_id: 'oc_1', chat_name: 'Release Team', chat_type: 'group',
-      create_time: String((window.start + 10_000) / 1000), sender: { id: 'ou_alice', name: 'Alice' },
-      msg_type: 'text', content: { text: 'Ready\nfor release' }, deleted: false
-    }], has_more: false } })))
+    mocks.runCli.mockImplementation((_directory, args) => Effect.succeed(JSON.stringify(args[1] === 'chat.user_setting'
+      ? { data: { items: [{ chat_id: 'oc_1', is_muted: false }] } }
+      : { data: { messages: [{
+        message_id: 'om_1', chat_id: 'oc_1', chat_name: 'Release Team', chat_type: 'group',
+        create_time: String((window.start + 10_000) / 1000), sender: { id: 'ou_alice', name: 'Alice' },
+        msg_type: 'text', content: { text: 'Ready\nfor release' }, deleted: false
+      }], has_more: false } })))
     const outputDirectory = join(root, 'lark-output')
     await Effect.runPromise(ingestLarkIm({ integrationDirectory, outputDirectory, window }).pipe(Effect.provide(NodeServices.layer)))
     const projection = await readFile(join(outputDirectory, 'oc_1.md'), 'utf8')
     expect(projection).toContain('chat_name: "Release Team"')
     expect(projection).toContain('2026-09-21 08:00:10 | Alice (ou_alice) | om_1 | Ready ↵ for release')
     expect(projection).not.toContain('"sender"')
+  })
+
+  it('excludes muted Lark chats and removes their existing daily projection', async () => {
+    const integrationDirectory = join(root, 'lark-muted')
+    await mkdir(integrationDirectory, { recursive: true })
+    await writeFile(join(integrationDirectory, 'private.json'), JSON.stringify({
+      version: 1, installed: true,
+      app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
+      userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
+    }))
+    mocks.runCli.mockImplementation((_directory, args) => Effect.succeed(JSON.stringify(args[1] === 'chat.user_setting'
+      ? { data: { items: [{ chat_id: 'oc_muted', is_muted: true }, { chat_id: 'oc_visible', is_muted: false }] } }
+      : { data: { messages: [
+        { message_id: 'om_muted', chat_id: 'oc_muted', chat_name: 'Muted', chat_type: 'group',
+          create_time: String((window.start + 10_000) / 1000), sender: { id: 'ou_muted', name: 'Muted sender' }, content: { text: 'ignore' } },
+        { message_id: 'om_visible', chat_id: 'oc_visible', chat_name: 'Visible', chat_type: 'group',
+          create_time: String((window.start + 20_000) / 1000), sender: { id: 'ou_visible', name: 'Visible sender' }, content: { text: 'keep' } }
+      ], has_more: false } })))
+    const outputDirectory = join(root, 'lark-muted-output')
+    await mkdir(outputDirectory, { recursive: true })
+    await writeFile(join(outputDirectory, 'oc_muted.md'), 'previous muted projection\n')
+
+    await Effect.runPromise(ingestLarkIm({ integrationDirectory, outputDirectory, window }).pipe(Effect.provide(NodeServices.layer)))
+
+    expect(await readdir(outputDirectory)).toEqual(['oc_visible.md'])
+    expect(await readFile(join(outputDirectory, 'oc_visible.md'), 'utf8')).toContain('Visible sender')
+  })
+
+  it('batches Lark mute lookups and fails closed when any chat status is missing', async () => {
+    const integrationDirectory = join(root, 'lark-incomplete-mute')
+    await mkdir(integrationDirectory, { recursive: true })
+    await writeFile(join(integrationDirectory, 'private.json'), JSON.stringify({
+      version: 1, installed: true,
+      app: { clientId: 'app', clientSecret: 'secret', brand: 'feishu' },
+      userAuth: { clientId: 'app', brand: 'feishu', accessToken: 'token', expiresAt: Date.now() + 60_000, openId: 'ou_me' }
+    }))
+    const chats = Array.from({ length: 11 }, (_, index) => `oc_${String(index).padStart(2, '0')}`)
+    const batchSizes: number[] = []
+    mocks.runCli.mockImplementation((_directory, args) => {
+      if (args[1] !== 'chat.user_setting') return Effect.succeed(JSON.stringify({ data: { messages: chats.map((chatId, index) => ({
+        message_id: `om_${index}`, chat_id: chatId, chat_name: chatId, chat_type: 'group',
+        create_time: String((window.start + index * 1000) / 1000), sender: { id: 'ou_sender', name: 'Sender' }, content: { text: 'message' }
+      })), has_more: false } }))
+      const dataIndex = args.indexOf('--data')
+      const requested = JSON.parse(args[dataIndex + 1]!) as { chat_ids: string[] }
+      batchSizes.push(requested.chat_ids.length)
+      return Effect.succeed(JSON.stringify({ data: { items: requested.chat_ids
+        .filter(chatId => chatId !== 'oc_10').map(chatId => ({ chat_id: chatId, is_muted: false })) } }))
+    })
+
+    const error = await Effect.runPromise(ingestLarkIm({
+      integrationDirectory, outputDirectory: join(root, 'lark-incomplete-output'), window
+    }).pipe(Effect.flip, Effect.provide(NodeServices.layer)))
+
+    expect(error).toMatchObject({ _tag: 'IntegrationError', message: 'Lark returned incomplete mute status.' })
+    expect(batchSizes.sort((left, right) => left - right)).toEqual([1, 10])
   })
 
   it('writes stable IMAP projections directly and always closes the client', async () => {
