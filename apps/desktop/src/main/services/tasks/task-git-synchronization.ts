@@ -18,7 +18,6 @@ import { gitCommitData, gitCommitHash } from '../git/git-commit-object'
 import { isRegisteredGitCommit } from '../git/git-change-applications'
 import { HarnessStore } from '../harness/harness-store'
 import { makeVaultGit } from '../git/vault-git'
-import { VaultGitWriteLock } from '../git/vault-git-write-lock'
 
 const Row = Schema.Struct({
   sequence: Schema.Int,
@@ -80,7 +79,6 @@ export class TaskGitSynchronization extends Context.Service<
         const fs = yield* FileSystem.FileSystem
         const sql = yield* SqlClient.SqlClient
         const store = yield* HarnessStore
-        const lock = yield* VaultGitWriteLock
         const git = yield* makeVaultGit
         const dependencies = yield* Effect.context<FileSystem.FileSystem | SqlClient.SqlClient | ChildProcessSpawner.ChildProcessSpawner>()
         const root = yield* fs.realPath(directory)
@@ -835,27 +833,24 @@ export class TaskGitSynchronization extends Context.Service<
         /** Database ordering and raw commit bytes never cross the service boundary. */
         const receipt = ({ sequence: _, alignmentData: __, ...row }: Row): GitSyncOperationValue => row
         /** Captures a Task's frozen wiki source interval and prepares an isolated canonical result. */
-        const prepare = (input: SynchronizeTaskWiki) => lock.withLock(prepareLocked(input).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
+        const prepare = (input: SynchronizeTaskWiki) => prepareLocked(input).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
         /** Replaces stale preparation on the current main while replaying accepted conflict resolutions. */
         const prepareReplacement = (input: ReprepareTaskWiki) =>
-          lock.withLock(reprepareLocked(input).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
+          reprepareLocked(input).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
         /** Publishes a prepared canonical commit to main after rechecking the recorded base and dirtiness. */
-        const publish = (id: string) => lock.withLock(publishLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
+        const publish = (id: string) => publishLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
         /** Aligns the Task worktree to a published canonical tree with a normal child commit. */
-        const align = (id: string) => lock.withLock(alignLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
+        const align = (id: string) => alignLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
         /** Accepts a completely staged coordinator resolution and resumes canonical preparation. */
         const resolvePreparation = (id: string) =>
-          lock.withLock(resolveLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
-        const resolutionDirectory = (taskId: string, id: string) => lock.withLock(
+          resolveLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
+        const resolutionDirectory = (taskId: string, id: string) =>
           conflictCheckout(taskId, id).pipe(Effect.provide(dependencies), Effect.map(({ coordinator }) => coordinator), Effect.mapError(storage))
-        )
-        const resolutionContext = (taskId: string, id: string) => lock.withLock(
+        const resolutionContext = (taskId: string, id: string) =>
           resolutionContextLocked(taskId, id).pipe(Effect.provide(dependencies), Effect.mapError(storage))
-        )
-        const acceptAgentResolution = (taskId: string, id: string, runId: string) => lock.withLock(
+        const acceptAgentResolution = (taskId: string, id: string, runId: string) =>
           acceptAgentResolutionLocked(taskId, id, runId).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
-        )
-        const abort = (id: string) => lock.withLock(abortLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage)))
+        const abort = (id: string) => abortLocked(id).pipe(Effect.provide(dependencies), Effect.map(receipt), Effect.mapError(storage))
         /** Runs prepare, publish, and align as one idempotent synchronized workflow. */
         const synchronize = Effect.fn('TaskGitSynchronization.synchronize')(function* (input: SynchronizeTaskWiki) {
           let row = yield* prepare(input)
@@ -896,6 +891,6 @@ export class TaskGitSynchronization extends Context.Service<
         return TaskGitSynchronization.of({ prepare, publish, align, synchronize, reprepare, resolve: resolveConflict,
           resolutionDirectory, resolutionContext, acceptAgentResolution, abort, get, pending })
       }).pipe(Effect.mapError(storage))
-    ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
+    )
   }
 }

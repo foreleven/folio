@@ -6,7 +6,6 @@ import { AgentTaskConfiguration, HarnessStoreError, IngestionReceipt, IngestionT
 import { HarnessStore } from '../harness/harness-store'
 import { makeVaultGit } from '../git/vault-git'
 import { isRegisteredGitCommit } from '../git/git-change-applications'
-import { VaultGitWriteLock } from '../git/vault-git-write-lock'
 
 const TaskId = Schema.NonEmptyString.check(Schema.makeFilter((id) => /^[a-zA-Z0-9_-]{1,128}$/.test(id)))
 const Commit = Schema.String.check(Schema.makeFilter((value) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)))
@@ -52,7 +51,6 @@ export class TaskWorktrees extends Context.Service<
         const root = yield* fs.realPath(directory)
         const main = join(root, 'workspace')
         const parent = join(root, 'worktrees')
-        const lock = yield* VaultGitWriteLock
 
         /** Verifies a persisted Task's exact path, repository and branch; never repairs mismatched content by overwriting it. */
         const ensureLocked = Effect.fn('TaskWorktrees.ensureLocked')(
@@ -297,10 +295,10 @@ export class TaskWorktrees extends Context.Service<
           return yield* ensureLocked(taskId, { taskHead: mainHead, mainHead })
         }, Effect.mapError(storage))
 
-        const ensure = (taskId: string, claim?: { id: string; owner: string }) => lock.withLock(ensureLocked(taskId, undefined, claim))
-        const complete = (taskId: string) => lock.withLock(completeLocked(taskId))
-        const reopen = (taskId: string) => lock.withLock(reopenLocked(taskId))
-        const resetIngestion = (taskId: string, namespace: string) => lock.withLock(Effect.gen(function* () {
+        const ensure = (taskId: string, claim?: { id: string; owner: string }) => ensureLocked(taskId, undefined, claim)
+        const complete = (taskId: string) => completeLocked(taskId)
+        const reopen = (taskId: string) => reopenLocked(taskId)
+        const resetIngestion = (taskId: string, namespace: string) => Effect.gen(function* () {
           if (!/^raws\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+\/\d{4}-\d{2}-\d{2}$/.test(namespace)) return yield* invalid()
           const task = yield* store.task(taskId)
           if (task.type !== 'ingestion') return yield* invalid()
@@ -331,7 +329,7 @@ export class TaskWorktrees extends Context.Service<
           if ((yield* git(checkout.path, ['rev-parse', 'HEAD'])).trim() !== checkout.baselineCommit
             || (yield* git(checkout.path, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
           return checkout
-        }).pipe(Effect.mapError(storage)))
+        }).pipe(Effect.mapError(storage))
 
         /** Persists Task identity before touching Git so failed creation can be retried by the same ID. */
         const reserve = Effect.fn('TaskWorktrees.reserve')(function* (input: TaskDraft) {
@@ -341,6 +339,6 @@ export class TaskWorktrees extends Context.Service<
         const create = (input: TaskDraft) => reserve(input).pipe(Effect.andThen(ensure(input.id)))
         return TaskWorktrees.of({ create, reserve, ensure, complete, resetIngestion, reopen })
       }).pipe(Effect.mapError(storage))
-    ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
+    )
   }
 }

@@ -16,7 +16,7 @@
 
 在 main 基线创建隔离协调 worktree，依次 cherry-pick 已登记的源提交。wiki 冲突交给归属原 Task 的独立 conflict-resolution Run；该 Run 不与普通 Run 并发。Agent 编辑结果，Folio 验证并完成 Git 操作。raws 只能无损去重或保留双方，不能交给 AI 改写原始数据。
 
-准备期间 main 不进入冲突状态。取得 Vault 发布锁后重新核对 main HEAD、工作区和操作登记，再以 fast-forward 发布。main 已前进则重新准备，不能把旧结果强行写回。
+准备期间 main 不进入冲突状态。发布前重新核对 main HEAD、工作区和操作登记，再以 fast-forward 发布。main 已前进则重新准备，不能把旧结果强行写回。raws 与 wiki 位于不同命名空间，生成和准备可以独立进行；只有发布到同一个 main 引用时才需要按操作顺序推进，不依赖额外的 Vault 全局 SQLite 写锁。
 
 ## 对齐 Task
 
@@ -40,7 +40,7 @@ main 在本次发布之后再次前进时，本次 canonical SHA 只是一个已
 
 Git 成功但收据丢失时，读取实际历史与操作记录进行验证，不盲目重复 pick。实验只覆盖 main 仍恰好处于预期发布 HEAD，以及 Task 顶部提交的 operation trailer、parent 和 tree 全部匹配的重试。历史又前进、部分更新、对象缺失或账本损坏等情况仍需生产恢复策略。
 
-生产锁需覆盖所有 Folio Git 写入，并与 Run 生命周期互斥。一次 status 检查不能排除检查后发生外部写入；未知后台进程也不能因 Agent idle 就判定安全。外部编辑器缓冲区不属于 Git 可观测范围，这些限制需要独立处理，不能宣称 Git 自带锁已解决。
+生产实现不再引入覆盖所有 Folio Git 写入的 Vault 全局 SQLite 锁。raws/wiki 的隔离 worktree 和各自的持久操作收据负责分层数据边界；发布前的 HEAD、工作区、来源登记与 CAS/fast-forward 校验负责拒绝过期或冲突操作，Git 自带的 index/ref 锁负责单条命令的原子性。同一 checkout 内不能把多条 Git 命令误当成原子事务：GitChangeApplications 按 Vault root + source branch 保留进程共享临界区，避免同一 index 的发布与恢复互相干扰，但不同 Task worktree 可独立推进。Folio 进程间不再用 Vault 数据库协调，依赖 Electron 单实例门禁；外部 Git 写入者不受该临界区保护。一次 status 检查不能排除检查后发生外部写入；未知后台进程也不能因 Agent idle 就判定安全。外部编辑器缓冲区不属于 Git 可观测范围，这些限制需要独立处理。
 
 ## 已有证据与未完成项
 
@@ -58,7 +58,7 @@ Git 成功但收据丢失时，读取实际历史与操作记录进行验证，�
 
 `TaskGitSynchronization` 与 Vault migration `0015_git_sync_operations` 已将手动 `wiki` 路径落到生产服务：操作先保存完整源区间和 main 基线，再在 `sync-worktrees/{operationId}` 准备确定性 commit；canonical/alignment 对象通过受保护 ref 保留，main 发布和 Task 对齐分别持久化收据。Git 已成功但 prepare/publish/align 收据失败的重试会验证相同对象、HEAD 和 tree，而不是重新读取磁盘或重复应用。
 
-真实 Git/SQLite 测试覆盖连续两轮保存、同文件冲突隔离、dirty/stale/detached main、Task 新草稿、空源同步及其 canonical checkpoint 不可改写、跨重启 pending、prepare/publish/align 收据恢复、canonical/alignment 受保护 ref 不匹配、同一 Task 的新 prepared 操作阻止旧 publication 提前对齐、未登记或非 wiki Task commit、伪造终态行、多个 Task 顺序发布、并发旧 prepare 拒绝、Run/worktree 准入恢复，以及冲突 coordinator 的重启保留。新增人工 resolver 覆盖单次与多次冲突、冲突前后的多 source commit、canonical prefix 跨重启恢复、解决接纳/最终 prepared/abort 三处收据失败、非 wiki 与未暂存编辑拒绝、稳定 RPC 重试和 Task 身份隔离。恢复清理 coordinator 前会重新证明路径、`.git`、shared repository、detached HEAD 和 operation checkpoint；目录被替换时拒绝且不删除。`reprepare` 也要求 Task 与 operation 双身份匹配。`VaultGitWriteLock` 的 SQLite driver 使用 `BEGIN IMMEDIATE`，可串行采用该锁的 Folio 进程；它不锁外部编辑器或 Agent 后台进程。
+真实 Git/SQLite 测试覆盖连续两轮保存、同文件冲突隔离、dirty/stale/detached main、Task 新草稿、空源同步及其 canonical checkpoint 不可改写、跨重启 pending、prepare/publish/align 收据恢复、canonical/alignment 受保护 ref 不匹配、同一 Task 的新 prepared 操作阻止旧 publication 提前对齐、未登记或非 wiki Task commit、伪造终态行、多个 Task 顺序发布、并发旧 prepare 拒绝、Run/worktree 准入恢复，以及冲突 coordinator 的重启保留。新增人工 resolver 覆盖单次与多次冲突、冲突前后的多 source commit、canonical prefix 跨重启恢复、解决接纳/最终 prepared/abort 三处收据失败、非 wiki 与未暂存编辑拒绝、稳定 RPC 重试和 Task 身份隔离。恢复清理 coordinator 前会重新证明路径、`.git`、shared repository、detached HEAD 和 operation checkpoint；目录被替换时拒绝且不删除。`reprepare` 也要求 Task 与 operation 双身份匹配。历史版本曾用 `VaultGitWriteLock` 的 SQLite driver 串行 Folio 进程，但该过渡锁已移除；它从未覆盖外部编辑器或 Agent 后台进程。
 
 main 前进后的 `prepared` 操作可通过稳定的新 ID 执行 reprepare：旧记录进入 `superseded` 终态并保留 canonical ref，替代记录显式保存 `supersedes_id`、相同冻结源区间和新 main 基线。状态转换与替代记录插入位于同一 SQLite 事务；插入失败会回滚旧状态，重试不会留下 Run 准入空窗。替代结果仍按正常 prepare/publish/align 流程发布；若 main 再次前进，则分配另一个新 ID 重复该流程。
 

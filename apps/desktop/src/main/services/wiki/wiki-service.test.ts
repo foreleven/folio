@@ -100,6 +100,20 @@ describe('Wiki file-backed Page service', () => {
     await expect(create('invalid')).rejects.toThrow('changed')
   })
 
+  it('accepts only one concurrent save from the same Page version', async () => {
+    const page = await create('concurrent')
+    const results = await Promise.allSettled([
+      runtime.runPromise(service.save({ metadata: page, body: 'first edit', expectedVersion: page.version })),
+      runtime.runPromise(service.save({ metadata: page, body: 'second edit', expectedVersion: page.version }))
+    ])
+    const successes = results.filter(result => result.status === 'fulfilled')
+    const failures = results.filter(result => result.status === 'rejected')
+    expect(successes).toHaveLength(1)
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ reason: expect.objectContaining({ reason: 'invalid-state' }) })
+    expect((await runtime.runPromise(service.read(page.id))).body).toBe(successes[0]!.value.body)
+  })
+
   it('rejects hierarchy cycles, missing parents and invalid typed properties', async () => {
     const parent = await create('parent')
     await create('child', 'page', parent.id)

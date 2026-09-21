@@ -13,7 +13,6 @@ import { TaskGitSynchronization } from './task-git-synchronization'
 import { TaskWorktrees } from './task-worktrees'
 import { vaultDatabaseLayer } from '../vault/vault-database'
 import { makeVaultGit } from '../git/vault-git'
-import { VaultGitWriteLock } from '../git/vault-git-write-lock'
 import { initializeVaultWorkspace } from '../vault/vault-workspace'
 
 let root: string
@@ -26,7 +25,7 @@ afterEach(async () => {
 })
 
 function layer() {
-  return Layer.mergeAll(TaskGitSynchronization.layer(root), GitChangeApplications.layer(root), TaskWorktrees.layer(root), VaultGitWriteLock.layer(root)).pipe(
+  return Layer.mergeAll(TaskGitSynchronization.layer(root), GitChangeApplications.layer(root), TaskWorktrees.layer(root)).pipe(
     Layer.provideMerge(GitChangeJournal.layer(root)),
     Layer.provideMerge(HarnessStore.layer),
     Layer.provideMerge(vaultDatabaseLayer(root)),

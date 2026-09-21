@@ -872,3 +872,17 @@ Node typecheck 和 `git diff --check` 通过。Desktop Web typecheck 仍被仓�
 - Pi 的 error/aborted/length 完成消息保存 incomplete 标记；SDK 正常返回不再等同于成功。取消映射 cancelled，长度限制映射 max_tokens；自动重试后的最后结果决定该轮结果，先前不完整消息仍保留其标记。
 
 验证：Desktop 60 个文件 / 364 项、Agent 28 个文件 / 164 项通过；Integration 73 项通过、2 项真实服务测试跳过。全仓 typecheck、lint、生产构建和差异空白检查通过。仅支持新建 Vault，不迁移历史资源快照。
+
+## 2026-09-21 — 移除 VaultGitWriteLock 过渡协调层
+
+raws 与 wiki 现在按不同命名空间和独立 Task worktree 分层处理。移除独立的
+`git-write-lock.db`、`VaultGitWriteLock` 服务及 Ingestion 针对其错误文案的重试；Git
+Change、TaskWorktrees、TaskGitSynchronization 和 WikiService 不再通过额外的 Vault 全局
+SQLite 写锁包装文件生成、快照、准备、发布和对齐。分层数据的并行准备由各自的 worktree
+和持久操作收据隔离，发布阶段继续依赖 main HEAD、来源登记、CAS/fast-forward 及 Git
+自身 index/ref 锁校验过期或冲突操作。GitChangeApplications 仅按 Vault root + source branch
+使用进程共享 Semaphore 串行同一 checkout 的多命令 index 发布；Wiki 的版本检查、文件原子
+替换和 main 保存也包含在同一个 main branch 临界区。等待 permit 可取消，取得后会等待 native
+I/O 真正结束才释放。不同 Task worktree 不共享该临界区。Electron 单实例门禁是 Folio 跨进程
+所有权边界，外部写入不受该 Semaphore 保护。旧的 SQLite 锁竞争测试改为覆盖跨 Layer 的同一
+change 并发重试、取消期间的 permit 所有权，以及同版本 Page 并发保存。

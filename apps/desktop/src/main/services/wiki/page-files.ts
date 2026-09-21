@@ -110,7 +110,7 @@ export function validateTypes(types: readonly ObjectType[]): void {
   }
 }
 
-/** Rename publishes complete bytes. The caller holds the shared Git write gate across version checking and publication. */
+/** Rename publishes complete bytes. The caller serializes version checking and publication for this checkout. */
 export async function writeWikiFile(root: string, path: string, content: string): Promise<void> {
   if (Buffer.byteLength(content) > maximumBytes) throw new Error('Page exceeds the 10 MiB limit')
   const target = await wikiPath(root, path)

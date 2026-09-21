@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Layer, Schema } from 'effect'
+import { Context, Effect, FileSystem, Layer, Schema, Semaphore } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { randomUUID } from 'node:crypto'
@@ -23,7 +23,6 @@ import { GitChangeJournal } from './git-change-journal'
 import { prepareSaveIndex, savedIndexTree } from './git-save-index'
 import { HarnessStore } from '../harness/harness-store'
 import { makeVaultGit } from './vault-git'
-import { VaultGitWriteLock } from './vault-git-write-lock'
 import { snapshotGitChange } from './git-change-snapshot'
 
 const Row = Schema.Struct({ ...GitChangeApplication.fields, before: Schema.Uint8Array, after: Schema.Uint8Array })
@@ -37,6 +36,15 @@ const invalid = () => new HarnessStoreError({ reason: 'invalid-state', message: 
 const storage = (cause: unknown) =>
   cause instanceof HarnessStoreError ? cause : new HarnessStoreError({ reason: 'storage', message: 'Could not apply the saved change. Inspect or retry its recorded operation.' })
 const sameBytes = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b))
+// Electron admits one application process, while this registry also coordinates independently
+// constructed Layers in tests or recovery code. Keys stay checkout-specific, not Vault-global.
+const checkoutGates = new Map<string, Semaphore.Semaphore>()
+const gateFor = (root: string, branch: string) => {
+  const key = JSON.stringify([root, branch])
+  let gate = checkoutGates.get(key)
+  if (!gate) { gate = Semaphore.makeUnsafe(1); checkoutGates.set(key, gate) }
+  return gate
+}
 
 /** A prepared object alone never registers a source baseline. The caller supplies a verified bootstrap/base. */
 export const isRegisteredGitCommit = Effect.fn('GitChange.isRegisteredCommit')(function* (branch: string, commit: string, base: string) {
@@ -85,10 +93,13 @@ export class GitChangeApplications extends Context.Service<
         const sql = yield* SqlClient.SqlClient
         const store = yield* HarnessStore
         const journal = yield* GitChangeJournal
-        const lock = yield* VaultGitWriteLock
         const git = yield* makeVaultGit
         const root = yield* fs.realPath(directory)
         const main = join(root, 'workspace')
+        const withCheckout = <A, E, R>(branch: string, action: Effect.Effect<A, E, R>) =>
+          // Semaphore acquisition remains interruptible. Once admitted, native Promise/Git work
+          // must settle before the permit is released because interruption cannot cancel that I/O.
+          gateFor(root, branch).withPermit(Effect.uninterruptible(action))
 
         /** Reads persisted index bytes; the payload is never exposed in the application receipt. */
         const find = Effect.fn('GitChangeApplications.find')(function* (id: string) {
@@ -186,7 +197,7 @@ export class GitChangeApplications extends Context.Service<
           return staged
         }, Effect.scoped)
 
-        /** Complete the two Git writes under the separate process-owned Vault gate, then save the receipt. */
+        /** Completes both Git writes while the caller owns the source branch gate, then saves the receipt. */
         const publish = Effect.fn('GitChangeApplications.publish')(function* (change: GitChangePreparation, row: Row) {
           if (row.state === 'applied') return row
           const source = yield* checkout(change)
@@ -233,7 +244,7 @@ export class GitChangeApplications extends Context.Service<
           return { ...row, state: 'applied' as const }
         })
 
-        /** Called only while the outer operation owns the Vault gate; receipts never reapply an old commit. */
+        /** Called only while the outer operation owns the source branch gate; receipts never reapply an old commit. */
         const applyLocked = Effect.fn('GitChangeApplications.applyLocked')(
           function* (id: string) {
             const previous = yield* find(id)
@@ -286,19 +297,20 @@ export class GitChangeApplications extends Context.Service<
           return yield* applyLocked(value.id)
         })
 
-        /** Holds one gate across user save capture, durable preparation and application. */
+        /** Captures a user save, then applies its durable Git change. */
         const save = Effect.fn('GitChangeApplications.save')(
           function* (input: SaveGitFiles) {
             const decoded = yield* Schema.decodeUnknownEffect(SaveGitFiles)(input, { onExcessProperty: 'error' })
             const value = yield* Schema.decodeUnknownEffect(SaveGitFiles)({ ...decoded, paths: [...new Set(decoded.paths)].sort() })
-            return yield* saveLocked({ ...value, kind: 'user', runIds: [] })
+            return yield* withCheckout(value.taskId === null ? 'main' : `folio/task/${value.taskId}`,
+              saveLocked({ ...value, kind: 'user', runIds: [] })
+            )
           },
           Effect.provide(dependencies),
-          Effect.mapError(storage),
-          lock.withLock
+          Effect.mapError(storage)
         )
 
-        // The editor's filesystem write and Git snapshot share this gate with Task publication.
+        // The editor's filesystem write and Git snapshot are one durable operation.
         // Other dirty files are deliberately excluded from the saved path set.
         const editWorkspace = <A>(edit: Effect.Effect<{ readonly value: A; readonly paths: readonly string[] }, HarnessStoreError>) =>
           Effect.gen(function* () {
@@ -311,7 +323,7 @@ export class GitChangeApplications extends Context.Service<
             if ((yield* git(source.path, ['status', '--porcelain', '--untracked-files=all', '--', ...input.paths])).trim())
               yield* saveLocked({ ...input, kind: 'user', runIds: [] })
             return value
-          }).pipe(Effect.provide(dependencies), Effect.mapError(storage), lock.withLock)
+          }).pipe(Effect.provide(dependencies), Effect.mapError(storage), action => withCheckout('main', action))
 
         /** User-triggered Run save records Agent provenance without inferring filesystem ownership. */
         const saveRunWiki = Effect.fn('GitChangeApplications.saveRunWiki')(
@@ -322,11 +334,10 @@ export class GitChangeApplications extends Context.Service<
               runIds: [...new Set(decoded.runIds)].sort(),
               paths: [...new Set(decoded.paths)].sort()
             })
-            return yield* saveLocked({ ...value, kind: 'wiki' })
+            return yield* withCheckout(`folio/task/${value.taskId}`, saveLocked({ ...value, kind: 'wiki' }))
           },
           Effect.provide(dependencies),
-          Effect.mapError(storage),
-          lock.withLock
+          Effect.mapError(storage)
         )
 
         /** Captures host-produced raw files without inventing Agent Run ownership. */
@@ -334,15 +345,14 @@ export class GitChangeApplications extends Context.Service<
           function* (input: SaveTaskRawFilesValue) {
             const decoded = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)(input, { onExcessProperty: 'error' })
             const value = yield* Schema.decodeUnknownEffect(SaveTaskRawFiles)({ ...decoded, paths: [...new Set(decoded.paths)].sort() })
-            return yield* saveLocked({ ...value, kind: 'raws', runIds: [] })
+            return yield* withCheckout(`folio/task/${value.taskId}`, saveLocked({ ...value, kind: 'raws', runIds: [] }))
           },
           Effect.provide(dependencies),
-          Effect.mapError(storage),
-          lock.withLock
+          Effect.mapError(storage)
         )
 
         /** Records explicit acceptance only while the observed Run baseline still has no wiki delta. */
-        const confirmRunWikiUnchanged = Effect.fn('GitChangeApplications.confirmRunWikiUnchanged')(
+        const confirmRunWikiUnchangedLocked = Effect.fn('GitChangeApplications.confirmRunWikiUnchanged')(
           function* (input: ConfirmRunWikiUnchangedValue) {
             const value = yield* Schema.decodeUnknownEffect(ConfirmRunWikiUnchanged)(input, { onExcessProperty: 'error' })
             let run = (yield* store.runs(value.taskId)).find((candidate) => candidate.id === value.runId)
@@ -380,12 +390,21 @@ export class GitChangeApplications extends Context.Service<
             return run
           },
           Effect.provide(dependencies),
-          Effect.mapError(storage),
-          lock.withLock
+          Effect.mapError(storage)
         )
+        const confirmRunWikiUnchanged = (input: ConfirmRunWikiUnchangedValue) =>
+          withCheckout(`folio/task/${input.taskId}`, confirmRunWikiUnchangedLocked(input))
 
-        /** Applies already-prepared intent under the same gate used by capture/save and worktree creation. */
-        const apply = (id: string) => lock.withLock(applyLocked(id))
+        /**
+         * Serializes a checkout's multi-command publication across Layers in this app process.
+         * Different Task worktrees still progress independently; external writers are detected by
+         * Git's index/ref locks and the persisted parent/receipt checks.
+         */
+        const apply = (id: string) => Effect.gen(function* () {
+          const row = yield* find(id)
+          const branch = row?.branch ?? (yield* journal.recover(id)).branch
+          return yield* withCheckout(branch, applyLocked(id))
+        }).pipe(Effect.provide(dependencies), Effect.mapError(storage))
 
         /** Recovery requires existing application intent; it cannot create a new index plan. */
         const recover = Effect.fn('GitChangeApplications.recover')(function* (id: string) {
@@ -399,6 +418,6 @@ export class GitChangeApplications extends Context.Service<
         )
         return GitChangeApplications.of({ editWorkspace, save, saveRunWiki, saveTaskRaws, confirmRunWikiUnchanged, apply, recover, pending })
       }).pipe(Effect.mapError(storage))
-    ).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
+    )
   }
 }

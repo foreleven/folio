@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import { HarnessStoreError } from '../../../shared/harness'
 import { WikiService } from '../../../shared/wiki-service'
 import { validatePageProperties, type PageSummary, type SaveObjectTypes, type SavePage, type WikiSnapshot } from '../../../shared/wiki'
-import { VaultGitWriteLock } from '../git/vault-git-write-lock'
 import { type PageFile, listMarkdown, parsePage, readObjectTypes, readPage, serializePage, validateTypes, versionOf, wikiPath, writeWikiFile } from './page-files'
 
 export { WikiService } from '../../../shared/wiki-service'
@@ -17,11 +16,10 @@ const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catc
 const invalid = (message: string) => new HarnessStoreError({ reason: 'invalid-state', message })
 const summary = ({ body: _body, frontmatter: _frontmatter, ...page }: PageFile): PageSummary => page
 
-/** Files are authoritative. Reconcile under the same gate used by Task publication and user saves. */
+/** Files are authoritative. Editor mutations reconcile through the main-branch save boundary. */
 export function wikiServiceLayer(directory: string) {
   return Layer.effect(WikiService, Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
-    const gate = yield* VaultGitWriteLock
     const changes = yield* GitChangeApplications
     const root = join(directory, 'workspace', 'wiki')
     const scan = Effect.fn('Wiki.scan')(function* () {
@@ -131,10 +129,10 @@ export function wikiServiceLayer(directory: string) {
       return yield* scan()
     })
     return WikiService.of({
-      snapshot: gate.withLock(scan()),
-      read: id => gate.withLock(read(id)),
+      snapshot: scan(),
+      read,
       save: input => changes.editWorkspace(save(input).pipe(Effect.map(value => ({ value, paths: [`wiki/${value.path}`] })))),
       saveTypes: input => changes.editWorkspace(saveTypes(input).pipe(Effect.map(value => ({ value, paths: ['wiki/_types.json'] }))))
     })
-  })).pipe(Layer.provide(VaultGitWriteLock.layer(directory)))
+  }))
 }

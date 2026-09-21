@@ -1,12 +1,10 @@
 import { reserveClaimedRun, finishClaimedRun } from '../testing/claimed-run'
 import { NodeServices } from '@effect/platform-node'
-import { Effect, FileSystem, Layer, ManagedRuntime } from 'effect'
+import { Deferred, Effect, Fiber, FileSystem, Layer, ManagedRuntime } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { GitChangeApplications, isRegisteredGitCommit } from './git-change-applications'
 import { GitChangeJournal } from './git-change-journal'
@@ -16,7 +14,6 @@ import { TaskWorktrees } from '../tasks/task-worktrees'
 import { vaultDatabaseLayer } from '../vault/vault-database'
 import { makeVaultGit } from './vault-git'
 import { initializeVaultWorkspace } from '../vault/vault-workspace'
-import { VaultGitWriteLock } from './vault-git-write-lock'
 import type { SaveGitFiles } from '../../../shared/git-change'
 
 let root: string
@@ -32,7 +29,7 @@ function layer(failIndex = false) {
     return FileSystem.FileSystem.of({ ...fs, rename: (from, to) =>
       fs.rename(from.endsWith('/index.lock') ? join(root, 'missing-fixture-index') : from, to) })
   })).pipe(Layer.provideMerge(NodeServices.layer)) : NodeServices.layer
-  return Layer.mergeAll(GitChangeApplications.layer(root), TaskWorktrees.layer(root), VaultGitWriteLock.layer(root)).pipe(
+  return Layer.mergeAll(GitChangeApplications.layer(root), TaskWorktrees.layer(root)).pipe(
     Layer.provideMerge(GitChangeJournal.layer(root)), Layer.provideMerge(HarnessStore.layer),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(platform))
 }
@@ -152,40 +149,52 @@ it('recovers a lost receipt after Git refreshes index metadata, preserving the n
   }).pipe(Effect.provide(layer())))
 })
 
-it('uses a separate nonblocking process lock while the Vault event database remains writable', async () => {
-  await Effect.runPromise(setup.pipe(Effect.provide(layer())))
-  const first = ManagedRuntime.make(layer())
-  const second = ManagedRuntime.make(layer())
+it('serializes concurrent retries of the same prepared change across service Layers', async () => {
+  const { main, change } = await Effect.runPromise(setup.pipe(Effect.provide(layer())))
+  const firstRuntime = ManagedRuntime.make(layer())
+  const secondRuntime = ManagedRuntime.make(layer())
   try {
-    const owner = await first.runPromise(VaultGitWriteLock)
-    const contender = await second.runPromise(VaultGitWriteLock)
-    await first.runPromise(owner.withLock(Effect.gen(function*() {
-      const error = yield* Effect.promise(() => second.runPromise(contender.withLock(Effect.void).pipe(Effect.flip)))
-      expect(error).toMatchObject({ reason: 'task-busy' })
-      // Actual writes in data.db still complete while git-write-lock.db is reserved.
-      const sql = yield* SqlClient.SqlClient
-      yield* sql`CREATE TABLE event_lock_probe (id INTEGER PRIMARY KEY)`
-      yield* sql`INSERT INTO event_lock_probe VALUES (1)`
-    }).pipe(Effect.orDie)))
-    await second.runPromise(contender.withLock(Effect.void))
-  } finally { await first.dispose(); await second.dispose() }
+    const firstService = await firstRuntime.runPromise(GitChangeApplications)
+    const secondService = await secondRuntime.runPromise(GitChangeApplications)
+    const [first, second] = await Promise.all([
+      firstRuntime.runPromise(firstService.apply(change.id)),
+      secondRuntime.runPromise(secondService.apply(change.id))
+    ])
+    expect(first).toEqual(second)
+    expect(first).toMatchObject({ commit: change.commit, state: 'applied' })
+    const git = await firstRuntime.runPromise(makeVaultGit)
+    expect((await firstRuntime.runPromise(git(main.workspace, ['rev-list', '--count', 'HEAD']))).trim()).toBe('2')
+    await expect(readFile(join(main.workspace, '.git/index.lock'))).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally {
+    await firstRuntime.dispose()
+    await secondRuntime.dispose()
+  }
 })
 
-it('serializes independent save callers and retries the same commit once the other caller finishes', async () => {
-  const change = await Effect.runPromise(setup.pipe(Effect.map(value => value.change), Effect.provide(layer())))
-  const first = ManagedRuntime.make(layer())
-  const second = ManagedRuntime.make(layer())
-  try {
-    const a = await first.runPromise(GitChangeApplications)
-    const b = await second.runPromise(GitChangeApplications)
-    const results = await Promise.allSettled([first.runPromise(a.apply(change.id)), second.runPromise(b.apply(change.id))])
-    expect(results.some(result => result.status === 'fulfilled')).toBe(true)
-    for (const result of results) {
-      if (result.status === 'rejected') expect(result.reason).toMatchObject({ reason: 'task-busy' })
-      else expect(result.value).toMatchObject({ commit: change.commit, state: 'applied' })
-    }
-    expect(await first.runPromise(a.apply(change.id))).toEqual(await second.runPromise(b.apply(change.id)))
-  } finally { await first.dispose(); await second.dispose() }
+it('does not release a checkout permit until an interrupted editor mutation settles', async () => {
+  await Effect.runPromise(Effect.gen(function*() {
+    yield* initializeVaultWorkspace(root, join(root, 'entry'))
+    const applications = yield* GitChangeApplications
+    const firstEntered = yield* Deferred.make<void>()
+    const releaseFirst = yield* Deferred.make<void>()
+    const secondEntered = yield* Deferred.make<void>()
+    const first = yield* Effect.forkChild(applications.editWorkspace(
+      Deferred.succeed(firstEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseFirst)),
+        Effect.as({ value: 'first', paths: ['wiki/_types.json'] })
+      )
+    ), { startImmediately: true })
+    yield* Deferred.await(firstEntered)
+    const cancelling = yield* Effect.forkChild(Fiber.interrupt(first), { startImmediately: true })
+    const second = yield* Effect.forkChild(applications.editWorkspace(
+      Deferred.succeed(secondEntered, undefined).pipe(Effect.as({ value: 'second', paths: ['wiki/_types.json'] }))
+    ), { startImmediately: true })
+    yield* Effect.yieldNow
+    expect(yield* Deferred.isDone(secondEntered)).toBe(false)
+    yield* Deferred.succeed(releaseFirst, undefined)
+    yield* Fiber.join(cancelling)
+    expect(yield* Fiber.join(second)).toBe('second')
+  }).pipe(Effect.provide(layer())))
 })
 
 it('blocks Run admission across an unfinished Task save, then registers its committed baseline', async () => {
@@ -271,26 +280,6 @@ it('does not discard an unselected staged descendant when the selected file repl
     expect(yield* Effect.promise(() => readFile(join(main.workspace, '.git/index')))).toEqual(before)
     expect((yield* git(main.workspace, ['rev-parse', 'HEAD'])).trim()).toBe(main.initialCommit)
   }).pipe(Effect.provide(layer())))
-})
-
-it('cannot acquire a live process lock and can save after the owner process exits abruptly', async () => {
-  const runtime = ManagedRuntime.make(layer())
-  const { applications, change } = await runtime.runPromise(setup)
-  const child = spawn(process.execPath, ['--input-type=module', '-e',
-    "import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(process.argv[1]); db.exec('BEGIN IMMEDIATE'); process.stdout.write('locked'); setInterval(() => {}, 1000);",
-    join(root, 'git-write-lock.db')], { stdio: ['ignore', 'pipe', 'ignore'] })
-  const exited = once(child, 'exit')
-  try {
-    await Promise.race([once(child.stdout, 'data'), exited.then(() => { throw new Error('Lock fixture exited before readiness') })])
-    expect(await runtime.runPromise(applications.apply(change.id).pipe(Effect.flip))).toMatchObject({ reason: 'task-busy' })
-    child.kill('SIGKILL')
-    await exited
-    expect(await runtime.runPromise(applications.apply(change.id))).toMatchObject({ state: 'applied', commit: change.commit })
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await exited
-    await runtime.dispose()
-  }
 })
 
 it('captures and applies a selected user save through one gate and reuses the accepted result', async () => {
