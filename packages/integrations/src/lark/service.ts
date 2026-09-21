@@ -22,7 +22,7 @@ export interface RegistrationProgress {
 }
 
 export const larkScopes = [
-  'auth:user.id:read', 'im:chat:read', 'im:message:readonly',
+  'auth:user.id:read', 'search:message', 'im:chat:read', 'im:chat.user_setting:read', 'im:message:readonly',
   'im:message.group_msg:get_as_user', 'im:message.p2p_msg:get_as_user', 'im:message.reactions:read',
   'mail:user_mailbox.message.address:read', 'mail:user_mailbox.message.body:read',
   'mail:user_mailbox.message.subject:read', 'mail:user_mailbox.message:readonly', 'mail:user_mailbox:readonly'

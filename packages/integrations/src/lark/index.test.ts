@@ -204,6 +204,31 @@ async function privateState(directory: string) {
 }
 
 describe('Lark integration lifecycle', () => {
+  it('requests every user scope required by the Folio IM extractor', () => {
+    expect(larkScopes).toEqual(expect.arrayContaining([
+      'search:message', 'im:chat.user_setting:read'
+    ]))
+  })
+
+  it('reauthorizes an existing user token that predates the IM extractor scopes', async () => {
+    const h = harness()
+    const legacyScopes = larkScopes.filter(scope =>
+      scope !== 'search:message' && scope !== 'im:chat.user_setting:read')
+    await seed(h.directory, { scope: legacyScopes.join(' ') })
+    try {
+      expect(await h.runtime.runPromise(lark.inspect().pipe(Effect.provideService(IntegrationContext, h.context))))
+        .toEqual({ state: 'login_required', actions: [callback('connect')] })
+      await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
+      expect(registerApp).not.toHaveBeenCalled()
+      const authorization = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/device_authorization'))
+      const body = new URLSearchParams(String(authorization?.[1]?.body))
+      expect(body.get('scope')?.split(' ')).toEqual(expect.arrayContaining([
+        'search:message', 'im:chat.user_setting:read'
+      ]))
+      expect(await h.checked()).toEqual({ state: 'ready', actions: [] })
+    } finally { await h.stop(); await h.runtime.dispose() }
+  })
+
   it('keeps maintenance publication inside the installation lock', async () => {
     const h = harness()
     await seed(h.directory)

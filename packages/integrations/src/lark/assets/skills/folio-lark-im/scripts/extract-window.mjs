@@ -10,6 +10,16 @@ const start = args.get('start'); const end = args.get('end')
 if (!start || !end) throw new Error('Usage: extract-window.mjs --start <ISO> --end <ISO> [--output raws/lark-im]')
 const startTime = Date.parse(start); const endTime = Date.parse(end)
 if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) throw new Error('The extraction window must contain valid ISO timestamps with end after start.')
+const parseMessageTime = value => {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') return /^\d+$/.test(value) ? Number(value) : Date.parse(value)
+  return Number.NaN
+}
+const formatLarkTime = value => new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z')
+// Lark rejects fractional seconds. Query a whole-second superset, then apply
+// the original exact half-open window locally so sub-second windows stay exact.
+const searchStart = formatLarkTime(Math.floor(startTime / 1000) * 1000)
+const searchEnd = formatLarkTime(Math.ceil(endTime / 1000) * 1000)
 const output = args.get('output') ?? join('raws', 'lark-im')
 const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true })
 const summaryPath = join(root, '_updated.md')
@@ -78,7 +88,8 @@ const pagination = value => ({ hasMore: value.has_more === true, token: value.pa
 const searchMessages = async () => {
   const messages = []; let token; let pageNumber = 0
   do {
-    const argv = ['im', '+messages-search', '--as', 'user', '--query', '', '--start', start, '--end', end, '--page-size', '50', '--format', 'json']
+    const argv = ['im', '+messages-search', '--as', 'user', '--query', '', '--start', searchStart, '--end', searchEnd,
+      '--page-size', '50', '--format', 'json', '--no-reactions']
     if (token) argv.push('--page-token', token)
     const value = page(await run(argv), `messages page ${pageNumber + 1}`)
     messages.push(...pageRows(value, 'messages', 'messages'))
@@ -87,7 +98,11 @@ const searchMessages = async () => {
     token = next.token; pageNumber++
     if (pageNumber > 1000) throw new Error('Message pagination exceeded 1000 pages.')
   } while (token)
-  return messages
+  return messages.filter(message => {
+    const timestamp = parseMessageTime(message.create_time)
+    if (!Number.isFinite(timestamp)) throw new Error('Lark message is missing a valid create_time.')
+    return timestamp >= startTime && timestamp < endTime
+  })
 }
 
 /** Queries mute status only for chats present in the message window. */
@@ -123,6 +138,7 @@ for (const message of messages) {
   const rows = grouped.get(chatId) ?? []
   rows.push(message); grouped.set(chatId, rows)
 }
+for (const rows of grouped.values()) rows.sort((left, right) => parseMessageTime(left.create_time) - parseMessageTime(right.create_time))
 const mutedChatIds = await readMutedChatIds([...grouped.keys()])
 const updated = []
 let filteredChats = 0
@@ -133,7 +149,7 @@ const renderContent = message => {
   const content = typeof message.content === 'string' ? message.content : message.content?.text
   return typeof content === 'string' && content.trim() ? content : `[${message.msg_type ?? 'message'}]`
 }
-const renderTime = value => { const parsed = typeof value === 'string' && !/^\d+$/.test(value) ? Date.parse(value) : Number(value); return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : 'unknown time' }
+const renderTime = value => { const parsed = parseMessageTime(value); return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : 'unknown time' }
 for (const [id, rows] of grouped) {
   if (mutedChatIds.has(id)) { filteredChats++; continue }
   const chat = rows[0]

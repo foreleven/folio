@@ -179,6 +179,10 @@ descriptions containing punctuation or newlines. The body contains the chat
 heading and one line per message: `- <ISO time> | <sender name> (<sender ID>) | <content>`.
 Message line breaks become `↵`; rich text and resource placeholders use the CLI's
 readable rendering. Original JSON payloads are not repeated in the body.
+Routine timestamps are accepted in any valid ISO form. The extractor converts
+them to the whole-second RFC3339 values required by Lark, queries a safe superset,
+then reapplies the original exact half-open window locally. It requests
+`search:message` for search and `im:chat.user_setting:read` for muted-chat filtering.
 
 ## Verification
 

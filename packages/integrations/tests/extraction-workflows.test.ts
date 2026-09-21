@@ -65,8 +65,9 @@ async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' 
       setInterval(() => {}, 1_000)
     }
     if (process.argv.includes('+messages-search')) {
-      assert.equal(process.argv[process.argv.indexOf('--start') + 1], ${JSON.stringify(start)})
-      assert.equal(process.argv[process.argv.indexOf('--end') + 1], ${JSON.stringify(end)})
+      assert.equal(process.argv[process.argv.indexOf('--start') + 1], '2026-09-18T00:00:00Z')
+      assert.equal(process.argv[process.argv.indexOf('--end') + 1], '2026-09-18T01:00:01Z')
+      assert.ok(process.argv.includes('--no-reactions'))
       if (mode === 'invalid-json') process.stdout.write('{bad')
       else process.stdout.write(JSON.stringify({ data: {
         messages, has_more: mode === 'messages-truncated'
@@ -104,8 +105,21 @@ describe('bundled extraction workflows', () => {
   })
 
   it('searches the exact Lark window and publishes only a complete extraction', async () => {
-    await runLark('complete')
-    expect(await readFile(join(root, 'output/2026-09-18/_updated.md'), 'utf8')).toContain('1 message(s)')
+    await runLark('complete', undefined, [
+      { create_time: Date.parse(end), content: 'after' },
+      { create_time: Date.parse(end) - 1, content: 'last' },
+      { create_time: Date.parse(start) - 1, content: 'before' },
+      { create_time: Date.parse(start), content: 'first' }
+    ])
+    const summary = await readFile(join(root, 'output/2026-09-18/_updated.md'), 'utf8')
+    const chat = await readFile(join(root, 'output/2026-09-18/oc_fixture.md'), 'utf8')
+    expect(summary).toContain('Searched messages: 2')
+    expect(summary).toContain('2 message(s)')
+    expect(chat).toContain('first')
+    expect(chat).toContain('last')
+    expect(chat).not.toContain('before')
+    expect(chat).not.toContain('after')
+    expect(chat.indexOf('first')).toBeLessThan(chat.indexOf('last'))
   })
 
   it.each([
