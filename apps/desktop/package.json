@@ -78,11 +78,13 @@
     "extraResources": [
       {
         "from": "../../packages/integrations/src/lark/assets/skills",
-        "to": "lark-skills"
-      },
-      {
-        "from": "../../packages/integrations/src/lark/assets/workflows",
-        "to": "lark-workflows"
+        "to": "lark-skills",
+        "filter": [
+          "folio-lark-im/**/*",
+          "lark-shared/**/*",
+          "lark-mail/**/*",
+          "LICENSE"
+        ]
       },
       {
         "from": "../../packages/integrations/src/gmail/assets",

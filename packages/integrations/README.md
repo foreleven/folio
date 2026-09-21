@@ -143,11 +143,12 @@ a different user identity can publish a newly rotated pair as ready.
 
 Lark uses the Folio-managed `lark-cli`; it never executes a global PATH copy.
 Missing tools are extracted from bundled `lark-cli@1.0.94` (macOS arm64 or Linux
-x64). Bundled
-skills are `lark-shared`, `lark-im`, and `lark-mail` from `larksuite/cli` commit
-`f065bf5b645af381f9b7475ce721451e6ca36a23`, with complete trees and license. An
-incomplete existing skills directory is not overwritten. Electron injects packaged
-asset paths at the composition boundary.
+x64). The email resource uses bundled `lark-shared` and `lark-mail` Skills from
+`larksuite/cli` commit `f065bf5b645af381f9b7475ce721451e6ca36a23`, with
+complete trees and license. The IM resource mounts only Folio's purpose-built
+`folio-lark-im` Skill; it does not expose general message sending or chat-management
+instructions to Routine Agents. An incomplete existing upstream skills directory is
+not overwritten. Electron injects packaged asset paths at the composition boundary.
 
 SDK 1.73.3 handles application registration, app token exchange, and user identity
 verification. SDK logging is suppressed to avoid raw credential-bearing transport
@@ -167,10 +168,12 @@ starts or state next changes. Files use atomic replacement with mode `0600` insi
 `0700` directory. They are not encrypted. Vault linkage and ingestion are outside
 this change. The historical `lark-im` directory is not automatically migrated.
 
-The Lark IM `extract-window.mjs` writes each changed chat to a Markdown file
+The self-contained `folio-lark-im` Skill owns `scripts/extract-window.mjs`, its
+window-extraction procedure, and analysis safety rules. The script writes each
+changed chat to a Markdown file
 with YAML frontmatter: `source`, `chat_id`, `chat_name`, `chat_description`,
 `chat_mode`, `owner_id`, `p2p_target_type`, `p2p_target_id`, `window_start`,
-`window_end`, and `message_count`. Chat fields come from the CLI chat list;
+`window_end`, and `message_count`. Chat fields come from the CLI message search;
 missing fields are `null`. Values are JSON-quoted YAML to preserve names and
 descriptions containing punctuation or newlines. The body contains the chat
 heading and one line per message: `- <ISO time> | <sender name> (<sender ID>) | <content>`.

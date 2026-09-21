@@ -3,7 +3,7 @@ import { GlobalExecutionSchedulerLive } from './services/execution/global-execut
 import { ExecutionNotifications } from './services/execution/execution-scheduler'
 import { RoutineSchedulerLive } from './services/routines/routine-scheduler'
 import * as NodeServices from '@effect/platform-node/NodeServices'
-import { lark, LarkCliArchive, LarkSkillsDirectory, LarkWorkflowsDirectory } from '@folio/integrations/lark'
+import { lark, LarkCliArchive, LarkSkillsDirectory } from '@folio/integrations/lark'
 import { gmail, GmailAssetsDirectory } from '@folio/integrations/gmail'
 import { imap, ImapAssetsDirectory } from '@folio/integrations/imap'
 import { app } from 'electron'
@@ -16,9 +16,6 @@ const larkCliArchiveForPlatform = process.platform === 'linux' && process.arch =
 const larkSkillsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'lark-skills')
   : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/skills')
-const larkWorkflowsDirectory = app.isPackaged
-  ? join(process.resourcesPath, 'lark-workflows')
-  : join(app.getAppPath(), '../../packages/integrations/src/lark/assets/workflows')
 const gmailAssetsDirectory = app.isPackaged
   ? join(process.resourcesPath, 'gmail-assets')
   : join(app.getAppPath(), '../../packages/integrations/src/gmail/assets')
@@ -58,18 +55,15 @@ const IntegrationsLive = IntegrationService.layer.pipe(
     ...lark,
     // electron-vite resolves this asset outside app.asar; the provider stays Electron-independent.
     setup: () => lark.setup!().pipe(
-      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
-      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
     ),
     install: () => lark.install().pipe(
       Effect.provideService(LarkCliArchive, larkCliArchiveForPlatform),
-      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
-      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
     ),
     onActionCallback: (id, payload) => lark.onActionCallback(id, payload).pipe(
       Effect.provideService(LarkCliArchive, larkCliArchiveForPlatform),
-      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory),
-      Effect.provideService(LarkWorkflowsDirectory, larkWorkflowsDirectory)
+      Effect.provideService(LarkSkillsDirectory, larkSkillsDirectory)
     )
   }, {
     ...gmail,

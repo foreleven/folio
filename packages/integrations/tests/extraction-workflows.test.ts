@@ -1,14 +1,15 @@
 import { execFile } from 'node:child_process'
-import { access, chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 const execute = promisify(execFile)
 const gmail = fileURLToPath(new URL('../src/gmail/assets/workflows/gmail/extract-window.mjs', import.meta.url))
-const lark = fileURLToPath(new URL('../src/lark/assets/workflows/lark-im/extract-window.mjs', import.meta.url))
+const lark = fileURLToPath(new URL('../src/lark/assets/skills/folio-lark-im/scripts/extract-window.mjs', import.meta.url))
 const start = '2026-09-18T00:00:00.500Z'
 const end = '2026-09-18T01:00:00.500Z'
 let root: string
@@ -43,24 +44,46 @@ async function runGmail(repeatedCursor = false) {
   })
 }
 
-async function runLark(mode: 'complete' | 'chat-truncated' | 'messages-truncated' | 'invalid-json', chat: Record<string, unknown> = { chat_id: 'oc_fixture', name: 'Fixture' }, messages: readonly Record<string, unknown>[] = [{ create_time: Date.parse(start), content: 'hello' }]) {
+async function runLark(mode: 'complete' | 'messages-truncated' | 'invalid-json' | 'mute-invalid' | 'timeout' | 'timeout-descendant', chat: Record<string, unknown> = { chat_id: 'oc_fixture', name: 'Fixture' }, messages: readonly Record<string, unknown>[] = [{ create_time: Date.parse(start), content: 'hello' }]) {
   const cli = join(root, 'lark-cli')
   await writeFile(cli, `#!/usr/bin/env node
     import assert from 'node:assert/strict'
+    import { spawn } from 'node:child_process'
     const mode = ${JSON.stringify(mode)}
-    assert.ok(process.argv.includes('--page-all'))
-    if (mode === 'invalid-json') process.stdout.write('{bad')
-    else if (process.argv.includes('+chat-list')) {
-      process.stdout.write(JSON.stringify({ data: { chats: [${JSON.stringify(chat)}] },
-        meta: { pagination: { complete: mode !== 'chat-truncated' } } }))
+    const chat = ${JSON.stringify(chat)}
+    const messages = ${JSON.stringify(messages)}.map(message => ({
+      chat_id: chat.chat_id, chat_name: chat.name, chat_type: chat.chat_mode, ...message
+    }))
+    if (mode === 'timeout') setInterval(() => {}, 1_000)
+    if (mode === 'timeout-descendant') {
+      spawn(process.execPath, ['-e', ${JSON.stringify(`
+        const { writeFileSync } = require('node:fs')
+        process.on('SIGTERM', () => {})
+        setTimeout(() => writeFileSync(${JSON.stringify('__DESCENDANT_MARKER__')}, 'orphaned'), 300)
+        setInterval(() => {}, 1_000)
+      `.replace('__DESCENDANT_MARKER__', join(root, 'descendant-survived')))}], { stdio: 'ignore' })
+      setInterval(() => {}, 1_000)
+    }
+    if (process.argv.includes('+messages-search')) {
+      assert.equal(process.argv[process.argv.indexOf('--start') + 1], ${JSON.stringify(start)})
+      assert.equal(process.argv[process.argv.indexOf('--end') + 1], ${JSON.stringify(end)})
+      if (mode === 'invalid-json') process.stdout.write('{bad')
+      else process.stdout.write(JSON.stringify({ data: {
+        messages, has_more: mode === 'messages-truncated'
+      } }))
+    } else if (process.argv.includes('batch_query')) {
+      const data = JSON.parse(process.argv[process.argv.indexOf('--data') + 1])
+      process.stdout.write(JSON.stringify({ data: mode === 'mute-invalid' ? {} : {
+        items: data.chat_ids.map(chat_id => ({ chat_id, is_muted: false }))
+      } }))
     } else {
-      process.stdout.write(JSON.stringify({ data: { messages: ${JSON.stringify(messages)} },
-        meta: { pagination: { complete: mode !== 'messages-truncated' } } }))
+      throw new Error('Unexpected lark-cli command: ' + process.argv.slice(2).join(' '))
     }
   `)
   await chmod(cli, 0o700)
   return execute(process.execPath, [lark, '--start', start, '--end', end, '--output', join(root, 'output')], {
-    env: { ...process.env, PATH: [root, process.env.PATH ?? ''].join(delimiter) }, timeout: 10_000
+    env: { ...process.env, PATH: [root, process.env.PATH ?? ''].join(delimiter),
+      ...(mode.startsWith('timeout') ? { FOLIO_LARK_IM_COMMAND_TIMEOUT_MS: '50' } : {}) }, timeout: 10_000
   })
 }
 
@@ -80,7 +103,7 @@ describe('bundled extraction workflows', () => {
     await expect(access(join(root, 'output/_updated.md'))).rejects.toThrow()
   })
 
-  it('requests all Lark chat pages and publishes only a complete extraction', async () => {
+  it('searches the exact Lark window and publishes only a complete extraction', async () => {
     await runLark('complete')
     expect(await readFile(join(root, 'output/2026-09-18/_updated.md'), 'utf8')).toContain('1 message(s)')
   })
@@ -102,10 +125,9 @@ describe('bundled extraction workflows', () => {
     }))
     expect(metadata).toEqual({
       source: 'lark-im', chat_id: chat.chat_id, chat_name: chat.name ?? null,
-      chat_description: 'description' in chat ? chat.description : null,
-      chat_mode: chat.chat_mode ?? null, owner_id: 'owner_id' in chat ? chat.owner_id : null,
-      p2p_target_type: 'p2p_target_type' in chat ? chat.p2p_target_type : null,
-      p2p_target_id: 'p2p_target_id' in chat ? chat.p2p_target_id : null,
+      chat_description: null,
+      chat_mode: chat.chat_mode ?? null, owner_id: null,
+      p2p_target_type: null, p2p_target_id: null,
       window_start: start, window_end: end, message_count: 1
     })
     expect(content).toContain('hello')
@@ -136,8 +158,21 @@ describe('bundled extraction workflows', () => {
     expect(body).not.toContain('```json')
   })
 
-  it.each(['chat-truncated', 'messages-truncated', 'invalid-json'] as const)('rejects Lark %s without a completion summary', async mode => {
-    await expect(runLark(mode)).rejects.toMatchObject({ stderr: expect.stringContaining(mode === 'invalid-json' ? 'invalid JSON' : 'Pagination did not complete') })
+  it.each(['messages-truncated', 'invalid-json', 'mute-invalid', 'timeout'] as const)('rejects Lark %s without a completion summary', async mode => {
+    const directory = join(root, 'output/2026-09-18')
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, '_updated.md'), 'stale successful marker')
+    await expect(runLark(mode)).rejects.toMatchObject({ stderr: expect.stringContaining(
+      mode === 'invalid-json' ? 'invalid JSON' : mode === 'messages-truncated' ? 'has_more but no page_token'
+        : mode === 'mute-invalid' ? 'missing items' : 'timed out') })
     await expect(access(join(root, 'output/2026-09-18/_updated.md'))).rejects.toThrow()
+  })
+
+  it('terminates descendants when a Lark command times out', async () => {
+    await expect(runLark('timeout-descendant')).rejects.toMatchObject({
+      stderr: expect.stringContaining('timed out')
+    })
+    await delay(500)
+    await expect(access(join(root, 'descendant-survived'))).rejects.toThrow()
   })
 })

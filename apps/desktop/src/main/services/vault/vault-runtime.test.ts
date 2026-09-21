@@ -18,6 +18,7 @@ import { IntegrationService } from '../integrations/integration-service'
 import { ModelService } from '../models/model-service'
 import type { IntegrationView } from '../../../shared/integration'
 import { imap } from '@folio/integrations/imap'
+import { lark } from '@folio/integrations/lark'
 
 function createRuntime(root: string, agent = AgentRuntime.layer(join(root, 'missing-agent-bundle')), integrations: readonly IntegrationView[] = []) {
   return ManagedRuntime.make(
@@ -67,6 +68,37 @@ it('creates one daily IMAP Routine after installation and preserves user edits',
         intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
       yield* tasks.ensureDefaultRoutine
       expect(yield* tasks.routines).toMatchObject([{ name: 'My mailbox', enabled: false }])
+    }))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+it('upgrades only the unchanged generated Lark IM Routine prompt to the dedicated Skill', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-lark-routine-upgrade-'))
+  const resources = lark.resources.map(({ id, type, name }) => ({ id, type, name }))
+  const runtime = createRuntime(root, undefined, [{ ...lark, resources, busy: false,
+    record: { id: 'lark', state: 'ready', data: {}, actions: [], resources, error: null, createdAt: 1, updatedAt: 1 } }])
+  const legacyPrompt = 'Review the current Routine window of Lark IM. Read raws/lark-im/_workflow.md first, then run the extraction workflow it describes and review raws/lark-im/_updated.md and the updated conversation files. Summarize actionable items and decisions.'
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      yield* tasks.ensureDefaultRoutine
+      let routine = (yield* tasks.routines)[0]!
+      yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: routine.enabled,
+        name: routine.name, prompt: legacyPrompt, agent: routine.agent, model: routine.model,
+        skillIds: routine.skillIds, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
+        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
+      yield* tasks.ensureDefaultRoutine
+      routine = (yield* tasks.routines)[0]!
+      expect(routine.prompt).toContain('folio-lark-im Skill')
+      expect(routine.prompt).not.toContain('_workflow.md')
+      yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: routine.enabled,
+        name: routine.name, prompt: 'My custom IM review', agent: routine.agent, model: routine.model,
+        skillIds: routine.skillIds, integrationIds: routine.integrationIds, resourceIds: routine.resourceIds,
+        intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
+      yield* tasks.ensureDefaultRoutine
+      expect((yield* tasks.routines)[0]!.prompt).toBe('My custom IM review')
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })

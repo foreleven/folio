@@ -10,39 +10,15 @@ import { ensureCli, findCli, LARK_USER_ACCESS_TOKEN_ENV } from './cli.ts'
 import { larkMetadata } from './metadata.ts'
 import { hasSkills, installSkills, skillNames } from './skills.ts'
 import { LarkPrivateState, migratePrivateState, readPrivateState, updatePrivateState } from './state.ts'
-import { ensureExtractor } from './workflows.ts'
-
-const imWorkflowPrompt = 'For the current Routine window, read raws/lark-im/_workflow.md and run the extraction workflow it describes before reviewing messages. Use the execution window provided by the Routine; do not invent a different time range.'
-const imWorkflowFile = [
-  '# Lark IM window workflow', '', imWorkflowPrompt, '',
-  'Run `node raws/lark-im/extract-window.mjs --start <ISO> --end <ISO> --output raws/lark-im`.',
-  'The script excludes muted chats, reads the 100 most active conversations, writes one raw file per changed chat, and updates `raws/lark-im/_updated.md`.', ''
-].join('\n')
-
-/** Mounts the selected capability and shared rules; the Agent decides which CLI commands to execute. */
-const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) => Effect.gen(function* () {
-  for (const name of ['lark-shared', skill]) {
+/** Mounts only the capability selected for this Task resource. */
+const onIngest = (skill: 'folio-lark-im' | 'lark-mail') => (context: IngestContext) => Effect.gen(function* () {
+  const skills = skill === 'folio-lark-im' ? [skill] : ['lark-shared', skill]
+  for (const name of skills) {
     const entrypoint = join(context.integrationDirectory, 'skills', name, 'SKILL.md')
     if (!context.skills.includes(entrypoint)) context.skills.push(entrypoint)
   }
   const cli = join(context.integrationDirectory, 'cli')
   if (!context.executableDirectories.includes(cli)) context.executableDirectories.push(cli)
-  if (skill === 'lark-im') {
-    if (!context.instructions.includes(imWorkflowPrompt)) context.instructions.push(imWorkflowPrompt)
-    if (context.workspaceFiles) {
-      // Keep the extractor outside the existing Skill contract. It is copied into
-      // the isolated Task workspace so the Agent can run it without depending on
-      // an installation-specific resource path.
-      const script = yield* Effect.tryPromise({
-        try: () => readFile(join(context.integrationDirectory, 'workflows', 'lark-im', 'extract-window.mjs'), 'utf8'),
-        catch: () => new IntegrationError({ message: 'The Lark IM extraction workflow is not installed.' })
-      })
-      context.workspaceFiles.push(
-        { path: 'raws/lark-im/_workflow.md', content: imWorkflowFile },
-        { path: 'raws/lark-im/extract-window.mjs', content: script }
-      )
-    }
-  }
   // External credentials isolate task commands from the user's global CLI account.
   // They remain in the ephemeral process environment, never in resource snapshots.
   const credentials = yield* Effect.tryPromise({
@@ -72,7 +48,7 @@ const onIngest = (skill: 'lark-im' | 'lark-mail') => (context: IngestContext) =>
   })
 })
 const resources = [
-  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('lark-im') },
+  { id: 'im', type: 'im' as const, name: { en: 'Messages', 'zh-CN': '即时通讯' }, onIngest: onIngest('folio-lark-im') },
   { id: 'email', type: 'email' as const, name: { en: 'Email', 'zh-CN': '邮箱' }, onIngest: onIngest('lark-mail') }
 ] as const
 const actions = [
@@ -180,8 +156,6 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
           yield* Effect.logInfo('Lark CLI ready')
           yield* installSkills(context.directory)
           yield* Effect.logInfo('Lark skills ready').pipe(Effect.annotateLogs({ skillCount: skillNames.length }))
-          yield* ensureExtractor(context.directory)
-          yield* Effect.logInfo('Lark workflows ready')
           for (const resource of resources) yield* context.registerResource(resource)
           yield* updatePrivateState(context.directory, { installed: true })
         })
@@ -245,7 +219,9 @@ const make = Effect.fn('LarkIntegration.make')(function* () {
       // installed rows still get the static catalog re-registered here, which
       // upgrades legacy resource records with their shared type metadata.
       if (!(yield* readPrivateState(directory)).installed) return
-      yield* ensureExtractor(directory)
+      // Folio-owned Skills are refreshed on startup so their extraction logic
+      // follows the application version without changing private credentials.
+      yield* installSkills(directory)
       // Re-register the static capability catalog on every provider startup. This
       // upgrades installations created before resource `type` was persisted while
       // keeping the operation idempotent for current installations.

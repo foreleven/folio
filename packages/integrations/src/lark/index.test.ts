@@ -126,6 +126,10 @@ function harness(options: {
                 await mkdir(join(source, 'skills', name, 'references'), { recursive: true })
                 await writeFile(join(source, 'skills', name, 'SKILL.md'), 'fixture skill')
                 await writeFile(join(source, 'skills', name, 'references', 'details.md'), 'fixture reference')
+                if (name === 'folio-lark-im') {
+                  await mkdir(join(source, 'skills', name, 'scripts'), { recursive: true })
+                  await writeFile(join(source, 'skills', name, 'scripts/extract-window.mjs'), 'fixture extractor')
+                }
               }
               await writeFile(join(source, 'LICENSE'), 'fixture license')
             }
@@ -180,6 +184,10 @@ async function seed(directory: string, extra = {}) {
   for (const name of skillNames) {
     await mkdir(join(directory, 'skills', name), { recursive: true })
     await writeFile(join(directory, 'skills', name, 'SKILL.md'), 'fixture skill')
+    if (name === 'folio-lark-im') {
+      await mkdir(join(directory, 'skills', name, 'scripts'), { recursive: true })
+      await writeFile(join(directory, 'skills', name, 'scripts/extract-window.mjs'), 'fixture extractor')
+    }
   }
   await writeFile(join(directory, 'private.json'), JSON.stringify({
     version: 1, installed: true, app,
@@ -238,29 +246,25 @@ describe('Lark integration lifecycle', () => {
       .toEqual(['open_authorization', 'install', 'connect'])
     const context = { integrationDirectory: '/managed/lark', workspaceDirectory: '/unused', instructions: [], skills: [], executableDirectories: [], env: {} }
     await Effect.runPromise(lark.resources[0]!.onIngest(context))
-    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md'])
+    expect(context.skills).toEqual(['/managed/lark/skills/folio-lark-im/SKILL.md'])
     for (const resource of lark.resources) await Effect.runPromise(resource.onIngest(context))
-    expect(context.skills).toEqual(['/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-im/SKILL.md', '/managed/lark/skills/lark-mail/SKILL.md'])
+    expect(context.skills).toEqual(['/managed/lark/skills/folio-lark-im/SKILL.md', '/managed/lark/skills/lark-shared/SKILL.md', '/managed/lark/skills/lark-mail/SKILL.md'])
     expect(context.executableDirectories).toEqual(['/managed/lark/cli'])
-    expect(context.instructions).toEqual([expect.stringContaining('raws/lark-im/_workflow.md')])
+    expect(context.instructions).toEqual([])
     expect(context.env).toEqual({})
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('copies the IM extractor and workflow instructions into the Task workspace', async () => {
+  it('mounts the self-contained IM Skill without copying workflow files into the Task', async () => {
     const directory = join(root, 'managed-lark')
-    const script = join(directory, 'workflows', 'lark-im', 'extract-window.mjs')
-    await mkdir(dirname(script), { recursive: true })
-    await writeFile(script, '#!/usr/bin/env node\nprocess.exit(0)\n')
     const context = {
       integrationDirectory: directory, workspaceDirectory: join(root, 'task'), instructions: [], skills: [],
       executableDirectories: [], workspaceFiles: [] as Array<{ path: string; content: string }>, env: {}
     }
     await Effect.runPromise(lark.resources[0]!.onIngest(context))
-    expect(context.workspaceFiles).toEqual([
-      { path: 'raws/lark-im/_workflow.md', content: expect.stringContaining('extract-window.mjs') },
-      { path: 'raws/lark-im/extract-window.mjs', content: '#!/usr/bin/env node\nprocess.exit(0)\n' }
-    ])
+    expect(context.skills).toEqual([join(directory, 'skills/folio-lark-im/SKILL.md')])
+    expect(context.instructions).toEqual([])
+    expect(context.workspaceFiles).toEqual([])
   })
 
   it('passes the saved user token only through the ingest environment', async () => {
@@ -278,7 +282,8 @@ describe('Lark integration lifecycle', () => {
         LARKSUITE_CLI_BRAND: app.brand, LARKSUITE_CLI_DEFAULT_AS: 'user',
         LARKSUITE_CLI_USER_ACCESS_TOKEN: 'saved-token', LARKSUITE_CLI_TENANT_ACCESS_TOKEN: 'test-app-token'
       })
-      expect(context.workspaceFiles.map(file => file.path)).toEqual(['raws/lark-im/_workflow.md', 'raws/lark-im/extract-window.mjs'])
+      expect(context.skills).toEqual([join(h.directory, 'skills/folio-lark-im/SKILL.md')])
+      expect(context.workspaceFiles).toEqual([])
     } finally { await h.stop(); await h.runtime.dispose() }
   })
 
@@ -367,7 +372,8 @@ describe('Lark integration lifecycle', () => {
       expect(registerApp).not.toHaveBeenCalled()
       expect((await h.checked()).state).toBe('app_required')
       expect(await readFile(join(h.directory, 'skills/lark-mail/SKILL.md'), 'utf8')).toContain('name: lark-mail')
-      expect(await readFile(join(h.directory, 'workflows/lark-im/extract-window.mjs'), 'utf8')).toContain('messages-search')
+      expect(await readFile(join(h.directory, 'skills/folio-lark-im/SKILL.md'), 'utf8')).toContain('name: folio-lark-im')
+      expect(await readFile(join(h.directory, 'skills/folio-lark-im/scripts/extract-window.mjs'), 'utf8')).toContain('messages-search')
       await h.runtime.runPromise(lark.onActionCallback('connect').pipe(Effect.provideService(IntegrationContext, h.context)))
       expect(h.states.map((item) => item.state)).toEqual(expect.arrayContaining(['waiting_for_app', 'waiting_for_user', 'ready']))
       expect(await h.checked()).toEqual({ state: 'ready', actions: [] })
@@ -457,6 +463,10 @@ describe('Lark integration lifecycle', () => {
     for (const name of skillNames) {
       await mkdir(join(h.directory, 'skills', name), { recursive: true })
       await writeFile(join(h.directory, 'skills', name, 'SKILL.md'), 'fixture skill')
+      if (name === 'folio-lark-im') {
+        await mkdir(join(h.directory, 'skills', name, 'scripts'), { recursive: true })
+        await writeFile(join(h.directory, 'skills', name, 'scripts/extract-window.mjs'), 'fixture extractor')
+      }
     }
     await writeFile(join(h.directory, 'installed.json'), 'true')
     await writeFile(join(h.directory, 'app.json'), JSON.stringify(app))

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Extract one complete Lark IM window into workspace raws for a Routine run. */
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
@@ -11,12 +11,53 @@ if (!start || !end) throw new Error('Usage: extract-window.mjs --start <ISO> --e
 const startTime = Date.parse(start); const endTime = Date.parse(end)
 if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) throw new Error('The extraction window must contain valid ISO timestamps with end after start.')
 const output = args.get('output') ?? join('raws', 'lark-im')
+const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true })
+const summaryPath = join(root, '_updated.md')
+// A marker describes only the current attempt. A failed retry must not leave a
+// previous successful marker beside partial or stale output.
+await rm(summaryPath, { force: true })
+const configuredTimeout = Number(process.env.FOLIO_LARK_IM_COMMAND_TIMEOUT_MS)
+const commandTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 120_000
 const run = (argv) => new Promise((resolve, reject) => {
-  const child = spawn('lark-cli', argv, { stdio: ['ignore', 'pipe', 'inherit'] })
+  // On POSIX, a separate process group lets a timeout terminate helpers spawned
+  // by the CLI as well as the CLI itself. Windows uses taskkill for the same
+  // process-tree guarantee after giving the direct process a chance to exit.
+  const isWindows = process.platform === 'win32'
+  const child = spawn('lark-cli', argv, {
+    stdio: ['ignore', 'pipe', 'inherit'], detached: !isWindows, windowsHide: true
+  })
   let text = ''
+  let timedOut = false
+  let forceKill
+  const signalPosixGroup = signal => {
+    try { process.kill(-child.pid, signal) } catch { child.kill(signal) }
+  }
+  const forceKillTree = () => {
+    if (!isWindows) return signalPosixGroup('SIGKILL')
+    const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore', windowsHide: true
+    })
+    killer.on('error', () => child.kill('SIGKILL'))
+  }
+  const timeout = setTimeout(() => {
+    timedOut = true
+    if (isWindows) forceKillTree()
+    else {
+      signalPosixGroup('SIGTERM')
+      forceKill = setTimeout(forceKillTree, 5_000)
+      forceKill.unref()
+    }
+  }, commandTimeoutMs)
+  timeout.unref()
+  const clearTimers = () => { clearTimeout(timeout); if (forceKill) clearTimeout(forceKill) }
   child.stdout.on('data', chunk => { text += chunk })
-  child.on('error', reject)
+  child.on('error', error => { clearTimers(); reject(error) })
   child.on('close', code => {
+    // The direct CLI may exit before a descendant which ignored SIGTERM. Kill
+    // the remaining POSIX process group before allowing the extractor to exit.
+    if (timedOut && !isWindows) forceKillTree()
+    clearTimers()
+    if (timedOut) return reject(new Error(`lark-cli timed out after ${commandTimeoutMs}ms`))
     if (code !== 0) return reject(new Error(`lark-cli exited with ${code}`))
     try { resolve(JSON.parse(text)) } catch { reject(new Error('lark-cli returned invalid JSON')) }
   })
@@ -83,7 +124,7 @@ for (const message of messages) {
   rows.push(message); grouped.set(chatId, rows)
 }
 const mutedChatIds = await readMutedChatIds([...grouped.keys()])
-const root = join(output, start.slice(0, 10)); await mkdir(root, { recursive: true }); const updated = []
+const updated = []
 let filteredChats = 0
 const pendingWrites = []
 const singleLine = value => String(value).replace(/\r\n|[\r\n\u2028\u2029]/g, ' ↵ ')
@@ -109,8 +150,15 @@ for (const [id, rows] of grouped) {
   updated.push({ id, title, count: rows.length })
 }
 await Promise.all(pendingWrites)
-await writeFile(join(root, '_updated.md'), [
+const summary = [
   '# Lark IM updated chats', '', `Window: ${start} → ${end}`,
   `Searched messages: ${messages.length}`, `Chats found: ${grouped.size}`, `Muted chats skipped: ${filteredChats}`, '',
   ...updated.map(chat => `- [${chat.title}](./${chat.id}.md) — ${chat.count} message(s) — ${chat.id}`)
-].join('\n') + '\n')
+].join('\n') + '\n'
+const stagedSummary = join(root, `._updated-${process.pid}-${Date.now()}.tmp`)
+try {
+  await writeFile(stagedSummary, summary)
+  await rename(stagedSummary, summaryPath)
+} finally {
+  await rm(stagedSummary, { force: true })
+}
