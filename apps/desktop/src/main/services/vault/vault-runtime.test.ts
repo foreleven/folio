@@ -527,6 +527,7 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
   let vaultId = ''
   let sourceHead = ''
   const taskId = '66666666-6666-4666-8666-666666666666'
+  const noChangeTaskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
   try {
     await mkdir(join(root, 'wiki'))
     await runtime.runPromise(Effect.gen(function* () {
@@ -557,7 +558,23 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       expect(publication.state).toBe('completed')
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
         publication: { state: 'completed', saveOperationId: accepted.id, synchronizationId: publication.id } })
+      yield* tasks.saveRunWikiFiles({ id: 'accepted-wiki', taskId,
+        expectedParent: success.runs[0]!.baselineCommit!, paths: ['wiki/discovery.md'], runIds: [runId] })
+      expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'completed', saveOperationId: accepted.id, synchronizationId: publication.id } })
       expect(yield* tasks.complete(taskId)).toMatchObject({ worktreeState: 'released' })
+      const noChangeSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const noChangeRunId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+      yield* tasks.create({ id: noChangeTaskId, goal: 'No changes', agent: 'codex' })
+      yield* tasks.openSession({ taskId: noChangeTaskId, sessionId: noChangeSessionId, agent: 'codex' })
+      yield* tasks.startRun({ id: noChangeRunId, taskId: noChangeTaskId, sessionId: noChangeSessionId,
+        prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
+      yield* tasks.executeRequest((yield* tasks.claimExecution('worker-no-change'))!)
+      const noChangeRun = (yield* tasks.get(noChangeTaskId)).runs[0]!
+      expect(noChangeRun.state).toBe('succeeded')
+      yield* tasks.confirmRunWikiUnchanged({ taskId: noChangeTaskId, runId: noChangeRunId, expectedHead: noChangeRun.baselineCommit! })
+      expect((yield* tasks.get(noChangeTaskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'not-required' } })
     }).pipe(Effect.timeout('20 seconds')))
     await runtime.dispose()
     // Simulate process loss after Git receipts commit but before either summary update.
@@ -566,24 +583,28 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       database.prepare(`UPDATE tasks SET summary=json_set(summary,
         '$.publication.state', 'pending', '$.publication.saveOperationId', NULL,
         '$.publication.synchronizationId', NULL) WHERE id=?`).run(taskId)
+      database.prepare(`UPDATE tasks SET summary=json_set(summary,
+        '$.publication.state', 'pending') WHERE id=?`).run(noChangeTaskId)
       database.prepare(`UPDATE git_operations SET source_commit=? WHERE id='publish-wiki'`).run('deadbeef'.repeat(5))
     } finally { database.close() }
     runtime = createRuntime(root)
-    await runtime.runPromise(Effect.gen(function* () {
+    await vi.waitFor(async () => runtime.runPromise(Effect.gen(function* () {
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
         publication: { state: 'pending', saveOperationId: 'accepted-wiki', synchronizationId: null } })
-    }))
+      expect((yield* tasks.get(noChangeTaskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'not-required' } })
+    })), { timeout: 3000 })
     await runtime.dispose()
     const repaired = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
     try { repaired.prepare(`UPDATE git_operations SET source_commit=? WHERE id='publish-wiki'`).run(sourceHead) }
     finally { repaired.close() }
     runtime = createRuntime(root)
-    await runtime.runPromise(Effect.gen(function* () {
+    await vi.waitFor(async () => runtime.runPromise(Effect.gen(function* () {
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
         publication: { state: 'completed', saveOperationId: 'accepted-wiki', synchronizationId: 'publish-wiki' } })
-    }))
+    })), { timeout: 3000 })
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }, 25000)
 

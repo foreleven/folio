@@ -699,8 +699,10 @@ export const TaskServiceLive = Layer.effect(
     const recordWikiSave = Effect.fn('TaskService.recordWikiSave')(function* (taskId: string, runIds: readonly string[], saveId: string) {
       const task = yield* store.task(taskId)
       if (task.summary?.type !== 'agent' || !runIds.includes(task.summary.runId)) return
+      if (task.summary.publication.saveOperationId === saveId) return
       yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.saveOperationId', ${saveId},
-        '$.publication.state', 'pending') WHERE id=${taskId} AND json_extract(summary, '$.runId')=${task.summary.runId}`
+        '$.publication.synchronizationId', NULL, '$.publication.state', 'pending')
+        WHERE id=${taskId} AND json_extract(summary, '$.runId')=${task.summary.runId}`
     }, Effect.mapError(safeError))
     /** Git owns the operation history; this only updates the matching Task-level result. */
     const recordWikiSynchronization = Effect.fn('TaskService.recordWikiSynchronization')(function* (operation: { id: string; taskId: string; sourceHead: string; state: string }) {
@@ -753,7 +755,9 @@ export const TaskServiceLive = Layer.effect(
     /** Replays committed Git/Run receipts into the Task snapshot after a process exits between writes. */
     const reconcilePublicationSummaries = Effect.fn('TaskService.reconcilePublicationSummaries')(function* () {
       const rows = yield* sql<{ id: string }>`SELECT id FROM tasks WHERE type='agent'
-        AND json_extract(summary, '$.type')='agent' ORDER BY created_at, id`
+        AND json_extract(summary, '$.type')='agent'
+        AND json_extract(summary, '$.publication.state') IN ('pending', 'conflict', 'failed')
+        ORDER BY created_at DESC, id DESC`
       for (const { id } of rows) {
         yield* reconcilePublicationSummary(id).pipe(Effect.catch(error => Effect.logWarning(
           'Task publication summary could not be reconciled; the saved snapshot remains available.', { vaultId: vault.id, taskId: id }, error)))
@@ -791,7 +795,9 @@ export const TaskServiceLive = Layer.effect(
       yield* startIngestion(taskId)
       return yield* store.task(taskId)
     }, gate.withPermit, Effect.mapError(safeError))
-    yield* reconcilePublicationSummaries()
+    // Recovery reads only unsettled snapshots and must not hold up the first Feed page.
+    yield* Effect.forkScoped(reconcilePublicationSummaries().pipe(Effect.catch(error => Effect.logWarning(
+      'Task publication reconciliation could not start; saved snapshots remain available.', { vaultId: vault.id }, error))))
     return TaskService.of({
       executionCounts: queue.counts,
       tickRoutines,
