@@ -46,11 +46,11 @@ describe('Routine details', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
     mocks.routines = [{ id: 'imap', name: 'IMAP', type: 'agent', configuration: { goal: 'Review mail', agent: 'codex', model: null,
-      skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 1440, timeZone: 'UTC',
+      skillIds: [], integrationIds: [], resourceIds: [] }, trigger: { type: 'schedule', intervalMinutes: 1440, timeZone: 'UTC' },
       enabled: true, revision: 1, nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
     const execution = { routineId: 'imap', taskId: 'task', routineDate: '2026-09-19', triggerTime: 1,
       runId: '33333333-3333-4333-8333-333333333333', type: 'agent', cancelRequested: false,
-      firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
+      windowStart: 0, windowEnd: 1,
       timeZone: 'UTC', routineRevision: 1, model: null, startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }
     mocks.executions = [{ ...execution, status: 'preparing' }]
     const view = render(<RoutinePanel />)
@@ -76,10 +76,10 @@ describe('Routine details', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))
     mocks.routines = [{ id: 'imap', name: 'IMAP', type: 'agent', configuration: { goal: 'Review mail', agent: 'codex', model: null,
-      skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 60, timeZone: 'UTC', enabled: true, revision: 1,
+      skillIds: [], integrationIds: [], resourceIds: [] }, trigger: { type: 'schedule', intervalMinutes: 60, timeZone: 'UTC' }, enabled: true, revision: 1,
       nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
     mocks.executions = [{ routineId: 'imap', taskId: 'task', type: 'agent', cancelRequested: false, runId: '33333333-3333-4333-8333-333333333333', routineDate: '2026-09-19',
-      triggerTime: 1, firstTriggerTime: 1, triggerCount: 1, isEnd: false, windowStart: 0, windowEnd: 1,
+      triggerTime: 1, windowStart: 0, windowEnd: 1,
       timeZone: 'UTC', routineRevision: 1, model: null, status: 'running', startedAt: 1, endedAt: null, createdAt: 1, updatedAt: 1 }]
     render(<RoutinePanel />)
     fireEvent.click(screen.getByRole('button', { name: '打开 IMAP Routine 详情' }))
@@ -96,8 +96,7 @@ describe('Routine details', () => {
         type: 'agent',
         configuration: { goal: '第一步：读取今天的邮件。\n第二步：整理行动项和截止时间。', agent: 'codex', model: null,
           skillIds: [], integrationIds: [], resourceIds: [] },
-        intervalMinutes: 1440,
-        timeZone: 'Asia/Shanghai',
+        trigger: { type: 'schedule', intervalMinutes: 1440, timeZone: 'Asia/Shanghai' },
         enabled: true,
         revision: 1,
         nextTriggerAt: null,
@@ -109,10 +108,9 @@ describe('Routine details', () => {
 
     render(<RoutinePanel />)
     fireEvent.click(screen.getByRole('button', { name: '打开 每日邮件整理 Routine 详情' }))
-    // Long-lived Routines must not mount every historical date at once.
+    // A day without a scheduled window must not be inferred as missing history.
     expect(screen.getAllByRole('button').length).toBeLessThan(50)
-    fireEvent.click(screen.getByRole('button', { name: '显示更早日期' }))
-    expect(screen.getAllByRole('button').length).toBeLessThan(90)
+    expect(screen.queryByText('这一天没有执行记录')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '查看全部 Prompt' }))
 
     const dialog = screen.getByRole('dialog')

@@ -82,7 +82,12 @@ it('streams through the real sink without writing SQL or recovery files, then pe
       const messages = yield* (yield* HarnessEventStore).messages('session')
       expect(messages[0]!.payload.data.content).toHaveLength(100)
       expect(messages[0]!.payload.data.ended).toBe(true)
-      expect(yield* (yield* HarnessStore).runs('task')).toMatchObject([{ state: 'succeeded' }])
+      const store = yield* HarnessStore
+      expect(yield* store.runs('task')).toMatchObject([{ state: 'succeeded' }])
+      expect((yield* store.task('task')).summary).toMatchObject({
+        type: 'agent', runId: 'run', outcome: 'succeeded', discovery: { incomplete: false,
+          content: expect.arrayContaining([{ type: 'text', text: 'x' }]) }
+      })
     }))
   } finally { await vault.dispose() }
 })

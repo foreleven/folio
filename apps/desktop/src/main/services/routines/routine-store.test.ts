@@ -25,7 +25,7 @@ const agentConfiguration = (goal: string, agent: 'pi' | 'codex' = 'codex', model
 
 const setup = Effect.gen(function* () {
   const store = yield* RoutineStore
-  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Process today'), intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+  yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Process today'), trigger: { type: 'schedule', intervalMinutes: 30, timeZone: 'UTC' }, enabled: true })
 })
 
 const finish = (id: string, state: 'succeeded' | 'failed' | 'interrupted' | 'cancelled') => Effect.gen(function* () {
@@ -57,7 +57,7 @@ describe('RoutineStore bounded execution windows', () => {
       yield* setup
       const sql = yield* SqlClient.SqlClient
       const at = Date.parse(instant)
-      yield* sql`UPDATE routines SET created_at=${at - 60_000}, time_zone=${timeZone} WHERE id=${routineId}`
+      yield* sql`UPDATE routines SET created_at=${at - 60_000}, trigger=json_set(trigger, '$.timeZone', ${timeZone}) WHERE id=${routineId}`
       const store = yield* RoutineStore
       const first = (yield* store.schedule(routineId, at))!
       expect(first.windowStart).toBe(Date.parse(midnight))
@@ -131,9 +131,9 @@ describe('RoutineStore bounded execution windows', () => {
     await Effect.runPromise(Effect.gen(function* () {
       const store = yield* RoutineStore
       const model = { providerId: 'anthropic', modelId: 'original-model', thinkingLevel: 'off' as const }
-      yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Original prompt', 'pi', model), intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+      yield* store.save({ id: routineId, expectedRevision: null, name: 'Inbox', type: 'agent', configuration: agentConfiguration('Original prompt', 'pi', model), trigger: { type: 'schedule', intervalMinutes: 30, timeZone: 'UTC' }, enabled: true })
       const first = (yield* store.schedule(routineId, Date.parse('2026-09-11T10:00:00Z')))!
-      yield* store.save({ id: routineId, expectedRevision: 1, name: 'Inbox', type: 'agent', configuration: { ...agentConfiguration('New prompt'), integrationIds: [], resourceIds: [] }, intervalMinutes: 30, timeZone: 'America/Los_Angeles', enabled: true })
+      yield* store.save({ id: routineId, expectedRevision: 1, name: 'Inbox', type: 'agent', configuration: { ...agentConfiguration('New prompt'), integrationIds: [], resourceIds: [] }, trigger: { type: 'schedule', intervalMinutes: 30, timeZone: 'America/Los_Angeles' }, enabled: true })
       const task = yield* (yield* HarnessStore).task(first.taskId)
       expect(task.type).toBe('agent')
       if (task.type !== 'agent') throw new Error('Expected Agent Task')
@@ -210,7 +210,7 @@ describe('RoutineStore bounded execution windows', () => {
       const ingestionRoutineId = '99999999-9999-4999-8999-999999999999'
       const store = yield* RoutineStore
       yield* store.save({ id: ingestionRoutineId, expectedRevision: null, name: 'Mailbox', type: 'ingestion',
-        configuration: { integrationId: 'imap', resourceId: 'email' }, intervalMinutes: 30, timeZone: 'UTC', enabled: true })
+        configuration: { integrationId: 'imap', resourceId: 'email' }, trigger: { type: 'schedule', intervalMinutes: 30, timeZone: 'UTC' }, enabled: true })
       const first = (yield* store.schedule(ingestionRoutineId, Date.parse('2026-09-11T00:30:00Z')))!
       const tasks = yield* HarnessStore
       const task = yield* tasks.task(first.taskId)

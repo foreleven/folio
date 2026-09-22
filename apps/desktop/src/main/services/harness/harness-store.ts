@@ -15,12 +15,16 @@ import {
   SessionRecord,
   TaskRecord
 } from '../../../shared/harness'
+import { TaskSummary } from '../../../shared/harness'
+import type { MessageRecord } from '../../../shared/harness-events'
+import { ProjectedMessage } from '../../../shared/harness-events'
 
 const TaskRowIdentity = {
   id: Schema.NonEmptyString,
   state: Schema.Literals(['active', 'completed', 'cancelled']),
   worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
   worktreeBase: Schema.NullOr(Schema.String),
+  summary: Schema.NullOr(Schema.fromJsonString(TaskSummary)),
   createdAt: Schema.Number
 }
 const TaskRow = Schema.Union([
@@ -60,6 +64,7 @@ export class HarnessStore extends Context.Service<
     readonly sessions: (taskId: string) => Effect.Effect<readonly SessionRecord[], HarnessStoreError>
     readonly reserveRun: (input: NewRun, claimOwner: string) => Effect.Effect<void, HarnessStoreError>
     readonly runs: (taskId: string) => Effect.Effect<readonly RunRecord[], HarnessStoreError>
+    readonly recordAgentSummary: (run: RunRecord, messages: readonly MessageRecord[]) => Effect.Effect<void, HarnessStoreError>
   }
 >()('folio/services/HarnessStore') {
   static layer(directory: string) {
@@ -84,7 +89,7 @@ export class HarnessStore extends Context.Service<
 
       /** Reads this Vault's immutable snapshot and independent Task lifecycle. */
       const tasks = sql`SELECT id, type, configuration, receipt, state,
-      worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt
+      worktree_state AS worktreeState, worktree_base AS worktreeBase, summary, created_at AS createdAt
       FROM tasks ORDER BY created_at DESC, id DESC`.pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow))),
         Effect.map(rows => rows.map(withLocation)),
@@ -94,7 +99,7 @@ export class HarnessStore extends Context.Service<
       /** Retrieves one Task, distinguishing missing identity from a storage failure. */
       const task = Effect.fn('HarnessStore.task')(function* (id: string) {
         const rows = yield* sql`SELECT id, type, configuration, receipt, state,
-        worktree_state AS worktreeState, worktree_base AS worktreeBase, created_at AS createdAt FROM tasks WHERE id=${id}`.pipe(
+        worktree_state AS worktreeState, worktree_base AS worktreeBase, summary, created_at AS createdAt FROM tasks WHERE id=${id}`.pipe(
           Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow)))
         )
         if (!rows[0]) return yield* failure('not-found')
@@ -156,6 +161,23 @@ export class HarnessStore extends Context.Service<
         Effect.mapError(storageError)
       )
 
+      /** A terminal execution Run replaces its Task result; conflict repair is not a discovery. */
+      const recordAgentSummary = Effect.fn('HarnessStore.recordAgentSummary')(function* (run: RunRecord, messages: readonly MessageRecord[]) {
+        if (run.purpose === 'conflict-resolution') return
+        if (run.endedAt === null || !['succeeded', 'failed', 'interrupted', 'cancelled'].includes(run.state)) return yield* failure('invalid-state')
+        const last = messages.filter(message => message.runId === run.id && message.payload.kind === 'message' && message.payload.data.role === 'assistant')
+          .sort((a, b) => a.seq - b.seq).at(-1)
+        const projected = last ? yield* Schema.decodeUnknownEffect(ProjectedMessage)(last.payload.data) : null
+        const summary = yield* Schema.decodeUnknownEffect(TaskSummary)({
+          type: 'agent', runId: run.id, runSequence: run.sequence, endedAt: run.endedAt, outcome: run.state, error: run.error,
+          discovery: projected ? { content: projected.content, incomplete: run.state !== 'succeeded' || last?.payload.data.incomplete === true || !projected.ended } : null,
+          publication: { state: run.state !== 'succeeded' || run.syncState === 'not-required' ? 'not-required' : 'pending', saveOperationId: null, synchronizationId: null }
+        })
+        yield* sql`UPDATE tasks SET summary=${JSON.stringify(summary)} WHERE id=${run.taskId} AND type='agent'
+          AND (summary IS NULL OR json_extract(summary, '$.type')<>'agent'
+            OR json_extract(summary, '$.runSequence')<=${run.sequence})`
+      }, Effect.mapError(storageError))
+
       /** Verifies Git and Session readiness before filling the baseline of the already-claimed Run. */
       const reserveRun = Effect.fn('HarnessStore.reserveRun')(function* (input: NewRun, claimOwner: string) {
         const value = yield* Schema.decodeUnknownEffect(NewRun)(input)
@@ -206,7 +228,7 @@ export class HarnessStore extends Context.Service<
         )
       }, Effect.mapError(storageError))
 
-      return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, runs })
+      return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, runs, recordAgentSummary })
     })
     )
   }

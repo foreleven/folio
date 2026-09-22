@@ -36,6 +36,16 @@ export const TaskDetail = Schema.Struct({
   runs: Schema.Array(RunRecord)
 })
 export type TaskDetail = typeof TaskDetail.Type
+export const TaskFeedCursor = Schema.Struct({ createdAt: Schema.Number, id: TaskId })
+export type TaskFeedCursor = typeof TaskFeedCursor.Type
+export const TaskFeedEntry = Schema.Struct({
+  task: TaskRecord,
+  latestRun: Schema.NullOr(RunRecord),
+  routineName: Schema.NullOr(Schema.String),
+  schedule: Schema.NullOr(Schema.Struct({ windowStart: Schema.Number, windowEnd: Schema.Number, timeZone: Schema.String }))
+})
+export const TaskFeedPage = Schema.Struct({ entries: Schema.Array(TaskFeedEntry), nextCursor: Schema.NullOr(TaskFeedCursor) })
+export type TaskFeedPage = typeof TaskFeedPage.Type
 const SessionIdentity = Schema.Struct({ taskId: TaskId, sessionId: TaskId })
 export const OpenTaskSessionInput = Schema.Struct({ ...SessionIdentity.fields, agent: AgentKind, model: Schema.optionalKey(SessionModelSelection) })
 export type OpenTaskSessionInput = typeof OpenTaskSessionInput.Type
@@ -80,6 +90,7 @@ export class TaskRpcs extends RpcGroup.make(
     error: HarnessStoreError
   }),
   Rpc.make('tasks.list', { payload: {}, success: Schema.Array(TaskRecord), error: HarnessStoreError }),
+  Rpc.make('tasks.feed', { payload: { cursor: Schema.NullOr(TaskFeedCursor) }, success: TaskFeedPage, error: HarnessStoreError }),
   Rpc.make('tasks.create', { payload: CreateTaskInput, success: TaskRecord, error: HarnessStoreError }),
   Rpc.make('tasks.complete', { payload: { taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),
   Rpc.make('tasks.reopen', { payload: { taskId: TaskId }, success: TaskRecord, error: HarnessStoreError }),

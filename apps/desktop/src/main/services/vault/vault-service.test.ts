@@ -120,7 +120,7 @@ describe('VaultService', () => {
     expect(vault).toMatchObject({ name: 'My Wiki', path: join(await realpath(root), 'My Wiki') })
     expect(await realpath(selected)).toBe(join(await realpath(root), 'config/vaults', vault.id, 'workspace/wiki'))
     expect(JSON.parse(await readFile(join(root, 'config/config.json'), 'utf8'))).toEqual({
-      theme: 'system', language: 'system', vaults: [vault], agent: { enabled: false, modelProfiles: [] }
+      theme: 'system', language: 'system', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [vault], agent: { enabled: false, modelProfiles: [] }
     })
     const settingsFile = join(root, 'config/vaults', vault.id, 'config.json')
     expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
@@ -205,13 +205,13 @@ describe('VaultService', () => {
       expect(version(second.id)).toBe(7)
       expect((await readdir(join(root, 'config/vaults'))).sort()).toEqual([first.id, second.id].sort())
       expect(await runtime.runPromise(config.get)).toEqual({
-        theme: 'dark', language: 'en', vaults: [first, second], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'en', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [first, second], agent: { enabled: false, modelProfiles: [] }
       })
       expect(await runtime.runPromise(store.register(b))).toEqual(second)
     } finally { await runtime.dispose() }
   })
 
-  it('rejects missing paths and regular files without creating configuration', async () => {
+  it('rejects missing paths and regular files without registering a vault', async () => {
     const file = join(root, 'note.md')
     await writeFile(file, 'note')
     const runtime = makeRuntime()
@@ -220,7 +220,9 @@ describe('VaultService', () => {
       for (const path of ['', join(root, 'missing'), file]) {
         expect(await runtime.runPromise(Effect.flip(store.register(path)))).toMatchObject({ _tag: 'VaultError' })
       }
-      expect(await readdir(root)).toEqual(['note.md'])
+      expect((await readdir(root)).sort()).toEqual(['config', 'note.md'])
+      expect(JSON.parse(await readFile(join(root, 'config/config.json'), 'utf8'))).toMatchObject({ vaults: [], timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' })
+      expect(await readdir(join(root, 'config'))).toEqual(['config.json'])
     } finally { await runtime.dispose() }
   })
 

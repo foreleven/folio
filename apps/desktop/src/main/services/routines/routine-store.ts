@@ -9,6 +9,7 @@ import {
   RoutineExecution,
   RoutineExecutionStatus,
   RoutineRecord,
+  ScheduleTrigger,
   SaveRoutine,
   routineDateAt,
   routineDayStart
@@ -25,7 +26,7 @@ const fail = (reason: HarnessStoreError['reason'], message?: string) => new Harn
 })
 
 const RoutineRowCommon = {
-  id: Schema.String, name: Schema.String, intervalMinutes: Schema.Int, timeZone: Schema.String,
+  id: Schema.String, name: Schema.String, trigger: Schema.fromJsonString(ScheduleTrigger),
   enabled: Schema.Union([Schema.Boolean, Schema.Number]), revision: Schema.Int,
   nextTriggerAt: Schema.NullOr(Schema.Number), lastTriggerAt: Schema.NullOr(Schema.Number),
   createdAt: Schema.Number, updatedAt: Schema.Number
@@ -37,9 +38,8 @@ const DbRoutine = Schema.Union([
 const DbExecution = Schema.Struct({
   routineId: Schema.String, taskId: Schema.String, type: Schema.Literals(['agent', 'ingestion']),
   runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Union([Schema.Boolean, Schema.Number]),
-  routineDate: Schema.String, triggerTime: Schema.Number, firstTriggerTime: Schema.Number,
-  triggerCount: Schema.Int, isEnd: Schema.Union([Schema.Boolean, Schema.Number]),
-  windowStart: Schema.NullOr(Schema.Number), windowEnd: Schema.NullOr(Schema.Number),
+  triggerTime: Schema.Number,
+  windowStart: Schema.Number, windowEnd: Schema.Number,
   model: Schema.NullOr(Schema.fromJsonString(AgentTaskConfiguration.fields.model)),
   timeZone: Schema.String, routineRevision: Schema.Int, status: RoutineExecutionStatus,
   startedAt: Schema.NullOr(Schema.Number), endedAt: Schema.NullOr(Schema.Number),
@@ -50,7 +50,7 @@ function decodeRoutine(row: typeof DbRoutine.Type): RoutineRecord {
   return { ...row, enabled: row.enabled === true || row.enabled === 1 }
 }
 function decodeExecution(row: typeof DbExecution.Type): RoutineExecution {
-  return { ...row, cancelRequested: row.cancelRequested === true || row.cancelRequested === 1, isEnd: row.isEnd === true || row.isEnd === 1 }
+  return { ...row, routineDate: routineDateAt(row.windowStart, row.timeZone), cancelRequested: row.cancelRequested === true || row.cancelRequested === 1 }
 }
 const initialIngestionReceipt = (): IngestionReceipt => ({
   state: 'pending', attemptCount: 0, cancelRequested: false,
@@ -74,7 +74,7 @@ export class RoutineStore extends Context.Service<RoutineStore, {
     const decodeExecutions = (input: unknown) => Schema.decodeUnknownEffect(Schema.Array(DbExecution))(input).pipe(Effect.map(rows => rows.map(decodeExecution)))
 
     const readRoutines = sql`SELECT id, name, type, configuration,
-      interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
+      trigger, enabled, revision,
       next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt,
       created_at AS createdAt, updated_at AS updatedAt
       FROM routines ORDER BY created_at DESC, id`.pipe(
@@ -82,35 +82,33 @@ export class RoutineStore extends Context.Service<RoutineStore, {
     )
 
     const readExecutionRows = (routineId?: string, taskId?: string) =>
-      sql`SELECT t.routine_id AS routineId, t.id AS taskId, t.type,
+      sql`SELECT s.routine_id AS routineId, t.id AS taskId, t.type,
         CASE WHEN t.type='agent' THEN r.id ELSE NULL END AS runId,
         CASE WHEN t.type='agent' THEN COALESCE(r.cancel_requested, 0)
           ELSE COALESCE(json_extract(t.receipt, '$.cancelRequested'), 0) END AS cancelRequested,
-        t.routine_date AS routineDate, t.trigger_time AS triggerTime,
-        t.first_trigger_time AS firstTriggerTime, t.trigger_count AS triggerCount,
-        t.is_end AS isEnd, t.window_start AS windowStart, t.window_end AS windowEnd,
+        s.trigger_time AS triggerTime,
+        s.window_start AS windowStart, s.window_end AS windowEnd,
         CASE WHEN t.type='agent' THEN json_extract(t.configuration, '$.model') ELSE NULL END AS model,
-        t.routine_time_zone AS timeZone, t.routine_revision AS routineRevision,
+        s.time_zone AS timeZone, t.routine_revision AS routineRevision,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.state')
           WHEN t.state='cancelled' THEN 'cancelled'
           WHEN r.state='queued' THEN 'pending' ELSE COALESCE(r.state, 'pending') END AS status,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.startedAt') ELSE r.started_at END AS startedAt,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.endedAt') ELSE r.ended_at END AS endedAt,
         t.created_at AS createdAt,
-        MAX(t.routine_updated_at,
+        MAX(s.created_at,
           COALESCE(CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.endedAt') ELSE r.ended_at END,
             CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.startedAt') ELSE r.started_at END,
-            t.created_at)) AS updatedAt
-        FROM tasks t LEFT JOIN runs r ON t.type='agent' AND r.sequence=(
+            s.created_at)) AS updatedAt
+        FROM routine_schedules s JOIN tasks t ON t.id=s.task_id LEFT JOIN runs r ON t.type='agent' AND r.sequence=(
           SELECT MAX(sequence) FROM runs WHERE task_id=t.id AND purpose<>'conflict-resolution')
-        WHERE t.routine_id IS NOT NULL
-          AND (${routineId ?? null} IS NULL OR t.routine_id=${routineId ?? null})
+        WHERE (${routineId ?? null} IS NULL OR s.routine_id=${routineId ?? null})
           AND (${taskId ?? null} IS NULL OR t.id=${taskId ?? null})
-        ORDER BY t.routine_date DESC, t.trigger_time DESC, t.id`.pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
+        ORDER BY s.window_start DESC, s.trigger_time DESC, t.id`.pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
 
     const get = Effect.fn('RoutineStore.get')(function* (id: string) {
       const rows = yield* sql`SELECT id, name, type, configuration,
-        interval_minutes AS intervalMinutes, time_zone AS timeZone, enabled, revision,
+        trigger, enabled, revision,
         next_trigger_at AS nextTriggerAt, last_trigger_at AS lastTriggerAt,
         created_at AS createdAt, updated_at AS updatedAt FROM routines WHERE id=${id}`.pipe(Effect.flatMap(decodeRoutines))
       return rows[0] ? decodeRoutine(rows[0]) : yield* fail('not-found')
@@ -135,7 +133,7 @@ export class RoutineStore extends Context.Service<RoutineStore, {
         if (previous && previous.revision === revision && isDeepStrictEqual(normalized, {
           id: previous.id, expectedRevision: value.expectedRevision, name: previous.name,
           type: previous.type, configuration: previous.configuration,
-          intervalMinutes: previous.intervalMinutes, timeZone: previous.timeZone, enabled: previous.enabled
+          trigger: previous.trigger, enabled: previous.enabled
         })) return previous
         if (previous ? previous.revision !== value.expectedRevision : value.expectedRevision !== null) return yield* fail('invalid-state')
         if (value.type === 'ingestion') {
@@ -148,13 +146,13 @@ export class RoutineStore extends Context.Service<RoutineStore, {
         const time = yield* now
         if (previous) {
           yield* sql`UPDATE routines SET name=${normalized.name}, type=${normalized.type}, configuration=${JSON.stringify(normalized.configuration)},
-            interval_minutes=${normalized.intervalMinutes}, time_zone=${normalized.timeZone}, enabled=${normalized.enabled ? 1 : 0},
+            trigger=${JSON.stringify(normalized.trigger)}, enabled=${normalized.enabled ? 1 : 0},
             revision=${revision}, updated_at=${time} WHERE id=${normalized.id} AND revision=${normalized.expectedRevision}`
         } else {
-          yield* sql`INSERT INTO routines (id, name, type, configuration, interval_minutes, time_zone, enabled,
+          yield* sql`INSERT INTO routines (id, name, type, configuration, trigger, enabled,
             revision, next_trigger_at, last_trigger_at, created_at, updated_at)
             VALUES (${normalized.id}, ${normalized.name}, ${normalized.type}, ${JSON.stringify(normalized.configuration)},
-              ${normalized.intervalMinutes}, ${normalized.timeZone}, ${normalized.enabled ? 1 : 0}, 1, NULL, NULL, ${time}, ${time})`
+              ${JSON.stringify(normalized.trigger)}, ${normalized.enabled ? 1 : 0}, 1, NULL, NULL, ${time}, ${time})`
         }
         return yield* get(normalized.id)
       }))
@@ -170,11 +168,11 @@ export class RoutineStore extends Context.Service<RoutineStore, {
         const routine = yield* get(routineId)
         if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
         const candidates = yield* readExecutionRows(routineId)
-        const today = routineDateAt(at, routine.timeZone)
-        const todayStart = routineDayStart(today, routine.timeZone)
+        const today = routineDateAt(at, routine.trigger.timeZone)
+        const todayStart = routineDayStart(today, routine.trigger.timeZone)
         const time = yield* now
         if (mode === 'check') {
-          yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000},
+          yield* sql`UPDATE routines SET next_trigger_at=${at + routine.trigger.intervalMinutes * 60_000},
             last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
         }
         const admitted = candidates.find(row => row.status === 'preparing' || row.status === 'running')
@@ -187,17 +185,17 @@ export class RoutineStore extends Context.Service<RoutineStore, {
         const currentRetry = [...candidates.filter(row => row.routineDate === today)]
           .filter(row => row.status === 'pending' || row.status === 'failed' || row.status === 'interrupted' ||
             row.type === 'agent' && row.status === 'cancelled' && !row.cancelRequested)
-          .sort((a, b) => (b.windowEnd ?? b.triggerTime) - (a.windowEnd ?? a.triggerTime))[0]
+          .sort((a, b) => b.windowEnd - a.windowEnd)[0]
         if (currentRetry) return mode === 'check' ? currentRetry : null
         const latest = [...candidates]
           .filter(row => row.status === 'succeeded' || row.type === 'agent' && row.status === 'cancelled' && row.cancelRequested)
-          .sort((a, b) => (b.windowEnd ?? 0) - (a.windowEnd ?? 0))[0]
+          .sort((a, b) => b.windowEnd - a.windowEnd)[0]
         const boundary = Math.max(todayStart, latest?.windowEnd ?? todayStart)
         const delta = at - boundary
         if (delta <= 0) return null
         if (mode === 'settled') {
           if (!latest) return null
-          const threshold = latest.type === 'agent' && latest.status === 'cancelled' ? routine.intervalMinutes * 60_000 : 3_600_000
+          const threshold = latest.type === 'agent' && latest.status === 'cancelled' ? routine.trigger.intervalMinutes * 60_000 : 3_600_000
           if (delta < threshold) return null
         }
         const taskId = randomUUID()
@@ -212,11 +210,10 @@ export class RoutineStore extends Context.Service<RoutineStore, {
         }
         const windowStart = boundary
         const windowEnd = Math.min(at, windowStart + 3_600_000)
-        yield* sql`UPDATE tasks SET routine_id=${routineId}, routine_date=${today}, trigger_time=${at},
-          first_trigger_time=${at}, trigger_count=1, is_end=0,
-          window_start=${windowStart}, window_end=${windowEnd}, routine_revision=${routine.revision},
-          routine_time_zone=${routine.timeZone}, routine_updated_at=${time} WHERE id=${taskId}`
-        yield* sql`UPDATE routines SET next_trigger_at=${at + routine.intervalMinutes * 60_000},
+        yield* sql`UPDATE tasks SET routine_id=${routineId}, routine_revision=${routine.revision} WHERE id=${taskId}`
+        yield* sql`INSERT INTO routine_schedules (task_id, routine_id, trigger_time, window_start, window_end, time_zone, created_at)
+          VALUES (${taskId}, ${routineId}, ${at}, ${windowStart}, ${windowEnd}, ${routine.trigger.timeZone}, ${time})`
+        yield* sql`UPDATE routines SET next_trigger_at=${at + routine.trigger.intervalMinutes * 60_000},
           last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
         return (yield* readExecutionRows(routineId, taskId))[0]!
       }))

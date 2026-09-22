@@ -7,7 +7,7 @@ const { update } = vi.hoisted(() => ({ update: vi.fn() }))
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => vi.fn(),
   useAtomSet: () => update,
-  useAtomValue: () => ({ _tag: 'Success', value: { theme: 'light', language: 'en', vaults: [] } })
+  useAtomValue: () => ({ _tag: 'Success', value: { theme: 'light', language: 'en', timeZone: 'Asia/Shanghai', vaults: [] } })
 }))
 vi.mock('../rpc/config-rpc', () => ({ ConfigRpcClient: { watch: {}, update: {} } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
@@ -41,5 +41,14 @@ describe('GeneralSettings', () => {
     expect(update).toHaveBeenCalledTimes(2)
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByRole('status').textContent).toBe('Saved')
+  })
+
+  it('saves a named time zone only after submission', async () => {
+    update.mockResolvedValue(undefined)
+    render(<GeneralSettings />)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Time zone' }), { target: { value: 'Europe/Paris' } })
+    expect(update).not.toHaveBeenCalled()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save time zone' })) })
+    expect(update).toHaveBeenCalledWith({ payload: { timeZone: 'Europe/Paris' } })
   })
 })

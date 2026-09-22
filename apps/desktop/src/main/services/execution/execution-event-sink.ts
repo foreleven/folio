@@ -6,6 +6,7 @@ import { HarnessEventStore } from '../harness/harness-event-store'
 import { ExecutionQueue } from './execution-queue'
 import { processIdentity } from './process-identity'
 import { RunFiles, fileEffect, type RunFileState } from './run-files'
+import { SqlClient } from 'effect/unstable/sql'
 
 const invalid = () => new HarnessStoreError({ reason: 'invalid-state', message: 'No claimed execution owns this Agent event.' })
 
@@ -33,6 +34,7 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
     const store = yield* HarnessStore
     const files = yield* RunFiles
     const messages = yield* HarnessEventStore
+    const sql = yield* SqlClient.SqlClient
     const active = (id: string, bySession: boolean) => Effect.gen(function* () {
       const run = (yield* queue.list()).find(value => (bySession ? value.sessionId === id : value.id === id)
         && value.owner !== null && value.endedAt === null && value.state !== 'queued')
@@ -114,7 +116,12 @@ export class ExecutionEventSink extends Context.Service<ExecutionEventSink,
         if (current.endedAt === null) {
           const outcome = state.result?.outcome === 'succeeded' ? 'succeeded'
             : current.cancelRequested ? 'cancelled' : state.result?.outcome ?? fallback
-          yield* queue.finish(run.id, run.owner, outcome, state.result?.error ?? error).pipe(
+          yield* sql.withTransaction(Effect.gen(function* () {
+            yield* queue.finish(run.id, run.owner!, outcome, state.result?.error ?? error)
+            const terminal = yield* queue.get(run.id)
+            yield* store.recordAgentSummary(terminal, yield* messages.messages(run.sessionId))
+          })).pipe(
+            Effect.mapError(cause => cause instanceof HarnessStoreError ? cause : new HarnessStoreError({ reason: 'storage', message: 'Could not commit the terminal Task summary.' })),
             Effect.tapError(() => Effect.promise(async () => { await files.log(state, 'commit-failed'); await files.flush() }))
           )
         }

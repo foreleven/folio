@@ -1,5 +1,6 @@
 import { AgentWorkerPool } from '../agent/agent-worker-pool'
 import { DatabaseSync } from 'node:sqlite'
+import { randomUUID } from 'node:crypto'
 import { RunFileStore } from '../execution/run-files'
 import { ExecutionNotifications } from '../execution/execution-scheduler'
 import { NodeServices } from '@effect/platform-node'
@@ -92,13 +93,38 @@ it('creates one hourly IMAP Ingestion Routine after the resource is ready and pr
       yield* tasks.ensureDefaultRoutine
       const routines = yield* tasks.routines
       expect(routines).toHaveLength(1)
-      expect(routines[0]).toMatchObject({ type: 'ingestion', configuration: { integrationId: 'imap', resourceId: 'email' }, intervalMinutes: 60 })
+      expect(routines[0]).toMatchObject({ type: 'ingestion', configuration: { integrationId: 'imap', resourceId: 'email' }, trigger: { type: 'schedule', intervalMinutes: 60 } })
       const routine = routines[0]!
       if (routine.type !== 'ingestion') throw new Error('Expected Ingestion Routine')
       yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: false, name: 'My mailbox',
-        type: routine.type, configuration: routine.configuration, intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone })
+        type: routine.type, configuration: routine.configuration, trigger: routine.trigger })
       yield* tasks.ensureDefaultRoutine
       expect(yield* tasks.routines).toMatchObject([{ name: 'My mailbox', enabled: false }])
+    }))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+it('pages the Vault Task feed by creation time and identity without dropping equal-time Tasks', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-task-feed-')))
+  const runtime = createRuntime(root)
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      for (let index = 0; index < 35; index++) yield* tasks.create({ id: randomUUID(), agent: 'codex', goal: `Discover ${index}` })
+      const first = yield* tasks.feed(null)
+      expect(first.entries).toHaveLength(30)
+      expect(first.nextCursor).not.toBeNull()
+      const second = yield* tasks.feed(first.nextCursor)
+      expect(second.entries).toHaveLength(5)
+      expect(second.nextCursor).toBeNull()
+      const all = [...first.entries, ...second.entries]
+      expect(new Set(all.map(entry => entry.task.id)).size).toBe(35)
+      expect(all.map(entry => [entry.task.createdAt, entry.task.id])).toEqual(
+        [...all].sort((a, b) => b.task.createdAt - a.task.createdAt || b.task.id.localeCompare(a.task.id))
+          .map(entry => [entry.task.createdAt, entry.task.id]))
+      expect(all[0]).toMatchObject({ latestRun: null, task: { summary: null } })
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })
@@ -123,7 +149,7 @@ it('executes Ingestion without a Session and records changed raws at the canonic
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       expect(submitted.run).toBeNull()
       expect(yield* tasks.openSession({ taskId: submitted.task.id,
@@ -131,6 +157,8 @@ it('executes Ingestion without a Session and records changed raws at the canonic
       const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
       expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 1,
         changeId: expect.any(String), observedHead: null })
+      expect(completed.summary).toMatchObject({ type: 'ingestion', outcome: 'succeeded', attemptCount: 1,
+        rawsChanged: true, changedFileCount: 1, publication: { saveOperationId: completed.receipt.changeId, state: 'completed' } })
       expect((yield* tasks.get(submitted.task.id)).sessions).toEqual([])
       expect((yield* tasks.get(submitted.task.id)).runs).toEqual([])
     }).pipe(Effect.timeout('20 seconds')))
@@ -161,11 +189,13 @@ it('advances a no-change Ingestion window without creating a raw row', async () 
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       const completed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
       expect(completed.receipt).toMatchObject({ state: 'succeeded', attemptCount: 1,
         changeId: null, observedHead: expect.any(String) })
+      expect(completed.summary).toMatchObject({ type: 'ingestion', outcome: 'succeeded', rawsChanged: false,
+        changedFileCount: 0, publication: { state: 'not-required', saveOperationId: null } })
     }).pipe(Effect.timeout('20 seconds')))
     const database = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
     try { expect(database.prepare('SELECT id FROM raws').all()).toEqual([]) } finally { database.close() }
@@ -193,7 +223,7 @@ it('retries a failed Ingestion attempt on the same Task and exact window', async
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       const failed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['failed']))
       expect(failed.receipt).toMatchObject({ state: 'failed', attemptCount: 1 })
@@ -219,12 +249,15 @@ it('cancels a running Ingestion without advancing its window', async () => {
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       yield* waitForIngestion(tasks, submitted.task.id, new Set(['running']))
       yield* tasks.cancelIngestion(submitted.task.id)
       const cancelled = yield* waitForIngestion(tasks, submitted.task.id, new Set(['cancelled']))
       expect(cancelled.receipt).toMatchObject({ state: 'cancelled', cancelRequested: true, attemptCount: 1 })
+      expect(cancelled.summary).toMatchObject({ type: 'ingestion', outcome: 'cancelled',
+        windowStart: submitted.execution.windowStart, windowEnd: submitted.execution.windowEnd,
+        attemptCount: 1, rawsChanged: false, changedFileCount: 0 })
       expect(yield* tasks.routineExecutions(routine.id)).toMatchObject([{
         taskId: submitted.task.id, status: 'cancelled', cancelRequested: true,
         windowStart: submitted.execution.windowStart, windowEnd: submitted.execution.windowEnd
@@ -249,7 +282,7 @@ it('rejects provider writes outside the exact dated raw namespace', async () => 
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       const failed = yield* waitForIngestion(tasks, submitted.task.id, new Set(['failed']))
       expect(failed.receipt).toMatchObject({ state: 'failed', changeId: null, observedHead: null })
@@ -282,7 +315,7 @@ it('retries a retained Ingestion conflict without invoking the provider again', 
       const routine = (yield* tasks.routines)[0]!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-        intervalMinutes: routine.intervalMinutes, timeZone: nearMidnightTimeZone(), enabled: routine.enabled, expectedRevision: routine.revision })
+        trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
       const submitted = yield* tasks.runRoutine({ routineId: routine.id })
       yield* Effect.promise(() => providerEntered)
       const relative = `${outputDirectory.slice(outputDirectory.indexOf(join('raws', 'imap', 'email')))}/same.md`
@@ -320,7 +353,7 @@ it('keeps Routine admission and retries on the reserved Task revision after edit
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
       const input = { id: '11111111-1111-4111-8111-111111111111', expectedRevision: null,
         name: 'Original', type: 'agent' as const, configuration: { goal: 'Original prompt', agent: 'codex' as const, model: null,
-          skillIds: [], integrationIds: [], resourceIds: [] }, intervalMinutes: 60, timeZone: 'Asia/Shanghai', enabled: true }
+          skillIds: [], integrationIds: [], resourceIds: [] }, trigger: { type: 'schedule' as const, intervalMinutes: 60, timeZone: 'Asia/Shanghai' }, enabled: true }
       yield* tasks.saveRoutine(input)
       const reserved = yield* tasks.prepareRoutine({ routineId: input.id })
       yield* tasks.saveRoutine({ ...input, expectedRevision: 1, configuration: { ...input.configuration, goal: 'Edited prompt' } })
@@ -329,11 +362,13 @@ it('keeps Routine admission and retries on the reserved Task revision after edit
       expect(submitted.execution.routineRevision).toBe(1)
       expect(submitted.run!.prompt).toMatch(/^Original prompt\n/)
       expect(submitted.run!.prompt).toContain('- time-zone: Asia/Shanghai')
-      expect(submitted.run!.prompt).toContain(`- start: ${routineTimestampAt(submitted.execution.windowStart!, input.timeZone)}`)
-      expect(submitted.run!.prompt).toContain(`- end: ${routineTimestampAt(submitted.execution.windowEnd!, input.timeZone)}`)
+      expect(submitted.run!.prompt).toContain(`- start: ${routineTimestampAt(submitted.execution.windowStart, input.trigger.timeZone)}`)
+      expect(submitted.run!.prompt).toContain(`- end: ${routineTimestampAt(submitted.execution.windowEnd, input.trigger.timeZone)}`)
       expect((yield* tasks.get(reserved.task.id)).sessions).toMatchObject([{ agent: 'codex', modelProfile: null }])
       expect((yield* tasks.runRoutine({ routineId: input.id })).run!.id).toBe(submitted.run!.id)
       yield* tasks.cancelRun(reserved.task.id, submitted.run!.id)
+      expect((yield* tasks.get(reserved.task.id)).task.summary).toMatchObject({ type: 'agent',
+        runId: submitted.run!.id, outcome: 'cancelled', discovery: null })
       const retry = yield* tasks.runRoutine({ routineId: input.id })
       expect(retry.task.id).not.toBe(reserved.task.id)
       expect(retry.run!.id).not.toBe(submitted.run!.id)
@@ -369,8 +404,7 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
           name: 'Only A',
           type: 'agent',
           configuration: { goal: 'Review notes', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
-          intervalMinutes: 60,
-          timeZone: 'UTC',
+          trigger: { type: 'schedule', intervalMinutes: 60, timeZone: 'UTC' },
           enabled: false
         })
         expect(yield* tasks.routines).toHaveLength(1)
@@ -396,11 +430,12 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         const failed = yield* tasks.get(taskId)
         expect(failed.runs).toMatchObject([{ id: runId, state: 'failed', endedAt: expect.any(Number) }])
         expect(failed.runs).toMatchObject([{ state: 'failed', baselineCommit: null }])
+        expect(failed.task.summary).toMatchObject({ type: 'agent', runId, outcome: 'failed', discovery: null })
         expect(yield* tasks.claimExecution('next-worker')).toBeNull()
         const routine = (yield* tasks.routines)[0]!
         if (routine.type !== 'agent') throw new Error('Expected Agent Routine')
         yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
-          intervalMinutes: routine.intervalMinutes, timeZone: routine.timeZone, expectedRevision: routine.revision, enabled: true })
+          trigger: routine.trigger, expectedRevision: routine.revision, enabled: true })
         const routineIntent = { routineId: routine.id, requestId: '55555555-5555-4555-8555-555555555555' }
         const queuedRoutine = yield* tasks.runRoutine(routineIntent)
         expect(queuedRoutine.run!.state).toBe('queued')

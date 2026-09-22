@@ -17,6 +17,7 @@ import { operationFilePath, readSyncOperationFile, SyncOperationFile, writeSyncO
 import { withGitOperationGate } from '../git/git-operation-gate'
 import { makeVaultGit } from '../git/vault-git'
 import { HarnessStore } from '../harness/harness-store'
+import { routineDateAt } from '../../../shared/routine'
 
 const OperationRow = Schema.Struct({
   sequence: Schema.Int,
@@ -134,8 +135,8 @@ export class TaskGitSynchronization extends Context.Service<
         const taskPolicy = Effect.fn('TaskGitSynchronization.taskPolicy')(function* (taskId: string) {
           const task = yield* store.task(taskId)
           if (task.type === 'agent') return { kinds: ['save-user', 'save-wiki'] as const, prefix: 'wiki/', pathspec: 'wiki' }
-          const rows = yield* sql<{ routineDate: string | null }>`SELECT routine_date AS routineDate FROM tasks WHERE id=${taskId}`
-          const date = rows[0]?.routineDate
+          const rows = yield* sql<{ windowStart: number; timeZone: string }>`SELECT window_start AS windowStart, time_zone AS timeZone FROM routine_schedules WHERE task_id=${taskId}`
+          const date = rows[0] ? routineDateAt(rows[0].windowStart, rows[0].timeZone) : null
           if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
             [task.configuration.integrationId, task.configuration.resourceId].some((value) => !/^[a-zA-Z0-9_-]+$/.test(value))) return yield* invalid()
           const pathspec = `raws/${task.configuration.integrationId}/${task.configuration.resourceId}/${date}`

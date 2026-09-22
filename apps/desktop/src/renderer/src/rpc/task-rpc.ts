@@ -4,6 +4,7 @@ import { ElectronRpcProtocolLive } from './electron-rpc-protocol'
 
 /** Task queries share the existing Electron transport; mutations never send local filesystem paths. */
 export class TaskRpcClient extends AtomRpc.Service<TaskRpcClient>()('folio/renderer/TaskRpcClient', { group: TaskRpcs, protocol: ElectronRpcProtocolLive }) {
+  static readonly feed = TaskRpcClient.mutation('tasks.feed')
   static readonly saveWorkspaceFiles = TaskRpcClient.mutation('workspace.saveFiles')
   static readonly runRoutine = TaskRpcClient.mutation('routines.run')
   static readonly prepareRoutine = TaskRpcClient.mutation('routines.prepare')

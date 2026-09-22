@@ -4,8 +4,15 @@ import { SessionModelSelection } from './model'
 
 export const RoutineId = Schema.String.check(Schema.isUUID())
 const Text = Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim().length > 0))
-const RoutineDate = Schema.String.check(Schema.makeFilter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)))
 export const RoutineTimeZone = Schema.NonEmptyString.check(Schema.makeFilter(value => Option.isSome(DateTime.zoneFromString(value)), { message: 'Invalid Routine time zone' }))
+
+/** Only scheduled dispatch is admitted; event delivery is designed separately. */
+export const ScheduleTrigger = Schema.Struct({
+  type: Schema.Literal('schedule'),
+  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)),
+  timeZone: RoutineTimeZone
+})
+export type ScheduleTrigger = typeof ScheduleTrigger.Type
 
 export const AgentRoutineConfiguration = Schema.Struct({
   goal: Text,
@@ -25,7 +32,7 @@ export type RoutineConfiguration = typeof RoutineConfiguration.Type
 
 const RoutineIdentity = { id: RoutineId, name: Text }
 const RoutineSchedule = {
-  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)), timeZone: RoutineTimeZone,
+  trigger: ScheduleTrigger,
   enabled: Schema.Boolean, revision: Schema.Int.check(Schema.isGreaterThan(0)),
   nextTriggerAt: Schema.NullOr(Schema.Number), lastTriggerAt: Schema.NullOr(Schema.Number),
   createdAt: Schema.Number, updatedAt: Schema.Number
@@ -39,8 +46,7 @@ export type RoutineRecord = typeof RoutineRecord.Type
 
 const SaveIdentity = { id: RoutineId, expectedRevision: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))), name: Text }
 const SaveSchedule = {
-  intervalMinutes: Schema.Int.check(Schema.isGreaterThan(0)),
-  timeZone: RoutineTimeZone,
+  trigger: ScheduleTrigger,
   enabled: Schema.Boolean
 }
 export const SaveRoutine = Schema.Union([
@@ -54,9 +60,8 @@ export type RoutineExecutionStatus = typeof RoutineExecutionStatus.Type
 
 /** Read projection of a Routine Task and its latest Run; taskId is its only identity. */
 export const RoutineExecution = Schema.Struct({
-  routineId: RoutineId, taskId: RoutineId, type: Schema.Literals(['agent', 'ingestion']), runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean, routineDate: RoutineDate, triggerTime: Schema.Number,
-  firstTriggerTime: Schema.Number, triggerCount: Schema.Int.check(Schema.isGreaterThan(0)), isEnd: Schema.Boolean,
-  windowStart: Schema.NullOr(Schema.Number), windowEnd: Schema.NullOr(Schema.Number),
+  routineId: RoutineId, taskId: RoutineId, type: Schema.Literals(['agent', 'ingestion']), runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Boolean, routineDate: Schema.String, triggerTime: Schema.Number,
+  windowStart: Schema.Number, windowEnd: Schema.Number,
   model: Schema.NullOr(SessionModelSelection), timeZone: RoutineTimeZone,
   routineRevision: Schema.Int.check(Schema.isGreaterThan(0)), status: RoutineExecutionStatus,
   startedAt: Schema.NullOr(Schema.Number), endedAt: Schema.NullOr(Schema.Number), createdAt: Schema.Number, updatedAt: Schema.Number
@@ -83,12 +88,6 @@ export function routineDayStart(date: string, timeZone: string): number {
   return DateTime.toEpochMillis(DateTime.makeZonedUnsafe({ year, month, day, hour: 0, minute: 0, second: 0, millisecond: 0 }, { timeZone, adjustForTimeZone: true, disambiguation: 'compatible' }))
 }
 
-/** Returns the local end-of-day instant used by a day-closing execution. */
-export function routineDayEnd(date: string, timeZone: string): number {
-  const [year, month, day] = date.split('-').map(Number)
-  return DateTime.toEpochMillis(DateTime.makeZonedUnsafe({ year, month, day, hour: 23, minute: 59, second: 59, millisecond: 999 }, { timeZone, adjustForTimeZone: true, disambiguation: 'compatible' }))
-}
-
 /** Returns the previous civil date without using the host timezone. */
 export function previousRoutineDate(date: string, timeZone: string): string {
   const [year, month, day] = date.split('-').map(Number)
@@ -97,24 +96,8 @@ export function previousRoutineDate(date: string, timeZone: string): string {
   return routineDateAt(DateTime.toEpochMillis(previous), timeZone)
 }
 
-/** Missing day-close receipts, not proof of failures: paused periods have no separate history. */
-export function routineGapDates(record: Pick<RoutineRecord, 'createdAt' | 'timeZone'>,
-  rows: readonly Pick<RoutineExecution, 'routineDate' | 'isEnd' | 'status'>[], at = Date.now()): string[] {
-  const completed = new Set(rows.filter(row => row.isEnd && row.status === 'succeeded').map(row => row.routineDate))
-  const today = routineDateAt(at, record.timeZone)
-  const start = routineDateAt(record.createdAt, record.timeZone)
-  const gaps: string[] = []
-  // These are civil-date labels, so UTC arithmetic intentionally avoids DST changes.
-  for (const date = new Date(`${start}T12:00:00Z`); date.toISOString().slice(0, 10) < today; date.setUTCDate(date.getUTCDate() + 1)) {
-    const key = date.toISOString().slice(0, 10)
-    if (!completed.has(key)) gaps.push(key)
-  }
-  return gaps
-}
-
-/** A successful daytime window alone cannot establish that the whole day was processed. */
-export function routineDateState(rows: readonly Pick<RoutineExecution, 'isEnd' | 'status'>[]): 'success' | 'progress' | 'attention' {
-  if (rows.some(row => row.isEnd && row.status === 'succeeded')) return 'success'
+/** Day labels describe observed windows only, never infer whole-day completion. */
+export function routineDateState(rows: readonly Pick<RoutineExecution, 'status'>[]): 'progress' | 'attention' {
   if (rows.some(row => ['failed', 'interrupted', 'cancelled', 'conflict'].includes(row.status))) return 'attention'
   return 'progress'
 }

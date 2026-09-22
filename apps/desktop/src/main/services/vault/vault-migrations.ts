@@ -19,13 +19,13 @@ export const migrateVault = SqliteMigrator.run({
       yield* sql`CREATE INDEX wiki_pages_by_type ON wiki_pages(object_type)`
       yield* sql`CREATE INDEX wiki_pages_by_parent ON wiki_pages(parent_id)`
 
-      // Routine definitions; execution windows live on Tasks.
+      // Routine definitions own editable triggers; schedule rows freeze actual windows.
       yield* sql`CREATE TABLE routines (
         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
         type TEXT NOT NULL CHECK(type IN ('agent', 'ingestion')),
         configuration TEXT NOT NULL CHECK(json_valid(configuration)),
-        interval_minutes INTEGER NOT NULL CHECK(interval_minutes > 0),
-        time_zone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+        trigger TEXT NOT NULL CHECK(json_valid(trigger) AND json_extract(trigger, '$.type')='schedule'),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
         revision INTEGER NOT NULL CHECK(revision > 0), next_trigger_at INTEGER,
         last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       )`
@@ -38,21 +38,24 @@ export const migrateVault = SqliteMigrator.run({
         id TEXT PRIMARY KEY NOT NULL, type TEXT NOT NULL CHECK(type IN ('agent', 'ingestion')),
         configuration TEXT NOT NULL CHECK(json_valid(configuration)),
         receipt TEXT CHECK(receipt IS NULL OR json_valid(receipt)),
+        summary TEXT CHECK(summary IS NULL OR json_valid(summary)),
         state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'cancelled')),
         created_at INTEGER NOT NULL,
         worktree_state TEXT NOT NULL DEFAULT 'pending'
           CHECK(worktree_state IN ('pending', 'creating', 'ready', 'releasing', 'released')),
         worktree_base TEXT,
-        routine_id TEXT REFERENCES routines(id), routine_date TEXT,
-        trigger_time INTEGER, first_trigger_time INTEGER,
-        trigger_count INTEGER CHECK(trigger_count > 0), is_end INTEGER CHECK(is_end IN (0, 1)),
-        window_start INTEGER, window_end INTEGER CHECK(window_end >= window_start),
-        routine_revision INTEGER CHECK(routine_revision > 0), routine_time_zone TEXT,
-        routine_updated_at INTEGER,
+        routine_id TEXT REFERENCES routines(id), routine_revision INTEGER CHECK(routine_revision > 0),
         CHECK((type='agent' AND receipt IS NULL) OR (type='ingestion' AND receipt IS NOT NULL))
       )`
-      yield* sql`CREATE UNIQUE INDEX task_one_routine_end ON tasks(routine_id, routine_date) WHERE is_end=1`
-      yield* sql`CREATE INDEX tasks_by_routine_date ON tasks(routine_id, routine_date, trigger_time)`
+      yield* sql`CREATE INDEX tasks_by_routine ON tasks(routine_id, created_at)`
+      yield* sql`CREATE TABLE routine_schedules (
+        task_id TEXT PRIMARY KEY NOT NULL REFERENCES tasks(id),
+        routine_id TEXT NOT NULL REFERENCES routines(id),
+        trigger_time INTEGER NOT NULL, window_start INTEGER NOT NULL,
+        window_end INTEGER NOT NULL CHECK(window_end > window_start),
+        time_zone TEXT NOT NULL, created_at INTEGER NOT NULL
+      )`
+      yield* sql`CREATE INDEX routine_schedules_by_routine ON routine_schedules(routine_id, window_start, trigger_time)`
 
       yield* sql`CREATE TABLE raws (
         id TEXT PRIMARY KEY NOT NULL, integration_id TEXT NOT NULL, resource_id TEXT NOT NULL,

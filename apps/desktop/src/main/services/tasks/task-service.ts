@@ -13,12 +13,12 @@ import { RoutineStore } from '../routines/routine-store'
 import { routineDateAt, routineTimestampAt, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
 import { HarnessRuns } from '../harness/harness-runs'
 import { ModelService } from '../models/model-service'
-import { Cause, DateTime, Effect, Exit, Fiber, Layer, Scope, Semaphore } from 'effect'
+import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema, Scope, Semaphore } from 'effect'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { v7 as uuidv7 } from 'uuid'
-import { HarnessStoreError, type IngestionReceipt, type TaskRecord } from '../../../shared/harness'
-import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput } from '../../../shared/rpc/task-rpc'
+import { HarnessStoreError, TaskSummary, type IngestionReceipt, type TaskRecord } from '../../../shared/harness'
+import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, TaskFeedCursor } from '../../../shared/rpc/task-rpc'
 import { HarnessStore } from '../harness/harness-store'
 import { IntegrationService } from '../integrations/integration-service'
 import { TaskWorktrees } from './task-worktrees'
@@ -28,6 +28,7 @@ import { GitChangeApplications } from '../git/git-change-applications'
 import { WorkspaceChanges } from '../git/workspace-changes'
 import { TaskGitSynchronization } from './task-git-synchronization'
 import { makeVaultGit } from '../git/vault-git'
+import { ConfigService } from '../config/config-service'
 
 const failure = (reason: HarnessStoreError['reason']) =>
   new HarnessStoreError({
@@ -49,6 +50,7 @@ export const TaskServiceLive = Layer.effect(
   Effect.gen(function* () {
     const workers = yield* AgentWorkerPool
     const vault = yield* VaultContext
+    const config = yield* ConfigService
     const workspace = yield* WorkspaceChanges
     const changes = yield* GitChangeApplications
     const synchronization = yield* TaskGitSynchronization
@@ -105,6 +107,29 @@ export const TaskServiceLive = Layer.effect(
     const get = Effect.fn('TaskService.get')(function* (id: string) {
       return { routine: yield* routines.executionForTask(id), task: yield* store.task(id), sessions: yield* store.sessions(id), runs: yield* store.runs(id) }
     })
+    /** Bounded, stable creation-time pagination; the current Run is only live status, not the durable summary. */
+    const feed = Effect.fn('TaskService.feed')(function* (cursor: TaskFeedCursor | null) {
+      const rows = yield* sql<{ id: string; createdAt: number; runId: string | null; routineName: string | null;
+        windowStart: number | null; windowEnd: number | null; timeZone: string | null }>`SELECT t.id, t.created_at AS createdAt,
+          (SELECT id FROM runs WHERE task_id=t.id AND purpose<>'conflict-resolution' ORDER BY sequence DESC LIMIT 1) AS runId,
+          routine.name AS routineName, schedule.window_start AS windowStart, schedule.window_end AS windowEnd,
+          schedule.time_zone AS timeZone
+          FROM tasks t LEFT JOIN routines routine ON routine.id=t.routine_id
+          LEFT JOIN routine_schedules schedule ON schedule.task_id=t.id
+          WHERE (${cursor?.createdAt ?? null} IS NULL OR t.created_at<${cursor?.createdAt ?? null}
+            OR (t.created_at=${cursor?.createdAt ?? null} AND t.id<${cursor?.id ?? null}))
+          ORDER BY t.created_at DESC, t.id DESC LIMIT 31`
+      const page = rows.slice(0, 30)
+      const entries = yield* Effect.forEach(page, row => Effect.gen(function* () {
+        const task = yield* store.task(row.id)
+        const latestRun = row.runId ? yield* queue.get(row.runId) : null
+        return { task, latestRun, routineName: row.routineName,
+          schedule: row.windowStart === null || row.windowEnd === null || row.timeZone === null ? null
+            : { windowStart: row.windowStart, windowEnd: row.windowEnd, timeZone: row.timeZone } }
+      }))
+      const last = page.at(-1)
+      return { entries, nextCursor: rows.length > 30 && last ? { createdAt: last.createdAt, id: last.id } : null }
+    }, Effect.mapError(safeError))
     /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
     const completeUnlocked = Effect.fn('TaskService.completeUnlocked')(function* (taskId: string) {
       const task = yield* store.task(taskId)
@@ -143,7 +168,10 @@ export const TaskServiceLive = Layer.effect(
       // wiki receipt when no wiki files changed; an actual wiki edit still
       // follows the existing explicit save/synchronization path.
       for (const run of history.filter((candidate) => candidate.state === 'succeeded' && candidate.syncState === 'pending')) {
-        yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit! }).pipe(Effect.catch(() => Effect.void))
+        yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit! }).pipe(
+          Effect.tap(() => sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required')
+            WHERE id=${taskId} AND json_extract(summary, '$.runId')=${run.id}`.pipe(Effect.mapError(safeError))),
+          Effect.catch(() => Effect.void))
       }
       history = yield* store.runs(taskId)
       const succeeded = history.filter((run) => run.state === 'succeeded')
@@ -302,6 +330,7 @@ export const TaskServiceLive = Layer.effect(
     })
     /** Creates one enabled hourly Ingestion Routine after a resource is actually ready. */
     const ensureDefaultRoutines = Effect.fn('TaskService.ensureDefaultRoutines')(function* () {
+      const { timeZone } = yield* config.get.pipe(Effect.mapError(safeError))
       const available = yield* integrations.list.pipe(Effect.mapError(safeError))
       const current = yield* routines.list
       for (const view of available) {
@@ -314,8 +343,7 @@ export const TaskServiceLive = Layer.effect(
             id: randomUUID(), expectedRevision: null,
             name: `${view.name} · ${typeof resource.name === 'string' ? resource.name : resource.name['zh-CN'] ?? resource.name.en}`,
             type: 'ingestion', configuration: { integrationId: view.id, resourceId: resource.id },
-            intervalMinutes: 60,
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+            trigger: { type: 'schedule', intervalMinutes: 60, timeZone },
             enabled: true
           }).pipe(Effect.catchTag('HarnessStoreError', error => error.reason === 'invalid-state' ? Effect.void : Effect.fail(error)))
         }
@@ -327,9 +355,9 @@ export const TaskServiceLive = Layer.effect(
       if (!execution) return null
       yield* Effect.logInfo('Routine extraction window reserved', {
         routineId: input.routineId, taskId: execution.taskId, timeZone: execution.timeZone,
-        windowStart: execution.windowStart === null ? null : routineTimestampAt(execution.windowStart, execution.timeZone),
-        windowEnd: execution.windowEnd === null ? null : routineTimestampAt(execution.windowEnd, execution.timeZone),
-        windowMs: execution.windowStart === null || execution.windowEnd === null ? null : execution.windowEnd - execution.windowStart,
+        windowStart: routineTimestampAt(execution.windowStart, execution.timeZone),
+        windowEnd: routineTimestampAt(execution.windowEnd, execution.timeZone),
+        windowMs: execution.windowEnd - execution.windowStart,
         status: execution.status
       })
       // schedule reserves the Task atomically. Its configuration belongs to the
@@ -349,15 +377,30 @@ export const TaskServiceLive = Layer.effect(
       taskId: string,
       update: (receipt: IngestionReceipt) => IngestionReceipt,
       state?: 'active' | 'completed' | 'cancelled',
-      expectedStates?: readonly IngestionReceipt['state'][]
+      expectedStates?: readonly IngestionReceipt['state'][],
+      changedFileCount = 0
     ) {
       const task = yield* store.task(taskId)
       if (task.type !== 'ingestion') return yield* failure('invalid-state')
       if (expectedStates && !expectedStates.includes(task.receipt.state)) return yield* failure('invalid-state')
       const receipt = update(task.receipt)
-      const updatedAt = yield* now
       yield* sql`UPDATE tasks SET receipt=${JSON.stringify(receipt)},
-        state=COALESCE(${state ?? null}, state), routine_updated_at=${updatedAt} WHERE id=${taskId} AND type='ingestion'`
+        state=COALESCE(${state ?? null}, state) WHERE id=${taskId} AND type='ingestion'`
+      if (['succeeded', 'failed', 'interrupted', 'cancelled', 'conflict'].includes(receipt.state)) {
+        const execution = yield* routines.executionForTask(taskId)
+        if (!execution || receipt.endedAt === null) return yield* failure('invalid-state')
+        const summary = yield* Effect.mapError(Schema.decodeUnknownEffect(TaskSummary)({
+          type: 'ingestion', windowStart: execution.windowStart, windowEnd: execution.windowEnd,
+          timeZone: execution.timeZone, attemptCount: receipt.attemptCount, endedAt: receipt.endedAt,
+          outcome: receipt.state, error: receipt.error,
+          rawsChanged: receipt.state === 'succeeded' && changedFileCount > 0,
+          changedFileCount: receipt.state === 'succeeded' ? changedFileCount : 0,
+          publication: { state: receipt.state === 'succeeded' ? receipt.changeId ? 'completed' : 'not-required'
+            : receipt.state === 'conflict' ? 'conflict' : 'failed',
+          saveOperationId: receipt.changeId, synchronizationId: null }
+        }), safeError)
+        yield* sql`UPDATE tasks SET summary=${JSON.stringify(summary)} WHERE id=${taskId} AND type='ingestion'`
+      }
       return receipt
     })
     const saveIngestionReceipt = Effect.fn('TaskService.saveIngestionReceipt')(function* (
@@ -366,7 +409,7 @@ export const TaskServiceLive = Layer.effect(
       state?: 'active' | 'completed' | 'cancelled',
       expectedStates?: readonly IngestionReceipt['state'][]
     ) {
-      return yield* saveIngestionReceiptUnlocked(taskId, update, state, expectedStates)
+      return yield* sql.withTransaction(saveIngestionReceiptUnlocked(taskId, update, state, expectedStates))
     }, ingestionReceiptGate.withPermit)
     const rawPaths = Effect.fn('TaskService.rawPaths')(function* (task: Extract<TaskRecord, { type: 'ingestion' }>, namespace: string) {
       const tracked = (yield* git(task.worktree, ['diff', '--name-only', '--no-renames', '-z', 'HEAD'])).split('\0').filter(Boolean)
@@ -396,7 +439,7 @@ export const TaskServiceLive = Layer.effect(
             ON CONFLICT(path) DO UPDATE SET state=excluded.state, current_commit=excluded.current_commit, updated_at=excluded.updated_at`
         }
         yield* saveIngestionReceiptUnlocked(task.id, receipt => ({ ...receipt, state: 'succeeded', cancelRequested: false,
-          endedAt: time, error: null, observedHead: receipt.changeId === null ? publishedHead : null }), 'completed')
+          endedAt: time, error: null, observedHead: receipt.changeId === null ? publishedHead : null }), 'completed', undefined, paths.length)
       }))
     }, ingestionReceiptGate.withPermit)
 
@@ -535,7 +578,6 @@ export const TaskServiceLive = Layer.effect(
       if (pending) return { execution, task, run: pending }
       const sessionId = randomUUID()
       const runId = input.requestId ?? randomUUID()
-      if (execution.windowStart === null || execution.windowEnd === null) return yield* failure('invalid-state')
       const prompt = `${task.configuration.goal}\n\nRoutine execution window (use this timezone and these exact ISO timestamps for extraction):\n- time-zone: ${execution.timeZone}\n- start: ${routineTimestampAt(execution.windowStart, execution.timeZone)}\n- end: ${routineTimestampAt(execution.windowEnd, execution.timeZone)}`
       yield* prepareSession({ taskId: task.id, sessionId, agent: task.configuration.agent, ...(execution.model ? { model: execution.model } : {}) })
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
@@ -632,7 +674,7 @@ export const TaskServiceLive = Layer.effect(
       const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
       for (const routine of yield* routines.list) {
         if (!routine.enabled) continue
-        const today = routineDateAt(current, routine.timeZone)
+        const today = routineDateAt(current, routine.trigger.timeZone)
         const due = checkedDates.get(routine.id) !== today || routine.nextTriggerAt === null || routine.nextTriggerAt <= current
         // A normal scheduler tick is only a check. Settled execution is handled
         // once by the terminal receipt path; re-evaluating it on every tick
@@ -650,6 +692,31 @@ export const TaskServiceLive = Layer.effect(
       yield* store.task(taskId)
       return (yield* synchronization.pending).filter((operation) => operation.taskId === taskId)
     })
+    /** Only a save attributed to the displayed Run may alter its publication snapshot. */
+    const recordWikiSave = Effect.fn('TaskService.recordWikiSave')(function* (taskId: string, runIds: readonly string[], saveId: string) {
+      const task = yield* store.task(taskId)
+      if (task.summary?.type !== 'agent' || !runIds.includes(task.summary.runId)) return
+      yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.saveOperationId', ${saveId},
+        '$.publication.state', 'pending') WHERE id=${taskId} AND json_extract(summary, '$.runId')=${task.summary.runId}`
+    }, Effect.mapError(safeError))
+    /** Git owns the operation history; this only updates the matching Task-level result. */
+    const recordWikiSynchronization = Effect.fn('TaskService.recordWikiSynchronization')(function* (operation: { id: string; taskId: string; sourceHead: string; state: string }) {
+      const task = yield* store.task(operation.taskId)
+      if (task.summary?.type !== 'agent' || !task.summary.publication.saveOperationId) return
+      const summary = task.summary
+      const saveId = summary.publication.saveOperationId
+      const owners = yield* sql<{ runId: string }>`SELECT owner.run_id AS runId FROM git_operations save
+        JOIN git_operation_runs owner ON owner.operation_id=save.id
+        WHERE save.id=${saveId} AND save.task_id=${operation.taskId} AND save.kind='save-wiki'
+          AND save.target_commit=${operation.sourceHead}`
+      if (!owners.some(owner => owner.runId === summary.runId)) return
+      const publicationState = operation.state === 'completed' ? 'completed'
+        : operation.state === 'conflict' ? 'conflict' : operation.state === 'aborted' ? 'failed' : 'pending'
+      yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.synchronizationId', ${operation.id},
+        '$.publication.state', ${publicationState}) WHERE id=${operation.taskId}
+          AND json_extract(summary, '$.runId')=${summary.runId}
+          AND json_extract(summary, '$.publication.saveOperationId')=${saveId}`
+    }, Effect.mapError(safeError))
     /** Conflict actions require both identities so a caller cannot operate on another Task's receipt. */
     const conflictAction = Effect.fn('TaskService.conflictAction')(function* (taskId: string, id: string, action: 'resolve' | 'abort') {
       const task = yield* store.task(taskId)
@@ -657,6 +724,7 @@ export const TaskServiceLive = Layer.effect(
       const operation = yield* synchronization.get(id)
       if (operation.taskId !== taskId) return yield* failure('not-found')
       const settled = yield* action === 'resolve' ? synchronization.resolve(id) : synchronization.abort(id)
+      yield* recordWikiSynchronization(settled)
       if (settled.state === 'completed') yield* completeRoutineAfterReceipt(taskId)
       return settled
     })
@@ -717,12 +785,17 @@ export const TaskServiceLive = Layer.effect(
         }),
       saveWorkspaceFiles: (input) => changes.save({ ...input, taskId: null }),
       saveTaskWikiFiles: changes.save,
-      saveRunWikiFiles: changes.saveRunWiki,
-      confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
-      synchronizeTaskWiki: (input) =>
-        synchronization.synchronize(input).pipe(Effect.tap((operation) => (operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
-      reprepareTaskWiki: (input) =>
-        synchronization.reprepare(input).pipe(Effect.tap((operation) => (operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void))),
+      saveRunWikiFiles: (input) => changes.saveRunWiki(input).pipe(Effect.tap(saved => recordWikiSave(input.taskId, input.runIds, saved.id))),
+      confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(
+        Effect.tap(() => sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required')
+          WHERE id=${input.taskId} AND json_extract(summary, '$.runId')=${input.runId}`.pipe(Effect.mapError(safeError))),
+        Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
+      synchronizeTaskWiki: (input) => synchronization.synchronize(input).pipe(
+        Effect.tap(recordWikiSynchronization),
+        Effect.tap((operation) => operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void)),
+      reprepareTaskWiki: (input) => synchronization.reprepare(input).pipe(
+        Effect.tap(recordWikiSynchronization),
+        Effect.tap((operation) => operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void)),
       resolveTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'resolve'),
       abortTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'abort'),
       cancelIngestion,
@@ -731,6 +804,7 @@ export const TaskServiceLive = Layer.effect(
       taskSynchronization: synchronization.get,
       history,
       list: store.tasks,
+      feed,
       create: (input) => create(input).pipe(gate.withPermit),
       complete,
       reopen,
@@ -747,7 +821,13 @@ export const TaskServiceLive = Layer.effect(
       cancelRun: (taskId, runId) => Effect.gen(function* () {
         const request = yield* queue.get(runId)
         if (request.taskId !== taskId) return yield* failure('not-found')
-        const cancelled = yield* queue.cancel(runId)
+        const cancelled = yield* sql.withTransaction(Effect.gen(function* () {
+          const result = yield* queue.cancel(runId)
+          if (request.state === 'queued' && result.state === 'cancelled') {
+            yield* store.recordAgentSummary(result, yield* events.messages(result.sessionId))
+          }
+          return result
+        })).pipe(Effect.mapError(safeError))
         yield* sink.cancellation(cancelled).pipe(Effect.catch(() => Effect.logWarning('Cancellation was saved but its diagnostic log could not be written.')))
         // Only a queued request terminates here. Active requests settle in the
         // Worker exit path, and repeated stop RPCs must not advance again.

@@ -29,6 +29,7 @@ function runtime(
   get: Effect.Effect<GlobalConfig, ConfigStoreError> = Effect.succeed({
     theme: 'system',
     language: 'system',
+    timeZone: 'UTC',
     vaults: [vault],
     agent: { enabled: false, modelProfiles: [] }
   }),

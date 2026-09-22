@@ -19,7 +19,7 @@ import {
   ZapIcon
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { routineDateState, routineGapDates, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
+import { routineDateState, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
 import { RoutineEditor } from './RoutineEditor'
@@ -68,7 +68,7 @@ function formatDate(date: string, chinese: boolean): string {
 }
 
 function formatNextTrigger(record: RoutineRecord, chinese: boolean): string {
-  return record.nextTriggerAt === null ? (chinese ? '未安排' : 'Not scheduled') : formatTime(record.nextTriggerAt, record.timeZone, chinese)
+  return record.nextTriggerAt === null ? (chinese ? '未安排' : 'Not scheduled') : formatTime(record.nextTriggerAt, record.trigger.timeZone, chinese)
 }
 
 function latestExecution(rows: readonly RoutineExecution[], routineId: string): RoutineExecution | undefined {
@@ -318,7 +318,7 @@ function RoutineCard({
           <div className="min-w-0">
             <h4 className="truncate text-ui font-semibold">{record.name}</h4>
             <p className="mt-0.5 truncate text-support text-muted-foreground">
-              {record.type === 'agent' ? record.configuration.agent : 'Ingestion'} · {record.intervalMinutes} min
+              {record.type === 'agent' ? record.configuration.agent : 'Ingestion'} · {record.trigger.intervalMinutes} min
             </p>
           </div>
         </div>
@@ -377,10 +377,7 @@ function RoutineDetail({
   const [message, setMessage] = useState('')
   const [promptOpen, setPromptOpen] = useState(false)
   const runRequest = useRef<{ routineId: string; requestId: string } | null>(null)
-  const dates = useMemo(() => {
-    const datesWithRows = executions.map((row) => row.routineDate)
-    return [...new Set([...datesWithRows, ...routineGapDates(record, executions)])].sort().reverse()
-  }, [executions, record])
+  const dates = useMemo(() => [...new Set(executions.map(row => row.routineDate))].sort().reverse(), [executions])
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [visibleDays, setVisibleDays] = useState(31)
   const activeDate = selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? null)
@@ -415,8 +412,7 @@ function RoutineDetail({
         id: record.id,
         expectedRevision: record.revision,
         name: record.name,
-        intervalMinutes: record.intervalMinutes,
-        timeZone: record.timeZone,
+        trigger: record.trigger,
         enabled: !record.enabled
       }
       const input = record.type === 'agent'
@@ -509,8 +505,8 @@ function RoutineDetail({
               <span className="text-support text-muted-foreground">{chinese ? '状态' : 'Status'}</span>
               <Badge variant={record.enabled ? 'success' : 'outline'}>{record.enabled ? (chinese ? '运行中' : 'Active') : chinese ? '已暂停' : 'Paused'}</Badge>
             </div>
-            <DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
-            <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.timeZone} />
+            <DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.trigger.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
+            <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.trigger.timeZone} />
             {record.type === 'agent' ? <>
               <DetailItem label="Agent" value={record.configuration.agent} />
               {record.configuration.model ? <DetailItem label={chinese ? '模型' : 'Model'} value={`${record.configuration.model.providerId} / ${record.configuration.model.modelId}`} /> : null}
@@ -546,7 +542,7 @@ function RoutineDetail({
               <ul className="space-y-0.5">
                 {dates.slice(0, visibleDays).map((date) => {
                   const dayRows = executions.filter((row) => row.routineDate === date)
-                  const state = dayRows.length ? routineDateState(dayRows) : 'missing'
+                  const state = routineDateState(dayRows)
                   return (
                     <li key={date}>
                       <button
@@ -556,7 +552,7 @@ function RoutineDetail({
                         aria-current={activeDate === date ? 'date' : undefined}
                       >
                         <span
-                          className={`size-1.5 shrink-0 rounded-full ${state === 'success' ? 'bg-success' : state === 'attention' || state === 'missing' ? 'bg-warning' : 'bg-progress'}`}
+                          className={`size-1.5 shrink-0 rounded-full ${state === 'attention' ? 'bg-warning' : 'bg-progress'}`}
                         />
                         <span className="min-w-0 flex-1 truncate text-support">{formatDate(date, chinese)}</span>
                         <span className="shrink-0 text-support tabular-nums text-muted-foreground">{dayRows.length || '—'}</span>
@@ -653,7 +649,7 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="text-ui font-semibold">{row.isEnd ? (chinese ? '日终收尾' : 'Day close') : chinese ? 'Routine 执行' : 'Routine execution'}</h4>
+                  <h4 className="text-ui font-semibold">{chinese ? 'Routine 执行' : 'Routine execution'}</h4>
                   <Badge variant={statusVariant(row.status)}>{statusLabel(row.status, chinese)}</Badge>
                 </div>
                 <p className="mt-1 text-support text-muted-foreground">
@@ -684,7 +680,7 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
               ) : null}
             </div>
             <div className="mt-4 grid gap-3 border-t pt-3 sm:grid-cols-3">
-              <ProcessStep icon={TimerIcon} label={chinese ? '首次触发' : 'First trigger'} value={formatTime(row.firstTriggerTime, row.timeZone, chinese)} />
+              <ProcessStep icon={TimerIcon} label={chinese ? '触发时间' : 'Triggered'} value={formatTime(row.triggerTime, row.timeZone, chinese)} />
               <ProcessStep
                 icon={row.taskId ? CheckCircle2Icon : Clock3Icon}
                 label={chinese ? '任务' : 'Task'}

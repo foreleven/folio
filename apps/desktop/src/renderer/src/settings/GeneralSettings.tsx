@@ -2,6 +2,7 @@ import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Alert, AlertDescription, AlertTitle } from '@folio/ui/components/ui/alert'
 import { Button } from '@folio/ui/components/ui/button'
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldTitle } from '@folio/ui/components/ui/field'
+import { Input } from '@folio/ui/components/ui/input'
 import { Skeleton } from '@folio/ui/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@folio/ui/components/ui/toggle-group'
 import { Schema } from 'effect'
@@ -105,6 +106,7 @@ export function GeneralSettings(): React.JSX.Element {
                 <ToggleGroupItem value="en">English</ToggleGroupItem>
               </ToggleGroup>
             </Field>
+            <TimeZoneSetting key={config.value.timeZone} value={config.value.timeZone} disabled={status === 'saving'} onSave={timeZone => save({ timeZone })} />
           </FieldGroup>
           {status === 'saving' || status === 'saved' ? <p role="status" className="text-support text-muted-foreground">
             {status === 'saving' ? text.saving : text.saved}
@@ -119,4 +121,20 @@ export function GeneralSettings(): React.JSX.Element {
       )}
     </>
   )
+}
+
+/** Save only on submission: typing a zone must not persist an incomplete name. */
+function TimeZoneSetting({ value, disabled, onSave }: { value: string; disabled: boolean; onSave: (timeZone: string) => Promise<void> }): React.JSX.Element {
+  const text = settingsMessages[useLocale()]
+  const [draft, setDraft] = useState(value)
+  return <Field orientation="setting" className="rounded-md px-2.5" data-disabled={disabled}>
+    <FieldContent>
+      <FieldTitle id="timezone-label">{text.timeZone}</FieldTitle>
+      <FieldDescription id="timezone-description">{text.timeZoneDescription}</FieldDescription>
+    </FieldContent>
+    <form className="flex items-center gap-2" onSubmit={event => { event.preventDefault(); if (draft !== value) void onSave(draft.trim()) }}>
+      <Input aria-labelledby="timezone-label" aria-describedby="timezone-description" value={draft} onChange={event => setDraft(event.target.value)} disabled={disabled} className="w-48" />
+      <Button type="submit" size="sm" disabled={disabled || !draft.trim() || draft === value}>{text.saveTimeZone}</Button>
+    </form>
+  </Field>
 }

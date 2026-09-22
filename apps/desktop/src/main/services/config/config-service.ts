@@ -12,7 +12,7 @@ export class ConfigService extends Context.Service<
   {
     readonly directory: string
     readonly filePath: string
-    /** Reads current disk values, defaulting only absent files/fields; never writes. */
+    /** Reads preferences and persists the named system time zone on its first use. */
     readonly get: Effect.Effect<GlobalConfig, ConfigStoreError>
     /** Emits a disk snapshot followed by changes committed through this service. */
     readonly watch: Stream.Stream<GlobalConfig, ConfigStoreError>
@@ -57,15 +57,23 @@ export class ConfigService extends Context.Service<
         )
       )
 
-      const get = read.pipe(Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause })))
+      // Freeze the first observed system zone. Later OS zone changes cannot silently
+      // regroup a Vault feed or change defaults for new Routine schedules.
+      const initialize = Effect.gen(function* () {
+        const current = yield* read
+        const raw = yield* fs.readFileString(filePath).pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed('{}')))
+        if (!Object.hasOwn(JSON.parse(raw) as object, 'timeZone')) yield* write(current)
+        return current
+      })
+      const get = initialize.pipe(lock.withPermit, Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause })))
 
       // Subscribe and read under the write lock so an update cannot fall between
       // the initial snapshot and subscription, or deliver older queued values.
       const watch = Stream.unwrap(
         Effect.gen(function* () {
           const { subscription, initial } = yield* Effect.gen(function* () {
+            const initial = yield* initialize.pipe(Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause })))
             const subscription = yield* PubSub.subscribe(changes)
-            const initial = yield* get
             return { subscription, initial }
           }).pipe(lock.withPermit)
           return Stream.concat(Stream.succeed(initial), Stream.fromSubscription(subscription))

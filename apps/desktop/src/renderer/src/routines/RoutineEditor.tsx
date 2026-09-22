@@ -1,12 +1,14 @@
-import { useAtomSet, useAtomValue } from '@effect/atom-react'
+import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@folio/ui/components/ui/card'
 import { Field, FieldGroup, FieldLabel } from '@folio/ui/components/ui/field'
 import { Input } from '@folio/ui/components/ui/input'
+import { Skeleton } from '@folio/ui/components/ui/skeleton'
 import { useState } from 'react'
 import type { IntegrationView } from '../../../shared/integration'
 import type { RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
+import { ConfigRpcClient } from '../rpc/config-rpc'
 import { IntegrationRpcClient } from '../rpc/integration-rpc'
 import { TaskRpcClient } from '../rpc/task-rpc'
 
@@ -17,20 +19,29 @@ type IngestionDraft = DraftBase & { type: 'ingestion'; configuration: { integrat
 type Draft = AgentDraft | IngestionDraft
 
 const selectClass = 'h-8 w-full rounded-md border border-input bg-background px-2 text-ui'
-const defaultSchedule = (): DraftBase => ({ name: '', intervalMinutes: 60, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', enabled: true })
-const newAgentDraft = (): AgentDraft => ({ ...defaultSchedule(), type: 'agent', configuration: { goal: '', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
-const newIngestionDraft = (): IngestionDraft => ({ ...defaultSchedule(), type: 'ingestion', configuration: { integrationId: '', resourceId: '' } })
+const defaultSchedule = (timeZone: string): DraftBase => ({ name: '', intervalMinutes: 60, timeZone, enabled: true })
+const newAgentDraft = (timeZone: string): AgentDraft => ({ ...defaultSchedule(timeZone), type: 'agent', configuration: { goal: '', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+const newIngestionDraft = (timeZone: string): IngestionDraft => ({ ...defaultSchedule(timeZone), type: 'ingestion', configuration: { integrationId: '', resourceId: '' } })
+
+/** A new Routine must use the persisted default, never the renderer's live OS zone. */
+export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void }): React.JSX.Element {
+  const config = useAtomValue(ConfigRpcClient.watch)
+  const refresh = useAtomRefresh(ConfigRpcClient.watch)
+  if (!initial.record && config._tag === 'Failure') return <div role="alert"><p>Could not load the default time zone.</p><Button onClick={refresh}>Retry</Button></div>
+  if (!initial.record && config._tag !== 'Success') return <Skeleton role="status" className="h-72 w-full" />
+  return <RoutineEditorForm initial={initial} onSaved={onSaved} onCancel={onCancel} defaultTimeZone={config._tag === 'Success' ? config.value.timeZone : initial.record!.trigger.timeZone} />
+}
 
 /** Edits typed Routine intent; the executor type is immutable after creation. */
-export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void }): React.JSX.Element {
+function RoutineEditorForm({ initial, onSaved, onCancel, defaultTimeZone }: { initial: { id: string; record?: RoutineRecord }; onSaved: () => void; onCancel: () => void; defaultTimeZone: string }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const save = useAtomSet(TaskRpcClient.saveRoutine, { mode: 'promise' })
   const integrationResult = useAtomValue(IntegrationRpcClient.integrations)
   const integrations = integrationResult._tag === 'Success' ? integrationResult.value : null
   const [draft, setDraft] = useState<Draft>(() => {
     const record = initial.record
-    if (!record) return newAgentDraft()
-    const schedule = { name: record.name, intervalMinutes: record.intervalMinutes, timeZone: record.timeZone, enabled: record.enabled }
+    if (!record) return newAgentDraft(defaultTimeZone)
+    const schedule = { name: record.name, intervalMinutes: record.trigger.intervalMinutes, timeZone: record.trigger.timeZone, enabled: record.enabled }
     return record.type === 'agent'
       ? { ...schedule, type: 'agent', configuration: { ...record.configuration, skillIds: [...record.configuration.skillIds], integrationIds: [...record.configuration.integrationIds], resourceIds: [...record.configuration.resourceIds] } }
       : { ...schedule, type: 'ingestion', configuration: { ...record.configuration } }
@@ -49,11 +60,11 @@ export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: s
     try {
       const input = draft.type === 'agent' ? {
         id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
-        intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone, enabled: draft.enabled, type: draft.type,
+        trigger: { type: 'schedule' as const, intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone }, enabled: draft.enabled, type: draft.type,
         configuration: { ...draft.configuration, goal: draft.configuration.goal.trim(), model: draft.configuration.agent === 'pi' ? draft.configuration.model : null }
       } as const : {
         id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
-        intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone, enabled: draft.enabled, type: draft.type,
+        trigger: { type: 'schedule' as const, intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone }, enabled: draft.enabled, type: draft.type,
         configuration: draft.configuration
       } as const
       await save({ payload: { input } })
@@ -70,7 +81,7 @@ export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: s
     <CardContent className="pt-4"><fieldset disabled={pending}><FieldGroup className="gap-4">
       <Field><FieldLabel htmlFor="routine-name">{chinese ? '名称' : 'Name'}</FieldLabel><Input id="routine-name" value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></Field>
       <div className="grid gap-4 sm:grid-cols-3">
-        <Field><FieldLabel htmlFor="routine-type">{chinese ? '类型' : 'Type'}</FieldLabel><select id="routine-type" className={selectClass} value={draft.type} disabled={Boolean(initial.record)} onChange={event => setDraft(event.target.value === 'ingestion' ? newIngestionDraft() : newAgentDraft())}><option value="agent">Agent</option><option value="ingestion">Ingestion</option></select></Field>
+        <Field><FieldLabel htmlFor="routine-type">{chinese ? '类型' : 'Type'}</FieldLabel><select id="routine-type" className={selectClass} value={draft.type} disabled={Boolean(initial.record)} onChange={event => setDraft(event.target.value === 'ingestion' ? newIngestionDraft(draft.timeZone) : newAgentDraft(draft.timeZone))}><option value="agent">Agent</option><option value="ingestion">Ingestion</option></select></Field>
         <Field><FieldLabel htmlFor="routine-interval">{chinese ? '检查周期（分钟）' : 'Check interval (minutes)'}</FieldLabel><Input id="routine-interval" type="number" min={1} value={draft.intervalMinutes} onChange={event => setDraft({ ...draft, intervalMinutes: Number(event.target.value) })} /></Field>
         <Field><FieldLabel htmlFor="routine-timezone">{chinese ? '时区' : 'Time zone'}</FieldLabel><Input id="routine-timezone" value={draft.timeZone} onChange={event => setDraft({ ...draft, timeZone: event.target.value })} /></Field>
       </div>

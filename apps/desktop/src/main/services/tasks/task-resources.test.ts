@@ -22,7 +22,7 @@ beforeEach(async () => {
   await writeFile(skill, 'original skill')
   task = { id: 'task', type: 'agent', receipt: null, branch: 'folio/task/task', worktree,
     configuration: { goal: 'Use resources', agent: 'pi', model: null, skillIds: [], integrationIds: ['notes'], resourceIds: ['notes/im'] },
-    state: 'active', worktreeState: 'ready', worktreeBase: null, createdAt: 1 }
+    state: 'active', worktreeState: 'ready', worktreeBase: null, summary: null, createdAt: 1 }
   mounted = { skillPaths: [skill], executableDirectories: [bin], instructions: [] }
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })

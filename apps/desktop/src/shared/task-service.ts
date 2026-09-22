@@ -2,7 +2,7 @@ import type { ExecutionCounts } from './execution'
 import { Context, Effect } from 'effect'
 import type { HarnessStoreError, SessionRecord, TaskRecord, RunRecord } from './harness'
 import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution } from './routine'
-import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput, TaskDetail, SessionHistory, RoutineRunResult } from './rpc/task-rpc'
+import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput, TaskDetail, SessionHistory, RoutineRunResult, TaskFeedPage, TaskFeedCursor } from './rpc/task-rpc'
 import type {
   ConfirmRunWikiUnchanged,
   SaveRunWikiFiles,
@@ -47,6 +47,7 @@ export class TaskService extends Context.Service<
     readonly executeRequest: (request: RunRecord) => Effect.Effect<void, HarnessStoreError>
     readonly tickRoutines: Effect.Effect<void, HarnessStoreError>
     readonly list: Effect.Effect<readonly TaskRecord[], HarnessStoreError>
+    readonly feed: (cursor: TaskFeedCursor | null) => Effect.Effect<TaskFeedPage, HarnessStoreError>
     readonly allRoutineExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly routineExecutions: (id: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
     readonly dispatchRoutine: (id: string) => Effect.Effect<RoutineRunResult | null, HarnessStoreError>

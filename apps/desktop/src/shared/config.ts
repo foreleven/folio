@@ -1,6 +1,7 @@
 import { AgentSettings } from '@folio/agent/config/schema'
 import { Effect, Schema } from 'effect'
 import { Vault } from './vault'
+import { RoutineTimeZone } from './routine'
 
 /** Persisted preferences; `system` delegates resolution to the consuming UI. */
 export const Theme = Schema.Literals(['system', 'light', 'dark'])
@@ -11,6 +12,7 @@ export const GlobalConfig = Schema.Struct({
   executionConcurrency: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(32))),
   theme: Theme.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
   language: Language.pipe(Schema.withDecodingDefaultKey(Effect.succeed('system'))),
+  timeZone: RoutineTimeZone.pipe(Schema.withDecodingDefaultKey(Effect.sync(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'))),
   vaults: Schema.Array(Vault).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   // AgentSettings has nested defaults; use a type-side default so `{}` is not
   // interpreted as an encoded object missing its required nested fields.
@@ -26,7 +28,8 @@ export type GlobalConfig = typeof GlobalConfig.Type
 export const GlobalConfigPatch = Schema.Struct({
   executionConcurrency: GlobalConfig.fields.executionConcurrency,
   theme: Schema.optionalKey(Theme),
-  language: Schema.optionalKey(Language)
+  language: Schema.optionalKey(Language),
+  timeZone: Schema.optionalKey(RoutineTimeZone)
 })
 
 export type GlobalConfigPatch = typeof GlobalConfigPatch.Type

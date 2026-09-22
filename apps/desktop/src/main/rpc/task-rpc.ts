@@ -15,6 +15,7 @@ export const TaskRpcHandlersLive = TaskRpcs.toLayer(
       'routines.run': ({ input }) => Effect.flatMap(TaskService, (service) => service.runRoutine(input)),
       'routines.prepare': ({ input }) => Effect.flatMap(TaskService, (service) => service.prepareRoutine(input)),
       'tasks.list': () => Effect.flatMap(TaskService, (service) => service.list),
+      'tasks.feed': ({ cursor }) => Effect.flatMap(TaskService, (service) => service.feed(cursor)),
       'tasks.create': (input) => Effect.flatMap(TaskService, (service) => service.create(input)),
       'tasks.complete': ({ taskId }) => Effect.flatMap(TaskService, (service) => service.complete(taskId)),
       'tasks.reopen': ({ taskId }) => Effect.flatMap(TaskService, (service) => service.reopen(taskId)),

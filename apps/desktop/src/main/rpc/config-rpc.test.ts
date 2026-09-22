@@ -42,9 +42,9 @@ describe('Configuration RPC', () => {
       }).pipe(Effect.provide(handlers), Effect.scoped))
       const disabledAgent = { enabled: false, modelProfiles: [] }
       const expected = [
-        { theme: 'system', language: 'system', vaults: [], agent: disabledAgent },
-        { theme: 'system', language: 'system', vaults: [vault], agent: disabledAgent },
-        { theme: 'dark', language: 'zh-CN', vaults: [vault], agent: disabledAgent }
+        { theme: 'system', language: 'system', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [], agent: disabledAgent },
+        { theme: 'system', language: 'system', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [vault], agent: disabledAgent },
+        { theme: 'dark', language: 'zh-CN', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [vault], agent: disabledAgent }
       ]
       expect(results.first).toEqual(expected)
       expect(results.second).toEqual(expected)

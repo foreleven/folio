@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ConfigService } from './config-service'
 
 let root: string
+const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'folio-config-test-'))
@@ -62,10 +63,10 @@ describe('ConfigService', () => {
     }, makeRuntime('folio-test-relative'))
   })
 
-  it('returns defaults without creating the directory or file', async () => {
+  it('persists the system time zone on the first read', async () => {
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] } })
-      expect(await readdir(root)).toEqual([])
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'system', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] } })
+      expect(JSON.parse(await readFile(store.filePath, 'utf8')).timeZone).toBe(systemTimeZone)
     }, makeRuntime(join(root, 'missing')))
   })
 
@@ -73,16 +74,16 @@ describe('ConfigService', () => {
     const directory = join(root, 'nested', 'config')
     await withStore(async (store) => {
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'system', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
       expect(JSON.parse(await readFile(store.filePath, 'utf8'))).toEqual({
-        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'system', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
       expect(await readdir(directory)).toEqual(['config.json'])
     }, makeRuntime(directory))
     await withStore(async (store) => {
       expect(await Effect.runPromise(store.get)).toEqual({
-        theme: 'dark', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'system', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
     }, makeRuntime(directory))
   })
@@ -90,11 +91,11 @@ describe('ConfigService', () => {
   it('defaults missing fields and sees later manual edits', async () => {
     await writeFile(join(root, 'config.json'), '{"theme":"light"}')
     await withStore(async (store) => {
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system', vaults: [], agent: { enabled: false, modelProfiles: [] } })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'light', language: 'system', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] } })
       await writeFile(store.filePath, '{"language":"zh-CN"}')
-      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN', vaults: [], agent: { enabled: false, modelProfiles: [] } })
+      expect(await Effect.runPromise(store.get)).toEqual({ theme: 'system', language: 'zh-CN', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] } })
       expect(await Effect.runPromise(store.update({ theme: 'dark' }))).toEqual({
-        theme: 'dark', language: 'zh-CN', vaults: [], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'zh-CN', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
     })
   })
@@ -142,7 +143,7 @@ describe('ConfigService', () => {
         store.update({ language: 'en' })
       ], { concurrency: 'unbounded' }))
       expect(await Effect.runPromise(store.get)).toEqual({
-        theme: 'dark', language: 'en', vaults: [], agent: { enabled: false, modelProfiles: [] }
+        theme: 'dark', language: 'en', timeZone: systemTimeZone, vaults: [], agent: { enabled: false, modelProfiles: [] }
       })
       expect(await readdir(root)).toEqual(['config.json'])
     })
@@ -165,10 +166,10 @@ describe('ConfigService', () => {
         store.update({ theme: 'dark' })
       ], { concurrency: 'unbounded' }))
       expect(await Effect.runPromise(store.get)).toEqual({
-        theme: 'dark', language: 'system', vaults: [], agent
+        theme: 'dark', language: 'system', timeZone: systemTimeZone, vaults: [], agent
       })
       expect(JSON.parse(await readFile(store.filePath, 'utf8'))).toEqual({
-        theme: 'dark', language: 'system', vaults: [], agent
+        theme: 'dark', language: 'system', timeZone: systemTimeZone, vaults: [], agent
       })
     })
   })

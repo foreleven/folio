@@ -36,6 +36,22 @@ export const IngestionReceipt = Schema.Struct({
 })
 export type IngestionReceipt = typeof IngestionReceipt.Type
 
+/** Task-level result snapshots survive later edits to the source raws projection. */
+export const TaskPublication = Schema.Struct({
+  state: Schema.Literals(['pending', 'not-required', 'completed', 'conflict', 'failed']),
+  saveOperationId: Schema.NullOr(Id), synchronizationId: Schema.NullOr(Id)
+})
+export const TaskSummary = Schema.Union([
+  Schema.Struct({ type: Schema.Literal('agent'), runId: Id, runSequence: Schema.Int, endedAt: Schema.Number,
+    outcome: Schema.Literals(['succeeded', 'failed', 'interrupted', 'cancelled']), error: Schema.NullOr(Schema.String),
+    discovery: Schema.NullOr(Schema.Struct({ content: Schema.Array(Schema.Json), incomplete: Schema.Boolean })), publication: TaskPublication }),
+  Schema.Struct({ type: Schema.Literal('ingestion'), windowStart: Schema.Number, windowEnd: Schema.Number,
+    timeZone: Schema.String, attemptCount: Schema.Int, endedAt: Schema.Number,
+    outcome: Schema.Literals(['succeeded', 'failed', 'interrupted', 'cancelled', 'conflict']), error: Schema.NullOr(Schema.String),
+    rawsChanged: Schema.Boolean, changedFileCount: Schema.Int, publication: TaskPublication })
+])
+export type TaskSummary = typeof TaskSummary.Type
+
 const TaskIdentity = {
   id: Id
 }
@@ -52,6 +68,7 @@ const TaskLifecycle = {
   state: Schema.Literals(['active', 'completed', 'cancelled']),
   worktreeState: Schema.Literals(['pending', 'creating', 'ready', 'releasing', 'released']),
   worktreeBase: Schema.NullOr(Schema.String),
+  summary: Schema.NullOr(TaskSummary),
   createdAt: Schema.Number
 }
 export const TaskRecord = Schema.Union([
