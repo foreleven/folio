@@ -165,7 +165,8 @@ export class HarnessStore extends Context.Service<
       const recordAgentSummary = Effect.fn('HarnessStore.recordAgentSummary')(function* (run: RunRecord, messages: readonly MessageRecord[]) {
         if (run.purpose === 'conflict-resolution') return
         if (run.endedAt === null || !['succeeded', 'failed', 'interrupted', 'cancelled'].includes(run.state)) return yield* failure('invalid-state')
-        const last = messages.filter(message => message.runId === run.id && message.payload.kind === 'message' && message.payload.data.role === 'assistant')
+        const last = messages.filter(message => message.runId === run.id && message.payload.kind === 'message' && message.payload.data.role === 'assistant'
+          && (run.state !== 'succeeded' || message.payload.data.ended === true && message.payload.data.incomplete !== true))
           .sort((a, b) => a.seq - b.seq).at(-1)
         const projected = last ? yield* Schema.decodeUnknownEffect(ProjectedMessage)(last.payload.data) : null
         const summary = yield* Schema.decodeUnknownEffect(TaskSummary)({

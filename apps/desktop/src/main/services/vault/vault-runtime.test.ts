@@ -516,6 +516,47 @@ it.skipIf(process.platform === 'win32')('executes queued requests through the re
   }
 }, 25000)
 
+it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when later Task saves advance the source head', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-wiki-summary-')))
+  const fixture = (await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8'))
+    .replace('id: "native-thread"', 'id: process.cwd()')
+  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
+  const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+    entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
+  }) }))
+  try {
+    await mkdir(join(root, 'wiki'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'wiki'))
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      const taskId = '66666666-6666-4666-8666-666666666666'
+      const sessionId = '77777777-7777-4777-8777-777777777777'
+      const runId = '88888888-8888-4888-8888-888888888888'
+      yield* tasks.create({ id: taskId, goal: 'Wiki publication', agent: 'codex' })
+      yield* tasks.openSession({ taskId, sessionId, agent: 'codex' })
+      yield* tasks.startRun({ id: runId, taskId, sessionId, prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
+      yield* tasks.executeRequest((yield* tasks.claimExecution('worker-success'))!)
+      const success = yield* tasks.get(taskId)
+      expect(success.runs[0]?.state).toBe('succeeded')
+      yield* Effect.promise(() => writeFile(join(success.task.worktree, 'wiki/discovery.md'), 'Agent discovery\n'))
+      const accepted = yield* tasks.saveRunWikiFiles({ id: 'accepted-wiki', taskId,
+        expectedParent: success.runs[0]!.baselineCommit!, paths: ['wiki/discovery.md'], runIds: [runId] })
+      expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'pending', saveOperationId: accepted.id } })
+      yield* Effect.promise(() => writeFile(join(success.task.worktree, 'wiki/follow-up.md'), 'User follow-up\n'))
+      const followUpSave = yield* tasks.saveTaskWikiFiles({ id: 'user-follow-up', taskId,
+        expectedParent: accepted.commit, paths: ['wiki/follow-up.md'] })
+      // The synthetic Agent writes checkout-root diagnostics unrelated to the Wiki.
+      yield* Effect.promise(() => Promise.all(['terminal-cleanup.json', 'skill-roots.json', 'native-thread.json',
+        'resumed.json', 'turn-input.json', 'interrupt.json'].map(name => rm(join(success.task.worktree, name), { force: true }))))
+      const publication = yield* tasks.synchronizeTaskWiki({ id: 'publish-wiki', taskId, expectedSourceHead: followUpSave.commit })
+      expect(publication.state).toBe('completed')
+      expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'completed', saveOperationId: accepted.id, synchronizationId: publication.id } })
+    }).pipe(Effect.timeout('20 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25000)
+
 it('retains a claim with a missing recovery file and preserves queued requests across restart', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-queue-restart-')))
   let runtime = createRuntime(root)

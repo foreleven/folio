@@ -130,6 +130,10 @@ export const TaskServiceLive = Layer.effect(
       const last = page.at(-1)
       return { entries, nextCursor: rows.length > 30 && last ? { createdAt: last.createdAt, id: last.id } : null }
     }, Effect.mapError(safeError))
+    /** A no-change receipt only updates the summary of the Run it confirmed. */
+    const markWikiUnchanged = (taskId: string, runId: string) =>
+      sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required')
+        WHERE id=${taskId} AND json_extract(summary, '$.runId')=${runId}`.pipe(Effect.mapError(safeError))
     /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
     const completeUnlocked = Effect.fn('TaskService.completeUnlocked')(function* (taskId: string) {
       const task = yield* store.task(taskId)
@@ -169,8 +173,7 @@ export const TaskServiceLive = Layer.effect(
       // follows the existing explicit save/synchronization path.
       for (const run of history.filter((candidate) => candidate.state === 'succeeded' && candidate.syncState === 'pending')) {
         yield* changes.confirmRunWikiUnchanged({ taskId, runId: run.id, expectedHead: run.baselineCommit! }).pipe(
-          Effect.tap(() => sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required')
-            WHERE id=${taskId} AND json_extract(summary, '$.runId')=${run.id}`.pipe(Effect.mapError(safeError))),
+          Effect.tap(() => markWikiUnchanged(taskId, run.id)),
           Effect.catch(() => Effect.void))
       }
       history = yield* store.runs(taskId)
@@ -705,11 +708,15 @@ export const TaskServiceLive = Layer.effect(
       if (task.summary?.type !== 'agent' || !task.summary.publication.saveOperationId) return
       const summary = task.summary
       const saveId = summary.publication.saveOperationId
-      const owners = yield* sql<{ runId: string }>`SELECT owner.run_id AS runId FROM git_operations save
+      const owners = yield* sql<{ runId: string; saveCommit: string }>`SELECT owner.run_id AS runId,
+        save.target_commit AS saveCommit FROM git_operations save
         JOIN git_operation_runs owner ON owner.operation_id=save.id
-        WHERE save.id=${saveId} AND save.task_id=${operation.taskId} AND save.kind='save-wiki'
-          AND save.target_commit=${operation.sourceHead}`
-      if (!owners.some(owner => owner.runId === summary.runId)) return
+        WHERE save.id=${saveId} AND save.task_id=${operation.taskId} AND save.kind='save-wiki'`
+      const ownedSave = owners.find(owner => owner.runId === summary.runId)
+      if (!ownedSave) return
+      // A synchronization can include several sequential saves, so its source
+      // head need only descend from this Run's attributed save commit.
+      if ((yield* git(task.worktree, ['merge-base', ownedSave.saveCommit, operation.sourceHead])).trim() !== ownedSave.saveCommit) return
       const publicationState = operation.state === 'completed' ? 'completed'
         : operation.state === 'conflict' ? 'conflict' : operation.state === 'aborted' ? 'failed' : 'pending'
       yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.synchronizationId', ${operation.id},
@@ -787,8 +794,7 @@ export const TaskServiceLive = Layer.effect(
       saveTaskWikiFiles: changes.save,
       saveRunWikiFiles: (input) => changes.saveRunWiki(input).pipe(Effect.tap(saved => recordWikiSave(input.taskId, input.runIds, saved.id))),
       confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(
-        Effect.tap(() => sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required')
-          WHERE id=${input.taskId} AND json_extract(summary, '$.runId')=${input.runId}`.pipe(Effect.mapError(safeError))),
+        Effect.tap(() => markWikiUnchanged(input.taskId, input.runId)),
         Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
       synchronizeTaskWiki: (input) => synchronization.synchronize(input).pipe(
         Effect.tap(recordWikiSynchronization),

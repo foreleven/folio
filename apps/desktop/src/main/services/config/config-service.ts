@@ -47,22 +47,26 @@ export class ConfigService extends Context.Service<
       yield* Effect.addFinalizer(() => PubSub.shutdown(changes))
 
       // Only absence uses defaults: damaged files and permission errors must remain visible.
-      const read = fs.readFileString(filePath).pipe(
+      const stored = fs.readFileString(filePath).pipe(
         Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed('{}')),
         Effect.flatMap((json) =>
-          Schema.decodeUnknownEffect(ConfigJson)(json, {
-            onExcessProperty: 'error',
-            errors: 'all'
-          }).pipe(Effect.mapError(() => new Error('Invalid global configuration')))
+          Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.JsonObject))(json).pipe(
+            Effect.mapError(() => new Error('Invalid global configuration'))
+          )
         )
       )
+      const decode = (value: Schema.JsonObject) => Schema.decodeUnknownEffect(GlobalConfig)(value, {
+        onExcessProperty: 'error',
+        errors: 'all'
+      }).pipe(Effect.mapError(() => new Error('Invalid global configuration')))
+      const read = stored.pipe(Effect.flatMap(decode))
 
       // Freeze the first observed system zone. Later OS zone changes cannot silently
       // regroup a Vault feed or change defaults for new Routine schedules.
       const initialize = Effect.gen(function* () {
-        const current = yield* read
-        const raw = yield* fs.readFileString(filePath).pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed('{}')))
-        if (!Object.hasOwn(JSON.parse(raw) as object, 'timeZone')) yield* write(current)
+        const value = yield* stored
+        const current = yield* decode(value)
+        if (!Object.hasOwn(value, 'timeZone')) yield* write(current)
         return current
       })
       const get = initialize.pipe(lock.withPermit, Effect.mapError((cause) => new ConfigStoreError({ path: filePath, operation: 'read', cause })))

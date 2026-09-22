@@ -71,6 +71,10 @@ it('streams through the real sink without writing SQL or recovery files, then pe
       yield* sql`DROP TRIGGER fail_projection`
       yield* sink.appendUpdate(done)
       expect(yield* sql`SELECT count(*) AS count FROM messages`).toEqual([{ count: 1 }])
+      yield* sink.appendUpdate({ ...update(102, 'unfinished'), notification: {
+        ...update(102, 'unfinished').notification,
+        update: { ...update(102, 'unfinished').notification.update, messageId: 'later' }
+      } })
       expect(yield* fileEffect(() => files.read('run', 'attempt'))).toEqual(state)
       yield* sink.markRunning('run')
       yield* sink.finishRun('run', 'succeeded')
@@ -88,6 +92,9 @@ it('streams through the real sink without writing SQL or recovery files, then pe
         type: 'agent', runId: 'run', outcome: 'succeeded', discovery: { incomplete: false,
           content: expect.arrayContaining([{ type: 'text', text: 'x' }]) }
       })
+      const summary = (yield* store.task('task')).summary
+      if (summary?.type !== 'agent') throw new Error('Expected Agent summary')
+      expect(summary.discovery?.content).not.toEqual([{ type: 'text', text: 'unfinished' }])
     }))
   } finally { await vault.dispose() }
 })

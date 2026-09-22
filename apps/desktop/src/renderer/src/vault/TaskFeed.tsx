@@ -19,6 +19,7 @@ export function TaskFeed(): React.JSX.Element {
   useEffect(() => { requestRef.current = request }, [request])
   const busy = useRef(false)
   const loaded = useRef(false)
+  const loadedCursors = useRef<TaskFeedCursor[]>([])
   const [hasLoaded, setHasLoaded] = useState(false)
   const [entries, setEntries] = useState<readonly Entry[]>([])
   const [nextCursor, setNextCursor] = useState<TaskFeedCursor | null>(null)
@@ -26,18 +27,22 @@ export function TaskFeed(): React.JSX.Element {
   const [error, setError] = useState(false)
   const sentinel = useRef<HTMLDivElement>(null)
 
-  const load = useCallback(async (cursor: TaskFeedCursor | null) => {
+  const load = useCallback(async (cursor: TaskFeedCursor | null, refreshLoaded = false) => {
     if (busy.current) return
     busy.current = true
-    if (!loaded.current || cursor) setLoading(true)
+    if (!loaded.current || !refreshLoaded && cursor) setLoading(true)
     try {
-      const page = await requestRef.current({ payload: { cursor } })
+      const pages = await Promise.all((refreshLoaded ? [null, ...loadedCursors.current] : [cursor])
+        .map(position => requestRef.current({ payload: { cursor: position } })))
       setEntries(previous => {
         const byId = new Map(previous.map(entry => [entry.task.id, entry]))
-        for (const entry of page.entries) byId.set(entry.task.id, entry)
+        for (const page of pages) for (const entry of page.entries) byId.set(entry.task.id, entry)
         return [...byId.values()].sort((a, b) => b.task.createdAt - a.task.createdAt || b.task.id.localeCompare(a.task.id))
       })
-      if (!loaded.current || cursor) setNextCursor(page.nextCursor)
+      if (!refreshLoaded) {
+        if (cursor) loadedCursors.current.push(cursor)
+        setNextCursor(pages[0]!.nextCursor)
+      }
       loaded.current = true
       setHasLoaded(true)
       setError(false)
@@ -51,7 +56,7 @@ export function TaskFeed(): React.JSX.Element {
 
   useEffect(() => {
     void load(null)
-    const timer = setInterval(() => { void load(null) }, 4000)
+    const timer = setInterval(() => { void load(null, loaded.current) }, 4000)
     return () => clearInterval(timer)
   }, [load])
 
@@ -88,7 +93,7 @@ export function TaskFeed(): React.JSX.Element {
     </section>)}
     {loading && !hasLoaded ? <p role="status" className="text-support text-muted-foreground">{chinese ? '正在加载任务…' : 'Loading Tasks…'}</p> : null}
     {hasLoaded && entries.length === 0 ? <p className="rounded-lg border border-dashed p-8 text-center text-support text-muted-foreground">{chinese ? '暂无任务记录。' : 'No Tasks yet.'}</p> : null}
-    {error ? <p role="alert" className="text-support text-destructive">{chinese ? '读取任务失败，请重试。' : 'Could not load Tasks.'} <Button size="sm" variant="outline" onClick={() => void load(loaded.current ? nextCursor : null)}>{chinese ? '重试' : 'Retry'}</Button></p> : null}
+    {error ? <p role="alert" className="text-support text-destructive">{chinese ? '读取任务失败，请重试。' : 'Could not load Tasks.'} <Button size="sm" variant="outline" onClick={() => void load(null, loaded.current)}>{chinese ? '重试' : 'Retry'}</Button></p> : null}
     {nextCursor ? <div ref={sentinel} className="flex justify-center py-2"><Button size="sm" variant="ghost" disabled={loading} onClick={() => void load(nextCursor)}>{loading ? (chinese ? '加载中…' : 'Loading…') : chinese ? '加载更早任务' : 'Load earlier Tasks'}</Button></div> : null}
   </section>
 }
