@@ -705,7 +705,7 @@ export const TaskServiceLive = Layer.effect(
     /** Git owns the operation history; this only updates the matching Task-level result. */
     const recordWikiSynchronization = Effect.fn('TaskService.recordWikiSynchronization')(function* (operation: { id: string; taskId: string; sourceHead: string; state: string }) {
       const task = yield* store.task(operation.taskId)
-      if (task.summary?.type !== 'agent' || !task.summary.publication.saveOperationId) return
+      if (task.summary?.type !== 'agent' || !task.summary.publication.saveOperationId) return false
       const summary = task.summary
       const saveId = summary.publication.saveOperationId
       const owners = yield* sql<{ runId: string; saveCommit: string }>`SELECT owner.run_id AS runId,
@@ -713,16 +713,51 @@ export const TaskServiceLive = Layer.effect(
         JOIN git_operation_runs owner ON owner.operation_id=save.id
         WHERE save.id=${saveId} AND save.task_id=${operation.taskId} AND save.kind='save-wiki'`
       const ownedSave = owners.find(owner => owner.runId === summary.runId)
-      if (!ownedSave) return
+      if (!ownedSave) return false
       // A synchronization can include several sequential saves, so its source
-      // head need only descend from this Run's attributed save commit.
-      if ((yield* git(task.worktree, ['merge-base', ownedSave.saveCommit, operation.sourceHead])).trim() !== ownedSave.saveCommit) return
+      // head need only descend from this Run's attributed save commit. Use the
+      // registered main checkout: a settled Routine may have released its worktree.
+      if ((yield* git(join(vault.directory, 'workspace'), ['merge-base', ownedSave.saveCommit, operation.sourceHead])).trim() !== ownedSave.saveCommit) return false
       const publicationState = operation.state === 'completed' ? 'completed'
         : operation.state === 'conflict' ? 'conflict' : operation.state === 'aborted' ? 'failed' : 'pending'
       yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.synchronizationId', ${operation.id},
         '$.publication.state', ${publicationState}) WHERE id=${operation.taskId}
           AND json_extract(summary, '$.runId')=${summary.runId}
           AND json_extract(summary, '$.publication.saveOperationId')=${saveId}`
+      return true
+    }, Effect.mapError(safeError))
+    /** A damaged operation should not make unrelated Tasks or the Vault unavailable. */
+    const reconcilePublicationSummary = Effect.fn('TaskService.reconcilePublicationSummary')(function* (id: string) {
+      const task = yield* store.task(id)
+      if (task.summary?.type !== 'agent') return
+      const runId = task.summary.runId
+      const saves = yield* sql<{ id: string }>`SELECT save.id FROM git_operations save
+        JOIN git_operation_runs owner ON owner.operation_id=save.id
+        WHERE save.task_id=${id} AND save.kind='save-wiki' AND save.state='completed'
+          AND owner.run_id=${runId} ORDER BY save.sequence DESC LIMIT 1`
+      if (!saves[0]) {
+        const run = (yield* store.runs(id)).find(value => value.id === runId)
+        if (run?.syncState === 'not-required' && task.summary.publication.state === 'pending') {
+          yield* markWikiUnchanged(id, runId)
+        }
+        return
+      }
+      if (task.summary.publication.saveOperationId !== saves[0].id) yield* recordWikiSave(id, [runId], saves[0].id)
+      const synchronizations = yield* sql<{ id: string; sourceHead: string; state: string }>`SELECT id,
+        source_commit AS sourceHead, state FROM git_operations
+        WHERE task_id=${id} AND kind='synchronize' ORDER BY sequence DESC`
+      for (const operation of synchronizations) {
+        if (yield* recordWikiSynchronization({ ...operation, taskId: id })) break
+      }
+    }, Effect.mapError(safeError))
+    /** Replays committed Git/Run receipts into the Task snapshot after a process exits between writes. */
+    const reconcilePublicationSummaries = Effect.fn('TaskService.reconcilePublicationSummaries')(function* () {
+      const rows = yield* sql<{ id: string }>`SELECT id FROM tasks WHERE type='agent'
+        AND json_extract(summary, '$.type')='agent' ORDER BY created_at, id`
+      for (const { id } of rows) {
+        yield* reconcilePublicationSummary(id).pipe(Effect.catch(error => Effect.logWarning(
+          'Task publication summary could not be reconciled; the saved snapshot remains available.', { vaultId: vault.id, taskId: id }, error)))
+      }
     }, Effect.mapError(safeError))
     /** Conflict actions require both identities so a caller cannot operate on another Task's receipt. */
     const conflictAction = Effect.fn('TaskService.conflictAction')(function* (taskId: string, id: string, action: 'resolve' | 'abort') {
@@ -756,6 +791,7 @@ export const TaskServiceLive = Layer.effect(
       yield* startIngestion(taskId)
       return yield* store.task(taskId)
     }, gate.withPermit, Effect.mapError(safeError))
+    yield* reconcilePublicationSummaries()
     return TaskService.of({
       executionCounts: queue.counts,
       tickRoutines,

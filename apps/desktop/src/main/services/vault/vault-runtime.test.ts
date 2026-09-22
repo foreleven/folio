@@ -521,15 +521,18 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
   const fixture = (await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8'))
     .replace('id: "native-thread"', 'id: process.cwd()')
   await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
-  const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+  let runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
     entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
   }) }))
+  let vaultId = ''
+  let sourceHead = ''
+  const taskId = '66666666-6666-4666-8666-666666666666'
   try {
     await mkdir(join(root, 'wiki'))
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'wiki'))
+      vaultId = vault.id
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const taskId = '66666666-6666-4666-8666-666666666666'
       const sessionId = '77777777-7777-4777-8777-777777777777'
       const runId = '88888888-8888-4888-8888-888888888888'
       yield* tasks.create({ id: taskId, goal: 'Wiki publication', agent: 'codex' })
@@ -546,6 +549,7 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       yield* Effect.promise(() => writeFile(join(success.task.worktree, 'wiki/follow-up.md'), 'User follow-up\n'))
       const followUpSave = yield* tasks.saveTaskWikiFiles({ id: 'user-follow-up', taskId,
         expectedParent: accepted.commit, paths: ['wiki/follow-up.md'] })
+      sourceHead = followUpSave.commit
       // The synthetic Agent writes checkout-root diagnostics unrelated to the Wiki.
       yield* Effect.promise(() => Promise.all(['terminal-cleanup.json', 'skill-roots.json', 'native-thread.json',
         'resumed.json', 'turn-input.json', 'interrupt.json'].map(name => rm(join(success.task.worktree, name), { force: true }))))
@@ -553,7 +557,33 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       expect(publication.state).toBe('completed')
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
         publication: { state: 'completed', saveOperationId: accepted.id, synchronizationId: publication.id } })
+      expect(yield* tasks.complete(taskId)).toMatchObject({ worktreeState: 'released' })
     }).pipe(Effect.timeout('20 seconds')))
+    await runtime.dispose()
+    // Simulate process loss after Git receipts commit but before either summary update.
+    const database = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
+    try {
+      database.prepare(`UPDATE tasks SET summary=json_set(summary,
+        '$.publication.state', 'pending', '$.publication.saveOperationId', NULL,
+        '$.publication.synchronizationId', NULL) WHERE id=?`).run(taskId)
+      database.prepare(`UPDATE git_operations SET source_commit=? WHERE id='publish-wiki'`).run('deadbeef'.repeat(5))
+    } finally { database.close() }
+    runtime = createRuntime(root)
+    await runtime.runPromise(Effect.gen(function* () {
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
+      expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'pending', saveOperationId: 'accepted-wiki', synchronizationId: null } })
+    }))
+    await runtime.dispose()
+    const repaired = new DatabaseSync(join(root, 'config/vaults', vaultId, 'data.db'))
+    try { repaired.prepare(`UPDATE git_operations SET source_commit=? WHERE id='publish-wiki'`).run(sourceHead) }
+    finally { repaired.close() }
+    runtime = createRuntime(root)
+    await runtime.runPromise(Effect.gen(function* () {
+      const tasks = Context.get(yield* (yield* VaultRuntime).open(vaultId), TaskService)
+      expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'completed', saveOperationId: 'accepted-wiki', synchronizationId: 'publish-wiki' } })
+    }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }, 25000)
 
