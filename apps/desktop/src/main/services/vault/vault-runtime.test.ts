@@ -534,6 +534,20 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       const vault = yield* (yield* VaultService).register(join(root, 'wiki'))
       vaultId = vault.id
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
+      // Create the healthy Task first: recovery scans the newer damaged Task
+      // before this one, proving the sweep continues after a failure.
+      const noChangeSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const noChangeRunId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+      yield* tasks.create({ id: noChangeTaskId, goal: 'No changes', agent: 'codex' })
+      yield* tasks.openSession({ taskId: noChangeTaskId, sessionId: noChangeSessionId, agent: 'codex' })
+      yield* tasks.startRun({ id: noChangeRunId, taskId: noChangeTaskId, sessionId: noChangeSessionId,
+        prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
+      yield* tasks.executeRequest((yield* tasks.claimExecution('worker-no-change'))!)
+      const noChangeRun = (yield* tasks.get(noChangeTaskId)).runs[0]!
+      expect(noChangeRun.state).toBe('succeeded')
+      yield* tasks.confirmRunWikiUnchanged({ taskId: noChangeTaskId, runId: noChangeRunId, expectedHead: noChangeRun.baselineCommit! })
+      expect((yield* tasks.get(noChangeTaskId)).task.summary).toMatchObject({ type: 'agent',
+        publication: { state: 'not-required' } })
       const sessionId = '77777777-7777-4777-8777-777777777777'
       const runId = '88888888-8888-4888-8888-888888888888'
       yield* tasks.create({ id: taskId, goal: 'Wiki publication', agent: 'codex' })
@@ -563,18 +577,6 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',
         publication: { state: 'completed', saveOperationId: accepted.id, synchronizationId: publication.id } })
       expect(yield* tasks.complete(taskId)).toMatchObject({ worktreeState: 'released' })
-      const noChangeSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-      const noChangeRunId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
-      yield* tasks.create({ id: noChangeTaskId, goal: 'No changes', agent: 'codex' })
-      yield* tasks.openSession({ taskId: noChangeTaskId, sessionId: noChangeSessionId, agent: 'codex' })
-      yield* tasks.startRun({ id: noChangeRunId, taskId: noChangeTaskId, sessionId: noChangeSessionId,
-        prompt: 'early-completion', purpose: 'execution', resumesRunId: null })
-      yield* tasks.executeRequest((yield* tasks.claimExecution('worker-no-change'))!)
-      const noChangeRun = (yield* tasks.get(noChangeTaskId)).runs[0]!
-      expect(noChangeRun.state).toBe('succeeded')
-      yield* tasks.confirmRunWikiUnchanged({ taskId: noChangeTaskId, runId: noChangeRunId, expectedHead: noChangeRun.baselineCommit! })
-      expect((yield* tasks.get(noChangeTaskId)).task.summary).toMatchObject({ type: 'agent',
-        publication: { state: 'not-required' } })
     }).pipe(Effect.timeout('20 seconds')))
     await runtime.dispose()
     // Simulate process loss after Git receipts commit but before either summary update.
