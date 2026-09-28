@@ -2,7 +2,7 @@ import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { useEffect, useRef, useState } from 'react'
 import { v5 as uuidv5 } from 'uuid'
-import type { SaveRunWikiFiles, SaveTaskWikiFiles, WorkspaceDiffInput, WorkspaceChangesView, GitSyncOperation } from '../../../shared/git-change'
+import type { SaveRunWikiFiles, SaveTaskWikiFiles, WorkspaceDiffInput, WorkspaceChangesView, GitSyncOperation, GitConflictFile, WriteGitConflictResolution } from '../../../shared/git-change'
 import type { RunRecord } from '../../../shared/harness'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
@@ -49,7 +49,7 @@ function stableOperationId(prefix: string, operationId: string): string {
 }
 
 /** Explicitly saves selected Task wiki files; browsing and diffing never writes Git. */
-export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.Element {
+export function TaskWikiChangesPanel({ taskId, knowledge = false }: { taskId: string; knowledge?: boolean }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const intentKey = `folio:task-wiki-intent:${taskId}`
   const [persisted] = useState<TaskWikiIntent>(() => readTaskWikiIntent(intentKey))
@@ -100,6 +100,7 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     ? detail.value.runs.filter(run => run.sessionId === conflictSession.id && run.purpose === 'conflict-resolution').at(-1)
     : undefined
   const conflictActive = conflictRun !== undefined && ['queued', 'preparing', 'running'].includes(conflictRun.state)
+  const conflictFailed = conflictRun !== undefined && ['failed', 'interrupted', 'cancelled'].includes(conflictRun.state)
   useEffect(() => {
     if (!conflictActive) return
     const timer = setInterval(() => { refreshDetail(); refreshSynchronizations() }, 1000)
@@ -220,6 +221,10 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
     finally { syncInFlight.current = false; setPending(false); refresh(); refreshSynchronizations() }
   }
 
+  if (knowledge) return <KnowledgeWikiChanges taskId={taskId} operation={operation} view={view}
+    conflictActive={conflictActive} conflictFailed={conflictFailed} conflictSessionId={conflictSession?.id} conflictRunId={conflictRun?.id}
+    chinese={chinese} onRefresh={() => { refresh(); refreshSynchronizations(); refreshDetail() }} />
+
   return <section className="space-y-3 rounded-lg border bg-muted/15 p-3" aria-label={chinese ? '任务文件变更' : 'Task file changes'}>
     <div className="flex items-center justify-between gap-3">
       <p className="text-support text-muted-foreground">{chinese ? 'Task wiki 文件' : 'Task wiki files'}</p>
@@ -300,6 +305,113 @@ export function TaskWikiChangesPanel({ taskId }: { taskId: string }): React.JSX.
       conflictSessionId={conflictSession?.id} conflictRunId={conflictRun?.id} /> : null}
     {preview ? <TaskWikiDiff key={JSON.stringify(preview)} taskId={taskId} input={preview} onClose={() => setPreview(null)} /> : null}
   </section>
+}
+
+/** Knowledge publication is automatic; a person only chooses content after the conflict Agent stops. */
+function KnowledgeWikiChanges({ taskId, operation, view, conflictActive, conflictFailed, conflictSessionId, conflictRunId, chinese, onRefresh }: {
+  taskId: string; operation?: GitSyncOperation; view: WorkspaceChangesView | null;
+  conflictActive: boolean; conflictFailed: boolean; conflictSessionId?: string; conflictRunId?: string;
+  chinese: boolean; onRefresh: () => void
+}): React.JSX.Element {
+  return <section className="space-y-3 rounded-lg border bg-muted/15 p-3" aria-label={chinese ? '任务文件变更' : 'Task file changes'}>
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-support text-muted-foreground">{chinese ? '知识资产变更' : 'Knowledge changes'}</p>
+      <Button variant="ghost" size="sm" onClick={onRefresh}>{chinese ? '刷新' : 'Refresh'}</Button>
+    </div>
+    <p className="text-support text-muted-foreground">{chinese ? '知识 Task 的结果会自动校验并发布。' : 'Knowledge Task results are validated and published automatically.'}</p>
+    {view?.files.length ? <ul className="list-disc pl-5 text-support">{view.files.map(file => <li key={file.path}>{file.path}</li>)}</ul> : null}
+    {operation?.state === 'conflict' ? <>
+      <TaskWikiConflictDetails taskId={taskId} operationId={operation.id} conflictSessionId={conflictSessionId} conflictRunId={conflictRunId} />
+      {conflictFailed ? <KnowledgeConflictPicker key={operation.id} taskId={taskId} operationId={operation.id} chinese={chinese} onResolved={onRefresh} />
+        : <p role="status" className="text-support">{conflictActive
+          ? (chinese ? '冲突解决 Agent 正在运行。' : 'The conflict-resolution Agent is running.')
+          : (chinese ? '等待冲突解决 Agent 处理。' : 'Waiting for the conflict-resolution Agent.')}</p>}
+    </> : operation && ['prepared', 'published'].includes(operation.state)
+      ? <KnowledgePublicationResume taskId={taskId} operationId={operation.id} chinese={chinese} onResolved={onRefresh} />
+      : operation ? <p role="status" className="text-support">{chinese ? `发布状态：${operation.state}` : `Publication: ${operation.state}`}</p> : null}
+  </section>
+}
+
+/** Resume the same receipt when publishing or recording completion was interrupted. */
+function KnowledgePublicationResume({ taskId, operationId, chinese, onResolved }: {
+  taskId: string; operationId: string; chinese: boolean; onResolved: () => void
+}): React.JSX.Element {
+  const resolve = useAtomSet(TaskRpcClient.resolveTaskWikiConflict, { mode: 'promise' })
+  const [pending, setPending] = useState(false)
+  const [failed, setFailed] = useState(false)
+  async function resume(): Promise<void> {
+    if (pending) return
+    setPending(true); setFailed(false)
+    try { await resolve({ payload: { taskId, id: operationId } }); onResolved() }
+    catch { setFailed(true) }
+    finally { setPending(false) }
+  }
+  return <div className="space-y-2"><Button size="sm" disabled={pending} onClick={() => void resume()}>
+    {chinese ? '继续发布' : 'Continue publication'}</Button>
+    {failed ? <p role="alert" className="text-support text-destructive">{chinese ? '发布尚未完成，请重试。' : 'Publication did not finish. Retry the same operation.'}</p> : null}
+  </div>
+}
+
+/** Retains the exact chosen text across a lost response, then retries the same conflict receipt. */
+function KnowledgeConflictPicker({ taskId, operationId, chinese, onResolved }: {
+  taskId: string; operationId: string; chinese: boolean; onResolved: () => void
+}): React.JSX.Element {
+  const query = TaskRpcClient.query('tasks.wikiConflictFiles', { taskId, id: operationId })
+  const result = useAtomValue(query)
+  const refresh = useAtomRefresh(query)
+  const write = useAtomSet(TaskRpcClient.writeTaskWikiConflictResolution, { mode: 'promise' })
+  const resolve = useAtomSet(TaskRpcClient.resolveTaskWikiConflict, { mode: 'promise' })
+  const [choices, setChoices] = useState<Record<string, string>>({})
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [request, setRequest] = useState<WriteGitConflictResolution | null>(null)
+  const [phase, setPhase] = useState<'write' | 'resolve'>('write')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const files = result._tag === 'Success' ? result.value as readonly GitConflictFile[] : []
+  const complete = files.length > 0 && files.every(file => Object.hasOwn(drafts, file.path))
+
+  async function submit(): Promise<void> {
+    if (pending || (!request && !complete)) return
+    const [first, ...rest] = files.map(file => ({ path: file.path, content: drafts[file.path]! }))
+    const selected = request ?? { taskId, operationId, files: [first!, ...rest] }
+    setRequest(selected); setPending(true); setError('')
+    try {
+      if (phase === 'write') {
+        await write({ payload: { input: selected } })
+        setPhase('resolve')
+      }
+      const settled = await resolve({ payload: { taskId, id: operationId } })
+      if (settled.state !== 'completed') throw new Error('Publication still has a conflict')
+      setRequest(null); onResolved()
+    } catch { setError(chinese ? '合并尚未完成，已保留选择。请检查内容后重试。' : 'Merge did not finish. Your choices are retained; review them and retry.') }
+    finally { setPending(false) }
+  }
+
+  if (result._tag !== 'Success') return <p role="status" className="text-support">{result._tag === 'Failure'
+    ? (chinese ? '无法读取冲突文件。' : 'Could not load conflicting files.') : (chinese ? '正在读取冲突文件…' : 'Loading conflicting files…')}</p>
+  return <div className="space-y-3 rounded-lg border p-3">
+    <p className="text-ui font-medium">{chinese ? '选择最终保留的内容' : 'Choose the final content'}</p>
+    {files.map(file => <div key={file.path} className="space-y-2 rounded border p-2">
+      <p className="break-all text-support font-medium">{file.path}</p>
+      <div className="flex flex-wrap gap-2">{([
+        ['main', file.canonical], ['Task', file.task], ['working', file.working]
+      ] as const).map(([label, content]) => content === null ? null : <Button key={label} variant="outline" size="sm" disabled={pending || request !== null}
+        onClick={() => { setChoices(current => ({ ...current, [file.path]: label })); setDrafts(current => ({ ...current, [file.path]: content })) }}>
+        {chinese ? `保留 ${label}` : `Keep ${label}`}</Button>)}</div>
+      {choices[file.path] ? <p className="text-support text-muted-foreground">{chinese ? '已选择：' : 'Selected: '}{choices[file.path]}</p> : null}
+      <label className="block space-y-1 text-support"><span>{chinese ? '最终 Markdown（可编辑）' : 'Final Markdown (editable)'}</span>
+        <textarea aria-label={`${file.path} final content`} className="min-h-40 w-full rounded border bg-background p-2 font-mono text-xs"
+          disabled={pending || request !== null} value={drafts[file.path] ?? ''}
+          onChange={event => { setChoices(current => ({ ...current, [file.path]: 'edited' })); setDrafts(current => ({ ...current, [file.path]: event.target.value })) }} />
+      </label>
+    </div>)}
+    <div className="flex gap-2"><Button size="sm" disabled={pending || (!request && !complete)} onClick={() => void submit()}>
+      {pending ? (chinese ? '正在合并…' : 'Merging…') : request ? (chinese ? '重试合并' : 'Retry merge') : (chinese ? '完成合并' : 'Complete merge')}
+    </Button>{request ? <Button variant="outline" size="sm" disabled={pending} onClick={() => { setRequest(null); setPhase('write'); setError('') }}>
+      {chinese ? '修改选择' : 'Edit choices'}</Button> : null}
+      <Button variant="ghost" size="sm" disabled={pending} onClick={refresh}>{chinese ? '刷新文件' : 'Refresh files'}</Button></div>
+    {error ? <p role="alert" className="text-support text-destructive">{error}</p> : null}
+  </div>
 }
 
 /** Displays bounded, non-sensitive conflict evidence without exposing the coordinator path. */

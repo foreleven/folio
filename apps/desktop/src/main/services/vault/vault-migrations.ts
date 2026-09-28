@@ -18,13 +18,18 @@ export const migrateVault = SqliteMigrator.run({
       )`
       yield* sql`CREATE INDEX wiki_pages_by_type ON wiki_pages(object_type)`
       yield* sql`CREATE INDEX wiki_pages_by_parent ON wiki_pages(parent_id)`
+      yield* sql`CREATE TABLE links (
+        source_id TEXT NOT NULL REFERENCES wiki_pages(id), target_id TEXT NOT NULL,
+        PRIMARY KEY(source_id, target_id)
+      )`
+      yield* sql`CREATE INDEX links_by_target ON links(target_id, source_id)`
 
       // Routine definitions own editable triggers; schedule rows freeze actual windows.
       yield* sql`CREATE TABLE routines (
         id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
         type TEXT NOT NULL CHECK(type IN ('agent', 'ingestion')),
         configuration TEXT NOT NULL CHECK(json_valid(configuration)),
-        trigger TEXT NOT NULL CHECK(json_valid(trigger) AND json_extract(trigger, '$.type')='schedule'),
+        trigger TEXT NOT NULL CHECK(json_valid(trigger) AND json_extract(trigger, '$.type') IN ('schedule', 'event')),
         enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
         revision INTEGER NOT NULL CHECK(revision > 0), next_trigger_at INTEGER,
         last_trigger_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -32,6 +37,8 @@ export const migrateVault = SqliteMigrator.run({
       yield* sql`CREATE UNIQUE INDEX routines_one_ingestion_resource
         ON routines(json_extract(configuration, '$.integrationId'), json_extract(configuration, '$.resourceId'))
         WHERE type='ingestion'`
+      yield* sql`CREATE UNIQUE INDEX routines_one_raw_intake ON routines(json_extract(trigger, '$.signal'))
+        WHERE json_extract(trigger, '$.type')='event'`
 
       // Branch and worktree paths are deterministic from the Task id and therefore are not data.
       yield* sql`CREATE TABLE tasks (

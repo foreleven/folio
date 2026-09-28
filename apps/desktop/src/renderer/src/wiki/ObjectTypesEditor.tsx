@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { Button } from '@folio/ui/components/ui/button'
-import type { ObjectType, PropertyKind } from '../../../shared/wiki'
-const kinds: PropertyKind[] = ['text', 'number', 'checkbox', 'date', 'url', 'select', 'multi-select', 'relation']
+import type { ObjectType, OptionColor, PropertyKind, StatusGroup } from '../../../shared/wiki'
+const kinds: PropertyKind[] = ['text', 'number', 'checkbox', 'date', 'datetime', 'url', 'email', 'phone', 'select', 'multi-select', 'status']
+const colors: OptionColor[] = ['default', 'gray', 'brown', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'red']
+const groups: StatusGroup[] = ['not_started', 'in_progress', 'complete']
 const fieldClass = 'rounded border bg-background px-2 py-1.5 text-sm'
 
 export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
@@ -10,6 +12,7 @@ export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
   const [types, setTypes] = useState(initial)
   const [selected, setSelected] = useState(initial[0]!.id)
   const [name, setName] = useState('')
+  const [newKind, setNewKind] = useState<PropertyKind>('text')
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const current = types.find(type => type.id === selected)!
@@ -20,7 +23,7 @@ export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
       <Button disabled={pending} onClick={async () => { setPending(true); setError(''); try { await onSave(types); onClose() } catch (error) { setError(String(error)) } finally { setPending(false) } }}>{chinese ? '保存类型' : 'Save types'}</Button>
     </header>
     <fieldset disabled={pending} className="space-y-6">
-    <p className="text-sm text-muted-foreground">{chinese ? '为不同的知识定义属性。修改类型不会删除已有的属性值。' : 'Define properties for each kind of knowledge. Existing property values are retained when a type changes.'}</p>
+    <p className="text-sm text-muted-foreground">{chinese ? '属性的键和类型创建后保持不变；使用中的选项和属性不能删除。' : 'Property keys and kinds stay fixed after creation. Options and properties in use cannot be removed.'}</p>
     <div className="flex flex-wrap gap-2">{types.map(type => <Button key={type.id} variant={type.id === selected ? 'secondary' : 'ghost'} onClick={() => setSelected(type.id)}>{type.icon} {type.name}</Button>)}</div>
     <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (!name.trim()) return; const id = `type_${crypto.randomUUID().slice(0, 8)}`; setTypes([...types, { id, name: name.trim(), icon: '📄', properties: [] }]); setSelected(id); setName('') }}>
       <input aria-label={chinese ? '新类型名称' : 'New type name'} className={fieldClass} value={name} onChange={event => setName(event.target.value)} placeholder={chinese ? '例如：读书笔记' : 'For example: Book'} />
@@ -34,15 +37,20 @@ export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
       </div>
       <div className="mt-5 space-y-3">{current.properties.map((field, index) => <div key={field.key} className="flex flex-wrap items-center gap-2 border-t pt-3">
         <input className={fieldClass} aria-label={`${chinese ? '属性名称' : 'Property name'} ${index + 1}`} value={field.name} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, name: event.target.value } : item) })} />
-        <select className={fieldClass} aria-label={`${chinese ? '属性类型' : 'Property kind'} ${index + 1}`} value={field.kind} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, kind: event.target.value as PropertyKind } : item) })}>
-          {kinds.map(kind => <option key={kind}>{kind}</option>)}
-        </select>
-        {['select', 'multi-select'].includes(field.kind) && <input className={`${fieldClass} min-w-40 flex-1`} aria-label={`${chinese ? '选项' : 'Options'} ${index + 1}`} placeholder={chinese ? '选项，以逗号分隔' : 'Comma-separated options'} value={field.options.join(', ')}
-          onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: event.target.value.split(',').map(item => item.trim()) } : item) })}
-          onBlur={() => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: [...new Set(item.options.filter(Boolean))] } : item) })} />}
+        <span className="rounded bg-muted px-2 py-1 text-xs">{field.kind}</span>
         <Button variant="ghost" onClick={() => update({ ...current, properties: current.properties.filter(item => item.key !== field.key) })}>{chinese ? '移除' : 'Remove'}</Button>
+        {['select', 'multi-select', 'status'].includes(field.kind) && <div className="w-full space-y-2 pl-2">
+          {field.options.map(option => <div key={option.id} className="flex flex-wrap items-center gap-2">
+            <input className={fieldClass} aria-label={`${field.name} option ${option.id}`} value={option.name} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: item.options.map(candidate => candidate.id === option.id ? { ...candidate, name: event.target.value } : candidate) } : item) })} />
+            <select className={fieldClass} aria-label={`${field.name} color ${option.id}`} value={option.color ?? 'default'} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: item.options.map(candidate => candidate.id === option.id ? { ...candidate, color: event.target.value as OptionColor } : candidate) } : item) })}>{colors.map(color => <option key={color} value={color}>{color}</option>)}</select>
+            {field.kind === 'status' && <select className={fieldClass} aria-label={`${field.name} group ${option.id}`} value={option.group ?? 'not_started'} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: item.options.map(candidate => candidate.id === option.id ? { ...candidate, group: event.target.value as StatusGroup } : candidate) } : item) })}>{groups.map(group => <option key={group} value={group}>{group}</option>)}</select>}
+            <Button variant="ghost" onClick={() => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: item.options.filter(candidate => candidate.id !== option.id) } : item) })}>{chinese ? '删除选项' : 'Remove option'}</Button>
+          </div>)}
+          <Button variant="outline" onClick={() => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, options: [...item.options, { id: `option_${crypto.randomUUID().slice(0, 8)}`, name: chinese ? '新选项' : 'New option', ...(field.kind === 'status' ? { group: 'not_started' as const } : {}) }] } : item) })}>{chinese ? '添加选项' : 'Add option'}</Button>
+        </div>}
       </div>)}</div>
-      <Button variant="outline" className="mt-4" onClick={() => update({ ...current, properties: [...current.properties, { key: `field_${crypto.randomUUID().slice(0, 8)}`, name: chinese ? '新属性' : 'New property', kind: 'text', options: [] }] })}>{chinese ? '添加属性' : 'Add property'}</Button>
+      <div className="mt-4 flex gap-2"><select className={fieldClass} aria-label={chinese ? '新属性类型' : 'New property kind'} value={newKind} onChange={event => setNewKind(event.target.value as PropertyKind)}>{kinds.map(kind => <option key={kind}>{kind}</option>)}</select>
+      <Button variant="outline" onClick={() => update({ ...current, properties: [...current.properties, { key: `field_${crypto.randomUUID().slice(0, 8)}`, name: chinese ? '新属性' : 'New property', kind: newKind, options: [] }] })}>{chinese ? '添加属性' : 'Add property'}</Button></div>
     </div>
     </fieldset>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}

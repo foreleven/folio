@@ -12,6 +12,7 @@ import { expect, it, vi } from 'vitest'
 import { VaultRuntime } from './vault-runtime'
 import { VaultContext } from './vault-context'
 import { TaskService } from '../tasks/task-service'
+import { WikiService } from '../../../shared/wiki-service'
 import { ConfigService } from '../config/config-service'
 import { VaultService } from './vault-service'
 import { AgentRuntime } from '../agent/agent-runtime'
@@ -92,14 +93,15 @@ it('creates one hourly IMAP Ingestion Routine after the resource is ready and pr
       yield* tasks.ensureDefaultRoutine
       yield* tasks.ensureDefaultRoutine
       const routines = yield* tasks.routines
-      expect(routines).toHaveLength(1)
-      expect(routines[0]).toMatchObject({ type: 'ingestion', configuration: { integrationId: 'imap', resourceId: 'email' }, trigger: { type: 'schedule', intervalMinutes: 60 } })
-      const routine = routines[0]!
+      expect(routines).toHaveLength(2)
+      expect(routines.find(item => item.type === 'agent')).toMatchObject({ trigger: { type: 'event', signal: 'raws-changed' } })
+      expect(routines.find(item => item.type === 'ingestion')).toMatchObject({ type: 'ingestion', configuration: { integrationId: 'imap', resourceId: 'email' }, trigger: { type: 'schedule', intervalMinutes: 60 } })
+      const routine = routines.find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') throw new Error('Expected Ingestion Routine')
       yield* tasks.saveRoutine({ id: routine.id, expectedRevision: routine.revision, enabled: false, name: 'My mailbox',
         type: routine.type, configuration: routine.configuration, trigger: routine.trigger })
       yield* tasks.ensureDefaultRoutine
-      expect(yield* tasks.routines).toMatchObject([{ name: 'My mailbox', enabled: false }])
+      expect((yield* tasks.routines).find(item => item.type === 'ingestion')).toMatchObject({ name: 'My mailbox', enabled: false })
     }))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 })
@@ -146,7 +148,7 @@ it('executes Ingestion without a Session and records changed raws at the canonic
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       vaultId = vault.id
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -171,8 +173,161 @@ it('executes Ingestion without a Session and records changed raws at the canonic
           integration_id: 'imap', resource_id: 'email', path: expect.stringMatching(/^raws\/imap\/email\/\d{4}-\d{2}-\d{2}\/message\.md$/),
           state: 'present', current_commit: expect.any(String)
         }])
+        const intake = database.prepare(`SELECT configuration FROM tasks WHERE type='agent'
+          AND json_extract(configuration, '$.rawInput.toCommit') IS NOT NULL`).all()
+        expect(intake).toHaveLength(1)
+        expect(JSON.parse(String((intake[0] as { configuration: string }).configuration)).rawInput)
+          .toMatchObject({ fromCommit: null, toCommit: expect.any(String) })
       } finally { database.close() }
     })
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it.skipIf(process.platform === 'win32')('completes a Knowledge Task with no Wiki changes and keeps its raw checkpoint', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-knowledge-unchanged-')))
+  const original = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
+  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${original.replace('id: "native-thread"', 'id: process.cwd()')}`, { mode: 0o700 })
+  const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+    entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
+  }) }), [readyImap()], (_integrationId, _resourceId, output) => Effect.promise(async () => {
+    await mkdir(output, { recursive: true })
+    await writeFile(join(output, 'message.md'), '# Evidence\n')
+  }))
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const context = yield* (yield* VaultRuntime).open(vault.id)
+      const tasks = Context.get(context, TaskService)
+      const directory = Context.get(context, VaultContext).directory
+      const ingestion = (yield* tasks.routines).find(item => item.type === 'ingestion')!
+      yield* tasks.saveRoutine({ id: ingestion.id, name: ingestion.name, type: 'ingestion',
+        configuration: ingestion.configuration, trigger: { type: 'schedule', intervalMinutes: 60,
+          timeZone: nearMidnightTimeZone() }, enabled: true, expectedRevision: ingestion.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: ingestion.id })
+      yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      const exclude = join(directory, 'workspace', '.git', 'info', 'exclude')
+      yield* Effect.promise(async () => {
+        await mkdir(join(directory, 'workspace', '.git', 'info'), { recursive: true })
+        await writeFile(exclude, `${await readFile(exclude, 'utf8').catch(() => '')}\n*.json\n`)
+      })
+      let knowledge = (yield* tasks.list).find(task => task.type === 'agent' && task.configuration.rawInput)
+      for (let index = 0; !knowledge && index < 100; index++) {
+        yield* Effect.sleep(20)
+        knowledge = (yield* tasks.list).find(task => task.type === 'agent' && task.configuration.rawInput)
+      }
+      if (knowledge?.type !== 'agent' || !knowledge.configuration.rawInput) throw new Error('Expected Knowledge Task')
+      const checkpoint = knowledge.configuration.rawInput.toCommit
+      const request = yield* tasks.claimExecution('knowledge-unchanged-test')
+      expect(request?.taskId).toBe(knowledge.id)
+      yield* tasks.executeRequest(request!)
+      expect((yield* tasks.get(knowledge.id)).task).toMatchObject({ state: 'completed',
+        summary: { publication: { state: 'not-required' } } })
+      yield* tasks.tickRoutines
+      const knowledgeTasks = (yield* tasks.list).filter(task => task.type === 'agent' && task.configuration.rawInput)
+      expect(knowledgeTasks).toHaveLength(1)
+      expect(knowledgeTasks[0]?.type === 'agent' ? knowledgeTasks[0].configuration.rawInput?.toCommit : null).toBe(checkpoint)
+      const database = new DatabaseSync(join(directory, 'data.db'))
+      try { expect(database.prepare('SELECT id FROM git_operations WHERE task_id=?').all(knowledge.id)).toEqual([]) }
+      finally { database.close() }
+    }).pipe(Effect.timeout('20 seconds')))
+  } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
+}, 25_000)
+
+it.skipIf(process.platform === 'win32').each([
+  { invalidField: 'citation', expectedIssue: 'New knowledge Pages need a pinned raw citation' },
+  { invalidField: 'icon', expectedIssue: 'Expected string' }
+])('publishes a Knowledge Page after repairing $invalidField and completes its frozen Task', async ({ invalidField, expectedIssue }) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-knowledge-intake-')))
+  const original = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
+  const fixture = original.replace('id: "native-thread"', 'id: process.cwd()')
+    .replace('const turn = { id: `turn-${++turnNumber}`', 'const turn = { id: `turn-${process.pid}-${++turnNumber}`').replace(
+    'const mode = params.input[0].text;',
+    `const mode = params.input[0].text;
+    if (mode.startsWith('Organize the frozen raw input') || mode.startsWith('Continue the interrupted Knowledge intake') || mode.startsWith('Repair the complete Wiki result')) {
+      const commit = /Raw toCommit: ([a-f0-9]+)/.exec(mode)?.[1];
+      const path = /Raw paths:\\n- (raws\\/[^\\n]+)/.exec(mode)?.[1];
+      if (!commit || !path) throw new Error('Missing frozen raw input');
+      const citation = mode.startsWith('Repair the complete Wiki result') ? '[source](folio-raw:' + commit + '/' + path + ')\\n' : '';
+      const icon = ${invalidField === 'icon'} && !mode.startsWith('Repair the complete Wiki result') ? 'icon: null\\n' : '';
+      writeFileSync('wiki/asset.md', '---\\nid: asset\\ntitle: Asset\\nobjectType: note\\nproperties: {}\\ncreatedAt: 2026-09-24T00:00:00.000Z\\nupdatedAt: 2026-09-24T00:00:00.000Z\\ncover: null\\n' + icon + '---\\n# Asset\\n\\n' + citation);
+    }`
+  )
+  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${fixture}`, { mode: 0o700 })
+  const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
+    entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
+  }) }), [readyImap()], (_integrationId, _resourceId, output) => Effect.promise(async () => {
+    await mkdir(output, { recursive: true })
+    await writeFile(join(output, 'message.md'), '# Evidence\n')
+  }))
+  try {
+    await mkdir(join(root, 'vault'))
+    await runtime.runPromise(Effect.gen(function* () {
+      const vault = yield* (yield* VaultService).register(join(root, 'vault'))
+      const context = yield* (yield* VaultRuntime).open(vault.id)
+      const tasks = Context.get(context, TaskService)
+      const directory = Context.get(context, VaultContext).directory
+      const ingestion = (yield* tasks.routines).find(item => item.type === 'ingestion')!
+      yield* tasks.saveRoutine({ id: ingestion.id, name: ingestion.name, type: 'ingestion',
+        configuration: ingestion.configuration, trigger: { type: 'schedule', intervalMinutes: 60,
+          timeZone: nearMidnightTimeZone() }, enabled: true, expectedRevision: ingestion.revision })
+      const submitted = yield* tasks.runRoutine({ routineId: ingestion.id })
+      const ingested = yield* waitForIngestion(tasks, submitted.task.id, new Set(['succeeded']))
+      expect(ingested.summary).toMatchObject({ type: 'ingestion', rawsChanged: true })
+      // The transport fixture writes diagnostic JSON files. Keep those outside the
+      // result set that the Knowledge validator inspects.
+      yield* Effect.promise(async () => {
+        const exclude = join(directory, 'workspace', '.git', 'info', 'exclude')
+        await mkdir(join(directory, 'workspace', '.git', 'info'), { recursive: true })
+        const previous = await readFile(exclude, 'utf8').catch(() => '')
+        await writeFile(exclude, `${previous}\n*.json\n`)
+      })
+      let knowledge = (yield* tasks.list).find(task => task.type === 'agent' && task.configuration.rawInput)
+      for (let index = 0; !knowledge && index < 100; index++) {
+        yield* Effect.sleep(20)
+        knowledge = (yield* tasks.list).find(task => task.type === 'agent' && task.configuration.rawInput)
+      }
+      expect(knowledge).toBeDefined()
+      if (knowledge?.type !== 'agent' || !knowledge.configuration.rawInput) throw new Error('Expected Knowledge Task')
+      const frozenInput = knowledge.configuration.rawInput
+      const initialRun = (yield* tasks.get(knowledge.id)).runs.at(-1)!
+      expect(initialRun.prompt).toContain('cover may be a URL string or null')
+      yield* tasks.cancelRun(knowledge.id, initialRun.id)
+      expect(yield* tasks.startRun({ id: randomUUID(), taskId: knowledge.id, sessionId: initialRun.sessionId,
+        prompt: 'Unscoped work', purpose: 'execution', resumesRunId: null }).pipe(Effect.flip))
+        .toMatchObject({ reason: 'invalid-state' })
+      const retryInput = { taskId: knowledge.id, previousRunId: initialRun.id, retryRunId: randomUUID() }
+      const retried = yield* tasks.retryKnowledgeRun(retryInput)
+      expect(retried).toMatchObject({ purpose: 'recovery', resumesRunId: initialRun.id, state: 'queued' })
+      expect((yield* tasks.retryKnowledgeRun(retryInput)).id).toBe(retried.id)
+      const retainedTask = (yield* tasks.get(knowledge.id)).task
+      expect(retainedTask.type === 'agent' ? retainedTask.configuration.rawInput : null).toEqual(frozenInput)
+      const request = yield* tasks.claimExecution('knowledge-test')
+      expect(request?.id).toBe(retried.id)
+      yield* tasks.executeRequest(request!)
+      const repair = yield* tasks.claimExecution('knowledge-repair-test')
+      expect(repair).toMatchObject({ taskId: knowledge.id, purpose: 'execution', state: 'preparing' })
+      expect(repair?.prompt).toContain(expectedIssue)
+      expect(repair?.prompt).not.toContain('Could not access Vault tasks')
+      if (invalidField === 'icon') expect(repair?.prompt).toContain('["icon"]')
+      expect(repair?.prompt).toContain(`Raw toCommit: ${frozenInput.toCommit}`)
+      yield* tasks.executeRequest(repair!)
+      const completed = (yield* tasks.get(knowledge.id)).task
+      expect(completed).toMatchObject({ state: 'completed', worktreeState: 'released',
+        summary: { publication: { state: 'completed', saveOperationId: null,
+          synchronizationId: `knowledge-${knowledge.id}` } } })
+      expect((yield* tasks.retryKnowledgeRun(retryInput)).id).toBe(retried.id)
+      const asset = yield* Effect.promise(() => readFile(join(directory, 'workspace/wiki/asset.md'), 'utf8'))
+      expect(asset).toContain(`[source](folio-raw:${knowledge.configuration.rawInput.toCommit}/`)
+      const citation = /\]\((folio-raw:[^)]+)\)/.exec(asset)?.[1]
+      expect(citation).toBeDefined()
+      expect(yield* Context.get(context, WikiService).rawCitation(citation!)).toMatchObject({
+        kind: 'file', commit: knowledge.configuration.rawInput.toCommit, content: '# Evidence\n'
+      })
+      const database = new DatabaseSync(join(directory, 'data.db'))
+      try { expect(database.prepare('SELECT kind FROM git_operations WHERE task_id=?').all(knowledge.id))
+        .toMatchObject([{ kind: 'synchronize' }]) } finally { database.close() }
+    }).pipe(Effect.timeout('20 seconds')))
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }, 25_000)
 
@@ -186,7 +341,7 @@ it('advances a no-change Ingestion window without creating a raw row', async () 
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       vaultId = vault.id
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -220,7 +375,7 @@ it('retries a failed Ingestion attempt on the same Task and exact window', async
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -246,7 +401,7 @@ it('cancels a running Ingestion without advancing its window', async () => {
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -279,7 +434,7 @@ it('rejects provider writes outside the exact dated raw namespace', async () => 
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -312,7 +467,7 @@ it('retries a retained Ingestion conflict without invoking the provider again', 
     await runtime.runPromise(Effect.gen(function* () {
       const vault = yield* (yield* VaultService).register(join(root, 'vault'))
       const tasks = Context.get(yield* (yield* VaultRuntime).open(vault.id), TaskService)
-      const routine = (yield* tasks.routines)[0]!
+      const routine = (yield* tasks.routines).find(item => item.type === 'ingestion')!
       if (routine.type !== 'ingestion') return yield* Effect.die(new Error('Expected Ingestion Routine'))
       yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
         trigger: { ...routine.trigger, timeZone: nearMidnightTimeZone() }, enabled: routine.enabled, expectedRevision: routine.revision })
@@ -407,8 +562,8 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
           trigger: { type: 'schedule', intervalMinutes: 60, timeZone: 'UTC' },
           enabled: false
         })
-        expect(yield* tasks.routines).toHaveLength(1)
-        expect(yield* Context.get(second, TaskService).routines).toHaveLength(0)
+        expect(yield* tasks.routines).toHaveLength(2)
+        expect(yield* Context.get(second, TaskService).routines).toHaveLength(1)
         const taskId = '22222222-2222-4222-8222-222222222222'
         const sessionId = '33333333-3333-4333-8333-333333333333'
         const runId = '44444444-4444-4444-8444-444444444444'
@@ -432,7 +587,7 @@ it('builds reusable isolated Vault services without starting an Agent', async ()
         expect(failed.runs).toMatchObject([{ state: 'failed', baselineCommit: null }])
         expect(failed.task.summary).toMatchObject({ type: 'agent', runId, outcome: 'failed', discovery: null })
         expect(yield* tasks.claimExecution('next-worker')).toBeNull()
-        const routine = (yield* tasks.routines)[0]!
+        const routine = (yield* tasks.routines).find(item => item.id === '11111111-1111-4111-8111-111111111111')!
         if (routine.type !== 'agent') throw new Error('Expected Agent Routine')
         yield* tasks.saveRoutine({ id: routine.id, name: routine.name, type: routine.type, configuration: routine.configuration,
           trigger: routine.trigger, expectedRevision: routine.revision, enabled: true })

@@ -7,17 +7,22 @@ drafts: only files published into the main Wiki appear in the knowledge library.
 
 New Pages have a UUID `id`, `title`, `objectType`, nullable `parentId`, `icon`,
 `cover`, `favorite`, `trashed`, ISO `createdAt` and `updatedAt`, and a `properties`
-mapping. Parent relationships use IDs so renaming a title does not break the tree.
+mapping. `cover` is a URL string or `null` when absent. Parent relationships use IDs so renaming a title does not break the tree.
 New files use `<id>.md`; imported Markdown may live in nested directories. Plain
 Markdown is also a Page: file-derived metadata is materialized on its first edit.
 This is the Markdown import contract, not a historical database migration.
 
 ObjectTypes are versioned in `wiki/_types.json` and indexed in SQLite. Types
 declare named properties with stable keys, kinds (text, number, checkbox, date,
-URL, select, multi-select, relation), and select options. Relations hold Page IDs.
-Default types are Page, Note, Project, Person, and Meeting. The UI can create and
+datetime, URL, email, phone, select, multi-select, status), and stable option IDs.
+Page relationships use Markdown links such as `[Project](folio-page:<pageId>)`;
+the rebuildable `links` table indexes their source and target IDs. Default types
+are Page, Note, Project, Person, Organization, Meeting, Decision, and Event. The UI can create and
 edit types. Removed fields retain their values in frontmatter; they are never
 silently discarded. Invalid known field values prevent saving.
+Project Pages show a timeline derived from linked Meeting, Decision, and Event
+Pages with `occurredAt`. The timeline sorts instants while displaying each
+Page's authored timezone offset; it is not copied into the Project file.
 
 The library includes a nested page menu, favorites, recent pages, trash, search,
 and type-specific table views with filtering and sorting. A Page has editable
@@ -37,8 +42,18 @@ Writes share the existing Vault Git write gate and check the file content hash
 seen by the editor. Concurrent external/Agent changes return a conflict instead
 of being overwritten. A successful editor save also records that file through the existing Git save
 journal, so new Tasks see the latest Pages and ObjectTypes. Unrelated disk edits
-remain in File Changes; Routine output continues through the existing
-review/save/synchronize flow.
+remain in File Changes. Raw knowledge intake publishes its validated aggregate
+Wiki result automatically through one durable Git operation.
+The built-in Raw knowledge intake Routine freezes a Git raw range in each Agent
+Task. Its Pages cite evidence as `folio-raw:<toCommit>/<raw-path>` with an optional
+URL-encoded record ID fragment. Folio validates its complete Wiki result before
+publishing it automatically; invalid output goes back to the same Agent for repair.
+Following a raw citation in the editor reads that exact canonical Git blob. A citation for a
+deleted raw path shows the deletion diff and prior content from its frozen Task
+range; later daily raw updates do not change the cited evidence.
+Successful publication or a durable no-change result completes the Task and
+advances the checkpoint inferred from that Task's frozen `toCommit`.
+
 Indexing rereads canonical Markdown, reports malformed files separately, and
 removes deleted file entries. A single bad Page must not hide the rest of the Wiki.
 

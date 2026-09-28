@@ -10,8 +10,9 @@ it('roundtrips Page metadata and Markdown through the actual RPC schema without 
   let saved: SavePage | undefined
   const handlers = WikiRpcHandlersLive.pipe(Layer.provideMerge(Layer.succeed(WikiMiddleware)(effect => effect.pipe(
     Effect.provideService(WikiService, {
-      snapshot: Effect.succeed({ pages: [], objectTypes: defaultObjectTypes, typesVersion: '', issues: [] }),
-      read: () => Effect.die('unused'), saveTypes: () => Effect.die('unused'),
+    snapshot: Effect.succeed({ pages: [], objectTypes: defaultObjectTypes, typesVersion: '', issues: [] }),
+    refresh: Effect.succeed({ pages: [], objectTypes: defaultObjectTypes, typesVersion: '', issues: [] }),
+      read: () => Effect.die('unused'), projectTimeline: () => Effect.succeed([]), rawCitation: () => Effect.die('unused'), saveTypes: () => Effect.die('unused'),
       save: input => Effect.sync(() => { saved = input; return { ...input.metadata, body: input.body, path: 'one.md', version: 'v1' } })
     })
   ))))

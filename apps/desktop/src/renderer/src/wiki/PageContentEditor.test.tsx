@@ -7,11 +7,16 @@ afterEach(cleanup)
 describe('Markdown-backed rich content', () => {
   it('renders headings, task items, links and tables without rewriting source on mount', async () => {
     const changed = vi.fn()
-    const value = '# Heading\n\n**Strong** and [Reference](https://example.com) and [Page](folio-page:one)\n\n- [x] Done\n- [ ] Next\n\n| Name | Value |\n| --- | --- |\n| One | Two |'
-    render(<PageContentEditor value={value} onChange={changed} chinese={false} />)
+    const navigate = vi.fn()
+    const raw = `folio-raw:${'a'.repeat(40)}/raws/lark/im/2026-09-24/messages.md#message-1`
+    const value = `# Heading\n\n**Strong** and [Reference](https://example.com) and [Page](folio-page:one) and [Evidence](${raw})\n\n- [x] Done\n- [ ] Next\n\n| Name | Value |\n| --- | --- |\n| One | Two |`
+    render(<PageContentEditor value={value} onChange={changed} chinese={false} onNavigateLink={navigate} />)
     expect(await screen.findByRole('heading', { name: 'Heading' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Reference' }).getAttribute('href')).toBe('https://example.com')
     expect(screen.getByRole('link', { name: 'Page' }).getAttribute('href')).toBe('folio-page:one')
+    expect(screen.getByRole('link', { name: 'Evidence' }).getAttribute('href')).toBe(raw)
+    fireEvent.click(screen.getByRole('link', { name: 'Evidence' }), { metaKey: true })
+    expect(navigate).toHaveBeenCalledWith(raw)
     expect(screen.getByRole('table').textContent).toContain('One')
     expect(screen.getAllByRole('checkbox')).toHaveLength(2)
     expect(changed).not.toHaveBeenCalled()

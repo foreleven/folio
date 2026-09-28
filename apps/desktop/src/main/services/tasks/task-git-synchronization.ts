@@ -1,23 +1,27 @@
 import { Context, DateTime, Effect, FileSystem, Layer, Schema } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { ChildProcessSpawner } from 'effect/unstable/process'
-import { lstat } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { join, resolve as resolvePath } from 'node:path'
 import {
   GitConflictContext,
+  GitConflictFile,
   GitObjectId,
   ReprepareTaskWiki,
   SynchronizeTaskWiki,
+  WriteGitConflictResolution,
   type GitSyncOperation as GitSyncOperationValue
 } from '../../../shared/git-change'
 import { HarnessStoreError } from '../../../shared/harness'
 import { gitCommitData, gitCommitHash } from '../git/git-commit-object'
+import { snapshotGitChange } from '../git/git-change-snapshot'
 import { isRegisteredGitCommit } from '../git/git-change-applications'
 import { operationFilePath, readSyncOperationFile, SyncOperationFile, writeSyncOperationFile } from '../git/git-operation-files'
 import { withGitOperationGate } from '../git/git-operation-gate'
 import { makeVaultGit } from '../git/vault-git'
 import { HarnessStore } from '../harness/harness-store'
 import { routineDateAt } from '../../../shared/routine'
+import { writeWikiFile } from '../wiki/page-files'
 
 const OperationRow = Schema.Struct({
   sequence: Schema.Int,
@@ -52,10 +56,13 @@ export class TaskGitSynchronization extends Context.Service<
     readonly publish: (id: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly align: (id: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly synchronize: (input: SynchronizeTaskWiki) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
+    readonly publishKnowledge: (input: { readonly id: string; readonly taskId: string; readonly paths: readonly string[] }) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly reprepare: (input: ReprepareTaskWiki) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly resolve: (id: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly resolutionDirectory: (taskId: string, id: string) => Effect.Effect<string, HarnessStoreError>
     readonly resolutionContext: (taskId: string, id: string) => Effect.Effect<GitConflictResolutionContext, HarnessStoreError>
+    readonly resolutionFiles: (taskId: string, id: string) => Effect.Effect<readonly GitConflictFile[], HarnessStoreError>
+    readonly writeResolution: (input: WriteGitConflictResolution) => Effect.Effect<void, HarnessStoreError>
     readonly acceptAgentResolution: (taskId: string, id: string, runId: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly abort: (id: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
     readonly get: (id: string) => Effect.Effect<GitSyncOperationValue, HarnessStoreError>
@@ -107,6 +114,18 @@ export class TaskGitSynchronization extends Context.Service<
         })
 
         const saveArtifact = (value: SyncOperationFile) => writeSyncOperationFile(root, value)
+        const aggregateMatches = Effect.fn('TaskGitSynchronization.aggregateMatches')(function* (taskPath: string, value: SyncOperationFile) {
+          if (!value.aggregateCommit) return false
+          const paths = (yield* git(taskPath, ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+            value.sourceHead, value.aggregateCommit])).split('\0').filter(Boolean)
+          if (!paths.length) return false
+          const dirty = new Set((yield* git(taskPath, ['diff', '--name-only', '-z', value.sourceHead, '--'])).split('\0').filter(Boolean))
+          for (const path of (yield* git(taskPath, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)) dirty.add(path)
+          if (JSON.stringify([...dirty].sort()) !== JSON.stringify(paths.sort())) return false
+          const snapshot = yield* snapshotGitChange({ cwd: taskPath, parent: value.sourceHead,
+            paths: paths as [string, ...string[]] })
+          return snapshot.tree === (yield* git(taskPath, ['rev-parse', `${value.aggregateCommit}^{tree}`])).trim()
+        })
         const coordinatorPath = (id: string) => join(coordinatorParent, id)
         const resolutionPatchPath = (id: string) => join(operationFilePath(root, id).directory, 'resolution.patch')
 
@@ -160,6 +179,11 @@ export class TaskGitSynchronization extends Context.Service<
         })
 
         const updateRunStates = Effect.fn('TaskGitSynchronization.updateRunStates')(function* (value: SyncOperationFile, state: 'syncing' | 'conflict' | 'completed' | 'failed') {
+          if (value.aggregateCommit) {
+            yield* sql`UPDATE runs SET sync_state=${state} WHERE task_id=${value.taskId}
+              AND purpose<>'conflict-resolution' AND state='succeeded'`
+            return
+          }
           for (const commit of value.sourceCommits) {
             yield* sql`UPDATE runs SET sync_state=${state} WHERE id IN (
               SELECT owner.run_id FROM git_operations operation
@@ -206,8 +230,10 @@ export class TaskGitSynchronization extends Context.Service<
           const { taskPath } = yield* checkouts(row.taskId)
           if ((yield* git(taskPath, ['rev-parse', 'HEAD'])).trim() !== value.sourceHead) return yield* invalid()
           const mainHead = (yield* git(main, ['rev-parse', 'HEAD'])).trim()
-          if ((yield* git(main, ['status', '--porcelain', '--untracked-files=all'])).trim() ||
-            (yield* git(taskPath, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
+          if ((yield* git(main, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
+          if (value.aggregateCommit) {
+            if (!(yield* aggregateMatches(taskPath, value))) return yield* invalid()
+          } else if ((yield* git(taskPath, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
           if (mainHead !== value.mainBase) {
             yield* git(main, ['merge-base', '--is-ancestor', value.mainBase, mainHead]).pipe(Effect.mapError(invalid))
             if (!(yield* isRegisteredMain(mainHead))) return yield* invalid()
@@ -295,6 +321,7 @@ export class TaskGitSynchronization extends Context.Service<
             (yield* git(main, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
           const createdAt = yield* now
           const file: SyncOperationFile = { version: 1, id: value.id, taskId: value.taskId, sourceFrontier,
+            aggregateCommit: null,
             sourceHead, sourceCommits, mainBase, conflictKind: null, conflictIndex: null,
             resolutionTree: null, alignmentHead: null, createdAt }
           const artifactPath = yield* saveArtifact(file)
@@ -312,11 +339,63 @@ export class TaskGitSynchronization extends Context.Service<
           return row.state === 'pending' ? yield* prepareExisting(row) : row
         })
 
+        /** Freeze the complete dirty Wiki into this publication row; the Task branch stays at its baseline. */
+        const reserveKnowledge = Effect.fn('TaskGitSynchronization.reserveKnowledge')(function* (input: { readonly id: string; readonly taskId: string; readonly paths: readonly string[] }) {
+          const previous = yield* find(input.id)
+          if (previous) {
+            if (previous.taskId !== input.taskId ||
+              (previous.state !== 'completed' && !(yield* artifact(previous)).aggregateCommit)) return yield* invalid()
+            return previous
+          }
+          const { task, taskPath } = yield* checkouts(input.taskId)
+          if (task.type !== 'agent' || !task.configuration.rawInput || !task.worktreeBase) return yield* invalid()
+          const sourceHead = (yield* git(taskPath, ['rev-parse', 'HEAD'])).trim()
+          if (sourceHead !== task.worktreeBase || !input.paths.length ||
+            input.paths.some(path => !/^wiki\/(?!_types\.json$).+\.md$/.test(path))) return yield* invalid()
+          const snapshot = yield* snapshotGitChange({ cwd: taskPath, parent: sourceHead,
+            paths: input.paths as [string, ...string[]] })
+          if (JSON.stringify([...snapshot.changed].sort()) !== JSON.stringify([...input.paths].sort())) return yield* invalid()
+          const mainBase = (yield* git(main, ['rev-parse', 'HEAD'])).trim()
+          if (!(yield* isRegisteredMain(mainBase)) ||
+            (yield* git(main, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
+          const createdAt = yield* now
+          const data = gitCommitData({ tree: snapshot.tree, parent: sourceHead, createdAt,
+            message: `Knowledge Task result\n\nFolio-Operation-Id: ${input.id}\nFolio-Task-Id: ${input.taskId}\n` })
+          const format = yield* Schema.decodeUnknownEffect(Schema.Literals(['sha1', 'sha256']))((yield* git(main, ['rev-parse', '--show-object-format'])).trim())
+          const aggregateCommit = gitCommitHash(data, format)
+          if ((yield* git(main, ['hash-object', '-t', 'commit', '-w', '--stdin'], { input: data })).trim() !== aggregateCommit) return yield* invalid()
+          const ref = `refs/folio/operations/${input.id}/source`
+          const pinned = (yield* git(main, ['for-each-ref', '--format=%(objectname)', ref])).trim()
+          if (pinned && pinned !== aggregateCommit) return yield* invalid()
+          if (!pinned) yield* git(main, ['update-ref', '--no-deref', ref, aggregateCommit, '0'.repeat(aggregateCommit.length)])
+          const file: SyncOperationFile = { version: 1, id: input.id, taskId: input.taskId,
+            sourceFrontier: sourceHead, sourceHead, sourceCommits: [aggregateCommit], aggregateCommit,
+            mainBase, conflictKind: null, conflictIndex: null, resolutionTree: null, alignmentHead: null, createdAt }
+          const artifactPath = yield* saveArtifact(file)
+          yield* sql.withTransaction(Effect.gen(function* () {
+            yield* sql`INSERT INTO git_operations
+              (id, task_id, kind, state, source_commit, target_commit, artifact_path, created_at, updated_at)
+              VALUES (${input.id}, ${input.taskId}, 'synchronize', 'pending', ${sourceHead}, NULL, ${artifactPath}, ${createdAt}, ${createdAt})`
+            yield* updateRunStates(file, 'syncing')
+          }))
+          return (yield* find(input.id))!
+        })
+
         /** Rebuilds against a newer main and retries CAS instead of creating a durable database lock. */
         const publishLocked = Effect.fn('TaskGitSynchronization.publishLocked')(function* (id: string) {
           let row = yield* find(id)
           if (!row) return yield* new HarnessStoreError({ reason: 'not-found', message: 'Synchronization was not found.' })
           if (row.state === 'published' || row.state === 'completed') return row
+          // Synchronization rows also publish raws. Only Wiki intents participate in
+          // Wiki FIFO; a published receipt has already released its place, even if
+          // checkout alignment still needs recovery. The main Git gate serializes writes.
+          if ((yield* store.task(row.taskId)).type === 'agent') {
+            const earlier = yield* sql<{ id: string }>`SELECT operation.id FROM git_operations operation
+              JOIN tasks task ON task.id=operation.task_id
+              WHERE operation.kind='synchronize' AND task.type='agent'
+                AND operation.sequence<${row.sequence} AND operation.state IN ('pending', 'conflict', 'prepared') LIMIT 1`
+            if (earlier.length) return yield* new HarnessStoreError({ reason: 'task-busy', message: 'An earlier Wiki publication is still pending.' })
+          }
           for (let attempt = 0; attempt < 3; attempt += 1) {
             if (row.state === 'pending') row = yield* prepareExisting(row)
             if (row.state === 'conflict') return row
@@ -365,11 +444,26 @@ export class TaskGitSynchronization extends Context.Service<
           if (!(yield* isRegisteredMain(alignmentHead))) return yield* invalid()
           const taskHead = (yield* git(taskPath, ['rev-parse', 'HEAD'])).trim()
           if (taskHead !== value.sourceHead && taskHead !== row.targetCommit && taskHead !== alignmentHead) return yield* invalid()
-          if ((yield* git(taskPath, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
+          if (value.aggregateCommit) {
+            if (taskHead === value.sourceHead) {
+              if (!(yield* aggregateMatches(taskPath, value))) return yield* invalid()
+            } else {
+              const additions = new Set((yield* git(taskPath, ['diff', '--diff-filter=A', '--name-only', '-z',
+                value.sourceHead, value.aggregateCommit, '--', 'wiki'])).split('\0').filter(Boolean))
+              const untracked = (yield* git(taskPath, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)
+              if ((yield* git(taskPath, ['diff', '--name-only', '-z', 'HEAD'])).trim() ||
+                untracked.some(path => !additions.has(path))) return yield* invalid()
+            }
+          } else if ((yield* git(taskPath, ['status', '--porcelain', '--untracked-files=all'])).trim()) return yield* invalid()
           // Persist the exact reset destination first. A later main advance cannot make a
           // post-reset/pre-receipt crash ambiguous on retry.
           if (value.alignmentHead === null) yield* saveArtifact({ ...value, alignmentHead })
           if (taskHead !== alignmentHead) yield* git(taskPath, ['reset', '--hard', alignmentHead])
+          if (value.aggregateCommit) {
+            const additions = (yield* git(taskPath, ['diff', '--diff-filter=A', '--name-only', '-z',
+              value.sourceHead, value.aggregateCommit, '--', 'wiki'])).split('\0').filter(Boolean)
+            if (additions.length) yield* git(taskPath, ['--literal-pathspecs', 'clean', '-f', '--', ...additions])
+          }
           yield* sql.withTransaction(Effect.gen(function* () {
             const changed = yield* sql`UPDATE git_operations SET state='completed', target_commit=${alignmentHead}, artifact_path=NULL,
               updated_at=${yield* now} WHERE id=${row.id} AND state='published' RETURNING id`
@@ -493,6 +587,14 @@ export class TaskGitSynchronization extends Context.Service<
           return yield* align(row.id)
         }, Effect.mapError(storage))
 
+        const publishKnowledge = Effect.fn('TaskGitSynchronization.publishKnowledge')(function* (input: { readonly id: string; readonly taskId: string; readonly paths: readonly string[] }) {
+          const row = yield* withGitOperationGate(root, 'main', reserveKnowledge(input).pipe(Effect.provide(dependencies)))
+          let result = yield* publish(row.id)
+          if (result.state === 'conflict') return result
+          result = yield* align(row.id)
+          return result
+        }, Effect.mapError(storage))
+
         const reprepare = Effect.fn('TaskGitSynchronization.reprepare')(function* (input: typeof ReprepareTaskWiki.Type) {
           const value = yield* Schema.decodeUnknownEffect(ReprepareTaskWiki)(input, { onExcessProperty: 'error' })
           const old = yield* find(value.supersededId)
@@ -534,6 +636,59 @@ export class TaskGitSynchronization extends Context.Service<
           Effect.mapError(storage)
         )
 
+        /** Show complete file candidates so a failed Conflict Agent can hand off to a person. */
+        const resolutionFiles = Effect.fn('TaskGitSynchronization.resolutionFiles')(function* (taskId: string, id: string) {
+          const { value, coordinator } = yield* conflictCheckout(taskId, id)
+          const task = yield* store.task(taskId)
+          if (task.type !== 'agent' || !task.configuration.rawInput || !value.aggregateCommit) return yield* invalid()
+          const unresolved = (yield* git(coordinator, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean)
+          const staged = (yield* git(coordinator, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean)
+          // Include already staged choices when a previous write lost its response.
+          const paths = [...new Set([...unresolved, ...staged])].sort()
+          if (paths.some(path => !/^wiki\/(?!_types\.json$).+\.md$/.test(path))) return yield* invalid()
+          const source = value.conflictKind === 'source' && value.conflictIndex !== null
+            ? value.sourceCommits[value.conflictIndex] : null
+          const textAt = Effect.fnUntraced(function* (commit: string | null, path: string) {
+            if (!commit) return null
+            const exists = yield* git(coordinator, ['cat-file', '-e', `${commit}:${path}`]).pipe(
+              Effect.as(true), Effect.catch(() => Effect.succeed(false)))
+            if (!exists) return null
+            const content = yield* git(coordinator, ['show', `${commit}:${path}`])
+            if (Buffer.byteLength(content) > 256 * 1024) return yield* invalid()
+            return content
+          })
+          return yield* Effect.forEach(paths, path => Effect.gen(function* () {
+            const working = yield* Effect.tryPromise({ try: () => readFile(join(coordinator, path), 'utf8')
+              .catch(error => { if (error.code === 'ENOENT') return null; throw error }), catch: storage })
+            if (working !== null && Buffer.byteLength(working) > 256 * 1024) return yield* invalid()
+            const task = source ? yield* textAt(source, path) : yield* git(coordinator, ['show', `:3:${path}`]).pipe(
+              Effect.catch(() => Effect.succeed(null)))
+            if (task !== null && Buffer.byteLength(task) > 256 * 1024) return yield* invalid()
+            return { path, canonical: yield* textAt(value.mainBase, path), task, working }
+          }))
+        }, Effect.provide(dependencies), effect => withGitOperationGate(root, 'main', effect), Effect.mapError(storage))
+
+        /** Stage the user's complete selected content while retaining the same conflict row. */
+        const writeResolution = Effect.fn('TaskGitSynchronization.writeResolution')(function* (input: WriteGitConflictResolution) {
+          const selected = yield* Schema.decodeUnknownEffect(WriteGitConflictResolution)(input, { onExcessProperty: 'error' })
+          const { value, coordinator } = yield* conflictCheckout(selected.taskId, selected.operationId)
+          const task = yield* store.task(selected.taskId)
+          if (task.type !== 'agent' || !task.configuration.rawInput || !value.aggregateCommit ||
+            (yield* sql`SELECT id FROM runs WHERE task_id=${selected.taskId} AND state IN ('queued', 'preparing', 'running')`).length)
+            return yield* invalid()
+          const unresolved = (yield* git(coordinator, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean)
+          const staged = (yield* git(coordinator, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean)
+          const allowed = new Set([...unresolved, ...staged])
+          const paths = selected.files.map(file => file.path)
+          if (new Set(paths).size !== paths.length || unresolved.some(path => !paths.includes(path)) ||
+            paths.some(path => !allowed.has(path) || !/^wiki\/(?!_types\.json$).+\.md$/.test(path))) return yield* invalid()
+          for (const file of selected.files) {
+            yield* Effect.tryPromise({ try: () => writeWikiFile(join(coordinator, 'wiki'), file.path.slice('wiki/'.length), file.content), catch: storage })
+          }
+          yield* git(coordinator, ['--literal-pathspecs', 'add', '-A', '--', ...paths])
+          if ((yield* git(coordinator, ['diff', '--name-only', '--diff-filter=U', '-z'])).length) return yield* invalid()
+        }, Effect.provide(dependencies), effect => withGitOperationGate(root, 'main', effect), Effect.mapError(storage))
+
         const acceptAgentResolution = Effect.fn('TaskGitSynchronization.acceptAgentResolution')(function* (taskId: string, id: string, runId: string) {
           const accepted = yield* sql`SELECT run.id FROM runs run JOIN sessions session
             ON session.id=run.session_id AND session.task_id=run.task_id
@@ -569,8 +724,8 @@ export class TaskGitSynchronization extends Context.Service<
           Effect.mapError(storage)
         )
 
-        return TaskGitSynchronization.of({ prepare, publish, align, synchronize, reprepare, resolve: resolveConflict,
-          resolutionDirectory, resolutionContext, acceptAgentResolution, abort, get, pending })
+        return TaskGitSynchronization.of({ prepare, publish, align, synchronize, publishKnowledge, reprepare, resolve: resolveConflict,
+          resolutionDirectory, resolutionContext, resolutionFiles, writeResolution, acceptAgentResolution, abort, get, pending })
       }).pipe(Effect.mapError(storage))
     )
   }

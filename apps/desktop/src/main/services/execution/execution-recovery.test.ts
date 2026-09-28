@@ -30,7 +30,7 @@ const setup = Effect.gen(function* () {
   const queue = yield* ExecutionQueue
   const sink = yield* ExecutionEventSink
   const files = yield* RunFiles
-  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+  yield* store.createTask({ id: 'task', type: 'agent', receipt: null, configuration: { goal: 'Test', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [], rawInput: null } })
   yield* store.createSession({ id: 'session', taskId: 'task', agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })
   for (const id of ['first', 'next']) yield* queue.submit({ id, taskId: 'task', sessionId: 'session', prompt: 'Never auto replay', purpose: 'execution', resumesRunId: null, source: 'manual' })
   const run = (yield* queue.claim('owner'))!

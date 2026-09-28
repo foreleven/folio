@@ -27,6 +27,8 @@ export const SyncOperationFile = Schema.Struct({
   sourceFrontier: GitObjectId,
   sourceHead: GitObjectId,
   sourceCommits: Schema.Array(GitObjectId),
+  /** A Knowledge Task freezes one synthetic aggregate commit without advancing its branch. */
+  aggregateCommit: Schema.NullOr(GitObjectId),
   mainBase: GitObjectId,
   conflictKind: Schema.NullOr(Schema.Literals(['source', 'resolution'])),
   conflictIndex: Schema.NullOr(Schema.Int),

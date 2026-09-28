@@ -17,7 +17,7 @@ describe('vaultDatabaseLayer', () => {
       const tables = yield* sql<{ name: string }>`SELECT name FROM sqlite_master
         WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'effect_sql_migrations' ORDER BY name`
       expect(tables.map(row => row.name)).toEqual([
-        'git_operation_runs', 'git_operations', 'messages', 'raws', 'routine_schedules', 'routines', 'runs', 'sessions',
+        'git_operation_runs', 'git_operations', 'links', 'messages', 'raws', 'routine_schedules', 'routines', 'runs', 'sessions',
         'tasks', 'wiki_object_types', 'wiki_pages'
       ])
       expect(yield* sql`SELECT migration_id, name FROM effect_sql_migrations`).toEqual([{ migration_id: 1, name: 'vault' }])

@@ -16,6 +16,14 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); mocks.runs = []; mocks.messages
 const view = () => render(<TaskConversation taskId="task" sessionId="session" />)
 
 describe('Task conversation', () => {
+  it('keeps Knowledge history read-only while allowing an active Run to stop', async () => {
+    mocks.runs = [{ id: 'active', sessionId: 'session', state: 'running', prompt: 'Organize raws', endedAt: null }]
+    render(<TaskConversation taskId="task" sessionId="session" readOnly />)
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
+    mocks.cancel.mockResolvedValueOnce({})
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Stop run' })))
+    expect(mocks.cancel).toHaveBeenCalledWith({ payload: { taskId: 'task', runId: 'active' } })
+  })
   it('renders and cancels a queued Run before Agent startup', async () => {
     mocks.runs = [{ id: 'queued', sessionId: 'session', state: 'queued', prompt: 'Read notes', endedAt: null }]
     view()

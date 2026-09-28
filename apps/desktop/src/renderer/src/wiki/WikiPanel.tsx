@@ -8,6 +8,8 @@ import { WikiRpcClient } from '../rpc/wiki-rpc'
 import { ObjectTypesEditor } from './ObjectTypesEditor'
 import { PageContentEditor } from './PageContentEditor'
 import { PageProperties } from './PageProperties'
+import { ProjectTimeline } from './ProjectTimeline'
+import { RawCitationPreview } from './RawCitationPreview'
 import { inTrash } from './wiki-navigation'
 import { WikiNavigation } from './WikiNavigation'
 
@@ -36,6 +38,7 @@ export function WikiPanel({ active, onActivate, children }: {
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const [propertyFilter, setPropertyFilter] = useState('')
+  const [citationUri, setCitationUri] = useState<string | null>(null)
   const busy = useRef(false)
   const state = useRef({ draft, saved })
   useLayoutEffect(() => { state.current = { draft, saved } }, [draft, saved])
@@ -89,15 +92,15 @@ export function WikiPanel({ active, onActivate, children }: {
     finally { busy.current = false; setPending(false) }
   }
   const open = (id: string) => navigate(async () => {
-    const page = await read({ payload: { id } }); setDraft(page); setSaved(page); setTypesOpen(false)
+    const page = await read({ payload: { id } }); setDraft(page); setSaved(page); setTypesOpen(false); setCitationUri(null)
   })
   const create = (parentId: string | null = null, duplicate = false) => navigate(() => {
     const metadata = newPageMetadata(crypto.randomUUID(), view.startsWith('type:') ? view.slice(5) : 'page', parentId)
     const page: PageDocument = { ...metadata, path: '', version: '', body: '' }
     if (duplicate && state.current.draft) Object.assign(page, state.current.draft, { id: metadata.id, path: '', version: '', title: `${state.current.draft.title || untitled} ${chinese ? '副本' : '(copy)'}`, createdAt: metadata.createdAt, updatedAt: metadata.updatedAt, favorite: false, trashed: false })
-    setSaved(null); setDraft(page); setTypesOpen(false)
+    setSaved(null); setDraft(page); setTypesOpen(false); setCitationUri(null)
   })
-  const chooseView = (next: View) => navigate(() => { setView(next); if (next === 'recent') setSort('updated'); setDraft(null); setSaved(null); setTypesOpen(false); setPropertyFilter('') })
+  const chooseView = (next: View) => navigate(() => { setView(next); if (next === 'recent') setSort('updated'); setDraft(null); setSaved(null); setTypesOpen(false); setCitationUri(null); setPropertyFilter('') })
   const edit = (next: PageMetadata) => setDraft(current => current ? { ...current, ...next } : current)
   const selectedType = view.startsWith('type:') ? types.find(type => type.id === view.slice(5)) : undefined
   const filtered = pages.filter(page => {
@@ -136,18 +139,22 @@ export function WikiPanel({ active, onActivate, children }: {
         </div>
         {draftInTrash && <p className="mb-4 rounded bg-muted p-3 text-sm">{chinese ? '此页面在回收站中。可通过页面菜单恢复。' : 'This page is in trash. Restore it from the page menu.'}</p>}
         {draft.cover && /^https?:\/\//i.test(draft.cover) && <img src={draft.cover} alt="" className="mb-5 h-48 w-full rounded-lg object-cover" />}
-        <details className="mb-3 text-xs text-muted-foreground"><summary className="cursor-pointer">{chinese ? '设置封面' : 'Set cover'}</summary><input type="url" className="mt-2 w-full rounded border px-2 py-1" aria-label={chinese ? '封面地址' : 'Cover URL'} placeholder="https://" value={draft.cover} onChange={event => edit({ ...draft, cover: event.target.value })} /></details>
+        <details className="mb-3 text-xs text-muted-foreground"><summary className="cursor-pointer">{chinese ? '设置封面' : 'Set cover'}</summary><input type="url" className="mt-2 w-full rounded border px-2 py-1" aria-label={chinese ? '封面地址' : 'Cover URL'} placeholder="https://" value={draft.cover ?? ''} onChange={event => edit({ ...draft, cover: event.target.value || null })} /></details>
         <div className="mb-3 flex gap-2"><input className="w-16 rounded bg-transparent text-4xl" aria-label={chinese ? '页面图标' : 'Page icon'} value={draft.icon} placeholder={types.find(type => type.id === draft.objectType)?.icon || '📄'} onChange={event => edit({ ...draft, icon: event.target.value })} /></div>
         <input aria-label={chinese ? '页面标题' : 'Page title'} className="mb-6 w-full bg-transparent text-3xl font-bold tracking-tight outline-none md:text-4xl" placeholder={untitled} value={draft.title} onChange={event => edit({ ...draft, title: event.target.value })} />
         <PageProperties page={draft} pages={pages} objectTypes={types} onChange={edit} chinese={chinese} />
         <PageContentEditor key={draft.id} pages={pages} onNavigateLink={href => {
           if (href.startsWith('folio-page:')) { void open(href.slice('folio-page:'.length)); return }
+          if (href.startsWith('folio-raw:')) { setCitationUri(href); return }
           try {
             const path = decodeURIComponent(new URL(href, `https://wiki.local/${draft.path}`).pathname.slice(1))
             const target = pages.find(page => page.path === path)
             if (target) void open(target.id)
           } catch { /* Invalid imported links remain inert. */ }
         }} value={draft.body} onChange={body => setDraft(current => current ? { ...current, body } : current)} chinese={chinese} />
+        {citationUri ? <RawCitationPreview key={citationUri} uri={citationUri} chinese={chinese} onClose={() => setCitationUri(null)} /> : null}
+        {draft.objectType === 'project' && saved?.id === draft.id ? <ProjectTimeline projectId={draft.id}
+          revision={pages.map(page => `${page.id}:${page.version}`).join('|')} chinese={chinese} onOpen={id => { void open(id) }} /> : null}
         {pages.some(page => page.parentId === draft.id && !inTrash(page, pages)) && <section className="mt-8 border-t pt-4"><h3 className="mb-2 text-sm text-muted-foreground">{chinese ? '子页面' : 'Subpages'}</h3>{pages.filter(page => page.parentId === draft.id && !inTrash(page, pages)).map(page => <button key={page.id} className="block py-1 text-sm underline" onClick={() => { void open(page.id) }}>{page.icon || '📄'} {page.title || untitled}</button>)}</section>}
       </article> : <section>
         <div className="mb-6 flex flex-wrap items-center gap-3"><h1 className="flex-1 text-2xl font-semibold">{label}</h1><Button disabled={pending} onClick={() => { void create() }}><FilePlusIcon className="size-4" />{chinese ? '新建页面' : 'New page'}</Button></div>
@@ -158,7 +165,7 @@ export function WikiPanel({ active, onActivate, children }: {
         </div>
         {selectedType && <input className="mb-4 w-full rounded border px-3 py-2 text-sm" aria-label={chinese ? '筛选属性' : 'Filter properties'} placeholder={chinese ? '按属性值筛选…' : 'Filter by property value…'} value={propertyFilter} onChange={event => setPropertyFilter(event.target.value)} />}
         <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b text-xs text-muted-foreground"><th className="py-3 font-normal">{chinese ? '名称' : 'Name'}</th>{selectedType ? selectedType.properties.map(field => <th className="px-3 py-3 font-normal" key={field.key}>{field.name}</th>) : <th className="px-3 py-3 font-normal">{chinese ? '类型' : 'Type'}</th>}<th className="py-3 text-right font-normal">{chinese ? '更新日期' : 'Last edited'}</th></tr></thead>
-          <tbody>{filtered.map(page => <tr key={page.id} className="border-b hover:bg-muted/40"><td className="min-w-36 py-3"><button className="flex w-full items-center gap-2 text-left" onClick={() => { void open(page.id) }}><span>{page.icon || types.find(type => type.id === page.objectType)?.icon || '📄'}</span><span>{page.title || untitled}</span>{page.favorite && <StarIcon className="size-3 text-amber-500" />}</button></td>{selectedType ? selectedType.properties.map(field => { const value = page.properties[field.key]; return <td className="max-w-60 truncate px-3" key={field.key}>{Array.isArray(value) ? value.map(item => field.kind === 'relation' ? pages.find(page => page.id === item)?.title || item : item).join(', ') : typeof value === 'boolean' ? value ? '✓' : '—' : value ?? '—'}</td> }) : <td className="px-3 text-muted-foreground">{types.find(type => type.id === page.objectType)?.name || page.objectType}</td>}<td className="whitespace-nowrap text-right text-xs text-muted-foreground">{new Date(page.updatedAt).toLocaleDateString()}</td></tr>)}</tbody>
+          <tbody>{filtered.map(page => <tr key={page.id} className="border-b hover:bg-muted/40"><td className="min-w-36 py-3"><button className="flex w-full items-center gap-2 text-left" onClick={() => { void open(page.id) }}><span>{page.icon || types.find(type => type.id === page.objectType)?.icon || '📄'}</span><span>{page.title || untitled}</span>{page.favorite && <StarIcon className="size-3 text-amber-500" />}</button></td>{selectedType ? selectedType.properties.map(field => { const value = page.properties[field.key]; const label = (id: string) => field.options.find(option => option.id === id)?.name ?? id; return <td className="max-w-60 truncate px-3" key={field.key}>{Array.isArray(value) ? value.map(label).join(', ') : typeof value === 'boolean' ? value ? '✓' : '—' : typeof value === 'string' && ['select', 'status'].includes(field.kind) ? label(value) : value ?? '—'}</td> }) : <td className="px-3 text-muted-foreground">{types.find(type => type.id === page.objectType)?.name || page.objectType}</td>}<td className="whitespace-nowrap text-right text-xs text-muted-foreground">{new Date(page.updatedAt).toLocaleDateString()}</td></tr>)}</tbody>
         </table></div>
         {!filtered.length && <div className="py-20 text-center"><BookOpenIcon className="mx-auto mb-4 size-8 text-muted-foreground" /><h2 className="font-medium">{search || propertyFilter ? (chinese ? '没有匹配的页面' : 'No matching pages') : (chinese ? '这里还没有页面' : 'No pages here yet')}</h2><p className="mt-2 text-sm text-muted-foreground">{chinese ? '新建一个页面，或将 Routine 的知识成果同步到 Wiki。' : 'Create a page, or synchronize knowledge from a Routine into the Wiki.'}</p></div>}
         {!!snapshot.issues.length && <details className="mt-6 rounded border p-3 text-sm"><summary className="cursor-pointer text-amber-600">{chinese ? '需要检查的文件' : 'Files needing attention'} ({snapshot.issues.length})</summary>{snapshot.issues.map(issue => <p className="mt-2" key={`${issue.path}:${issue.message}`}><code>{issue.path}</code> — {issue.message}</p>)}</details>}

@@ -37,6 +37,21 @@ export const GitConflictContext = Schema.Struct({
 })
 export type GitConflictContext = typeof GitConflictContext.Type
 
+/** Bounded text choices for a Knowledge Task conflict; no coordinator path crosses RPC. */
+export const GitConflictFile = Schema.Struct({
+  path: GitSelectedPath,
+  canonical: Schema.NullOr(Schema.String),
+  task: Schema.NullOr(Schema.String),
+  working: Schema.NullOr(Schema.String)
+})
+export type GitConflictFile = typeof GitConflictFile.Type
+export const WriteGitConflictResolution = Schema.Struct({
+  taskId: Identity,
+  operationId: Identity,
+  files: Schema.NonEmptyArray(Schema.Struct({ path: GitSelectedPath, content: Schema.String }))
+})
+export type WriteGitConflictResolution = typeof WriteGitConflictResolution.Type
+
 export const SynchronizeTaskWiki = Schema.Struct({
   id: Identity,
   taskId: Identity,

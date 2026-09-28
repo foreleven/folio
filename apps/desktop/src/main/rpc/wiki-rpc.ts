@@ -7,6 +7,8 @@ import { VaultWindowContexts } from '../services/vault/vault-window-contexts'
 export const WikiRpcHandlersLive = WikiRpcs.toLayer(Effect.succeed(WikiRpcs.of({
   'wiki.snapshot': () => Effect.flatMap(WikiService, service => service.snapshot),
   'wiki.read': ({ id }) => Effect.flatMap(WikiService, service => service.read(id)),
+  'wiki.projectTimeline': ({ id }) => Effect.flatMap(WikiService, service => service.projectTimeline(id)),
+  'wiki.rawCitation': ({ uri }) => Effect.flatMap(WikiService, service => service.rawCitation(uri)),
   'wiki.save': ({ input }) => Effect.flatMap(WikiService, service => service.save(input)),
   'wiki.saveTypes': ({ input }) => Effect.flatMap(WikiService, service => service.saveTypes(input))
 })))

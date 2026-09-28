@@ -25,7 +25,7 @@ function layer() {
     Layer.provideMerge(HarnessStore.layer(root)),
     Layer.provideMerge(vaultDatabaseLayer(root)), Layer.provideMerge(NodeServices.layer))
 }
-const draft = (id: string) => ({ id, type: 'agent' as const, receipt: null, configuration: { goal: 'Test task', agent: 'pi' as const, model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+const draft = (id: string) => ({ id, type: 'agent' as const, receipt: null, configuration: { goal: 'Test task', agent: 'pi' as const, model: null, skillIds: [], integrationIds: [], resourceIds: [], rawInput: null } })
 const initialize = Effect.suspend(() => initializeVaultWorkspace(root, join(root, 'entry')))
 
 const ingestionDraft = (id: string) => ({

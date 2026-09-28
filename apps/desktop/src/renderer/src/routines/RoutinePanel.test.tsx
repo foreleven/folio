@@ -9,15 +9,16 @@ const mocks = vi.hoisted(() => ({
   routines: [] as unknown[],
   executions: [] as unknown[],
   refresh: vi.fn(),
-  cancel: vi.fn()
+  cancel: vi.fn(),
+  retry: vi.fn()
 }))
 
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
-  useAtomSet: (atom: unknown) => atom === 'cancel' ? mocks.cancel : vi.fn(),
+  useAtomSet: (atom: unknown) => atom === 'cancel' ? mocks.cancel : atom === 'knowledge-retry' ? mocks.retry : vi.fn(),
   useAtomValue: (query: { kind?: string }) => ({
     _tag: 'Success',
-    value: query.kind === 'routines' ? mocks.routines : mocks.executions
+    value: query.kind === 'config' ? { timeZone: 'Asia/Shanghai' } : query.kind === 'routines' ? mocks.routines : mocks.executions
   })
 }))
 vi.mock('../rpc/task-rpc', () => ({
@@ -28,9 +29,11 @@ vi.mock('../rpc/task-rpc', () => ({
     prepareRoutine: {},
     cancelRun: 'cancel',
     cancelIngestion: {},
-    retryIngestion: {}
+    retryIngestion: {},
+    retryKnowledgeRun: 'knowledge-retry'
   }
 }))
+vi.mock('../rpc/config-rpc', () => ({ ConfigRpcClient: { watch: { kind: 'config' } } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'zh-CN' }))
 
 afterEach(() => {
@@ -42,6 +45,29 @@ afterEach(() => {
 })
 
 describe('Routine details', () => {
+  it('shows event Task history by creation date without a synthetic window and permits retry', async () => {
+    mocks.routines = [{ id: 'raw-intake', name: 'Raw knowledge intake', type: 'agent', configuration: {
+      goal: 'Organize raws', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [] },
+      trigger: { type: 'event', signal: 'raws-changed' }, enabled: true, revision: 1,
+      nextTriggerAt: null, lastTriggerAt: null, createdAt: 1, updatedAt: 1 }]
+    const createdAt = Date.parse('2026-09-27T17:15:40Z')
+    mocks.executions = [{ routineId: 'raw-intake', taskId: 'knowledge-task', type: 'agent', cancelRequested: false,
+      runId: 'interrupted-run', routineDate: null, triggerTime: createdAt, createdAt,
+      windowStart: null, windowEnd: null, timeZone: null, routineRevision: 1, model: null,
+      status: 'interrupted', startedAt: createdAt, endedAt: createdAt + 300_000, updatedAt: createdAt + 300_000 }]
+    mocks.retry.mockResolvedValue({})
+    render(<RoutinePanel />)
+    fireEvent.click(screen.getByRole('button', { name: '打开 Raw knowledge intake Routine 详情' }))
+    expect(screen.getByText('Task knowledg')).toBeTruthy()
+    expect(screen.getByText('已中断')).toBeTruthy()
+    expect(screen.getAllByText(/9月28日/).length).toBeGreaterThan(0)
+    expect(screen.getByText('raws 变化触发')).toBeTruthy()
+    expect(screen.queryByText(/→/)).toBeNull()
+    expect(screen.queryByRole('button', { name: '运行一次' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重试' })) })
+    expect(mocks.retry).toHaveBeenCalledWith({ payload: { taskId: 'knowledge-task', previousRunId: 'interrupted-run', retryRunId: expect.any(String) } })
+  })
+
   it('refreshes background execution results and releases the timer on unmount', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-19T12:00:00.000Z'))

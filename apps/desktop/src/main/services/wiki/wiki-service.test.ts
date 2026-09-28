@@ -38,6 +38,75 @@ const create = (id: string, objectType = 'page', parentId: string | null = null)
 }))
 
 describe('Wiki file-backed Page service', () => {
+  it('saves and reads a Page with a null cover', async () => {
+    const page = await runtime.runPromise(service.save({ metadata: { ...newPageMetadata('coverless'), cover: null },
+      body: '# No cover\n', expectedVersion: null }))
+    expect(page.cover).toBeNull()
+    expect((await runtime.runPromise(service.read('coverless'))).cover).toBeNull()
+    expect(await readFile(join(root, 'coverless.md'), 'utf8')).toContain('cover: null')
+  })
+
+  it('indexes Markdown Page links and reports broken targets', async () => {
+    await create('target')
+    const source = await runtime.runPromise(service.save({
+      metadata: { ...newPageMetadata('source'), title: 'Source' },
+      body: '[Target](folio-page:target) and [Missing](folio-page:gone)\n\n`[Code](folio-page:hidden)`',
+      expectedVersion: null
+    }))
+    const rows = await runtime.runPromise(Effect.flatMap(SqlClient.SqlClient, sql => sql`SELECT source_id AS sourceId, target_id AS targetId FROM links ORDER BY target_id`))
+    expect(rows).toEqual([{ sourceId: source.id, targetId: 'gone' }, { sourceId: source.id, targetId: 'target' }])
+    const snapshot = await runtime.runPromise(service.snapshot)
+    expect(snapshot.issues).toContainEqual({ path: 'source.md', message: 'Folio Page link target is missing: gone' })
+  })
+  it('projects a Project timeline from reverse links and orders authored offsets by instant', async () => {
+    await create('project', 'project')
+    const meeting = await runtime.runPromise(service.save({
+      metadata: { ...newPageMetadata('meeting', 'meeting'), title: 'Morning meeting',
+        properties: { occurredAt: '2026-09-24T09:00:00+08:00' } },
+      body: '[Project](folio-page:project)', expectedVersion: null
+    }))
+    await runtime.runPromise(service.save({
+      metadata: { ...newPageMetadata('decision', 'decision'), title: 'Decision',
+        properties: { occurredAt: '2026-09-24T02:00:00Z', status: 'accepted' } },
+      body: '[Project](folio-page:project)', expectedVersion: null
+    }))
+    await runtime.runPromise(service.save({
+      metadata: { ...newPageMetadata('note', 'note'), title: 'Background' },
+      body: '[Project](folio-page:project)', expectedVersion: null
+    }))
+    expect(await runtime.runPromise(service.projectTimeline('project'))).toEqual([
+      { id: 'decision', title: 'Decision', objectType: 'decision', occurredAt: '2026-09-24T02:00:00Z' },
+      { id: 'meeting', title: 'Morning meeting', objectType: 'meeting', occurredAt: '2026-09-24T09:00:00+08:00' }
+    ])
+    await runtime.runPromise(service.save({ metadata: meeting, body: 'No project link', expectedVersion: meeting.version }))
+    expect((await runtime.runPromise(service.projectTimeline('project'))).map(entry => entry.id)).toEqual(['decision'])
+    await expect(runtime.runPromise(service.projectTimeline('note'))).rejects.toThrow('Project')
+  }, 15_000)
+  it('reads pinned raw content and a deletion proven by a completed Knowledge Task', async () => {
+    const workspace = join(directory, 'workspace')
+    const path = 'raws/lark/im/2026-09-24/message.md'
+    const rawFile = join(workspace, path)
+    const git = async (args: string[]) => (await promisify(execFile)('git', ['-C', workspace, ...args])).stdout.trim()
+    await mkdir(join(workspace, 'raws/lark/im/2026-09-24'), { recursive: true })
+    await writeFile(rawFile, '# Original evidence\n')
+    await git(['add', '--', path])
+    await git(['-c', 'user.name=Folio', '-c', 'user.email=folio@localhost', 'commit', '-m', 'Add raw'])
+    const fromCommit = await git(['rev-parse', 'HEAD'])
+    expect(await runtime.runPromise(service.rawCitation(`folio-raw:${fromCommit}/${path}`))).toMatchObject({
+      kind: 'file', content: '# Original evidence\n'
+    })
+    await rm(rawFile)
+    await git(['add', '--', path])
+    await git(['-c', 'user.name=Folio', '-c', 'user.email=folio@localhost', 'commit', '-m', 'Remove raw'])
+    const toCommit = await git(['rev-parse', 'HEAD'])
+    await expect(runtime.runPromise(service.rawCitation(`folio-raw:${toCommit}/${path}`))).rejects.toThrow('missing')
+    await runtime.runPromise(Effect.flatMap(SqlClient.SqlClient, sql => sql`INSERT INTO tasks
+      (id, type, configuration, state, created_at) VALUES ('knowledge', 'agent',
+        ${JSON.stringify({ rawInput: { fromCommit, toCommit } })}, 'completed', 1)`))
+    expect(await runtime.runPromise(service.rawCitation(`folio-raw:${toCommit}/${path}#message-1`))).toMatchObject({
+      kind: 'deletion', priorContent: '# Original evidence\n', fragment: 'message-1', diff: expect.stringContaining('-# Original evidence')
+    })
+  }, 15_000)
   it('persists Markdown and indexes metadata without copying the body into SQLite', async () => {
     const page = await create('one')
     expect(await readFile(join(root, 'one.md'), 'utf8')).toContain('Content stays on disk.')
@@ -66,6 +135,7 @@ describe('Wiki file-backed Page service', () => {
   it('imports nested Markdown and preserves unknown frontmatter on first edit', async () => {
     await mkdir(join(root, 'notes'))
     await writeFile(join(root, 'notes/import.md'), '---\nsource: external\n---\n# Imported\n\nBody')
+    await runtime.runPromise(service.refresh)
     const snapshot = await runtime.runPromise(service.snapshot)
     expect(snapshot.pages).toHaveLength(1)
     const page = await runtime.runPromise(service.read(snapshot.pages[0]!.id))
@@ -78,12 +148,15 @@ describe('Wiki file-backed Page service', () => {
     expect(await readFile(join(root, saved.path), 'utf8')).toContain('source: external')
   })
 
-  it('sees externally published Routine Pages and removes stale deleted entries', async () => {
+  it('refreshes the index once after canonical Wiki publication', async () => {
     const page = await create('routine')
     await writeFile(join(root, 'routine.md'), (await readFile(join(root, 'routine.md'), 'utf8')).replace('title: routine', 'title: Routine result'))
+    expect((await runtime.runPromise(service.snapshot)).pages[0]!.title).toBe('routine')
+    await runtime.runPromise(service.refresh)
     expect((await runtime.runPromise(service.snapshot)).pages[0]!.title).toBe('Routine result')
     expect((await runtime.runPromise(service.read(page.id))).version).not.toBe(page.version)
     await rm(join(root, 'routine.md'))
+    await runtime.runPromise(service.refresh)
     expect((await runtime.runPromise(service.snapshot)).pages).toHaveLength(0)
     expect(await runtime.runPromise(Effect.flatMap(SqlClient.SqlClient, sql => sql`SELECT * FROM wiki_pages`))).toEqual([])
   })
@@ -125,7 +198,7 @@ describe('Wiki file-backed Page service', () => {
     const result = await runtime.runPromise(service.saveTypes({ objectTypes: [...defaultObjectTypes, {
       id: 'book', name: 'Book', icon: '📚', properties: [{ key: 'rating', name: 'Rating', kind: 'number', options: [] }]
     }], expectedVersion: initial.typesVersion }))
-    expect(JSON.parse(await readFile(join(root, '_types.json'), 'utf8'))).toHaveLength(6)
+    expect(JSON.parse(await readFile(join(root, '_types.json'), 'utf8'))).toHaveLength(defaultObjectTypes.length + 1)
     const book = await create('book', 'book')
     await runtime.runPromise(service.save({ metadata: { ...book, properties: { rating: 4 } }, body: book.body, expectedVersion: book.version }))
     await expect(runtime.runPromise(service.saveTypes({ objectTypes: defaultObjectTypes, expectedVersion: result.typesVersion }))).rejects.toThrow('used by Page')
@@ -137,6 +210,7 @@ describe('Wiki file-backed Page service', () => {
     await create('duplicate')
     await writeFile(join(root, 'copy.md'), await readFile(join(root, 'duplicate.md')))
     await writeFile(join(root, 'broken.md'), '---\nnot: [yaml\n---\nBody')
+    await runtime.runPromise(service.refresh)
     const snapshot = await runtime.runPromise(service.snapshot)
     expect(snapshot.pages.map(page => page.id)).toEqual(['good'])
     expect(snapshot.issues).toHaveLength(3)
@@ -145,6 +219,7 @@ describe('Wiki file-backed Page service', () => {
   it.each(['source: &source { self: *source }', 'source: .inf'])('isolates non-indexable frontmatter: %s', async metadata => {
     await create('good')
     await writeFile(join(root, 'bad.md'), `---\n${metadata}\n---\nBody`)
+    await runtime.runPromise(service.refresh)
     const snapshot = await runtime.runPromise(service.snapshot)
     expect(snapshot.pages.map(page => page.id)).toEqual(['good'])
     expect(snapshot.issues).toEqual([{ path: 'bad.md', message: expect.stringContaining('JSON-compatible') }])

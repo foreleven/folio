@@ -10,15 +10,16 @@ import { SqlClient } from 'effect/unstable/sql'
 import type { RunRecord } from '../../../shared/execution'
 import { TaskService } from '../../../shared/task-service'
 import { RoutineStore } from '../routines/routine-store'
-import { routineDateAt, routineTimestampAt, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
+import { routineDateAt, routineTimestampAt, ScheduledRoutineExecution, type RunRoutine, type SaveRoutine } from '../../../shared/routine'
 import { HarnessRuns } from '../harness/harness-runs'
 import { ModelService } from '../models/model-service'
 import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema, Scope, Semaphore } from 'effect'
 import { join } from 'node:path'
+import { lstat } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { v7 as uuidv7 } from 'uuid'
 import { HarnessStoreError, TaskSummary, type IngestionReceipt, type TaskRecord } from '../../../shared/harness'
-import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, TaskFeedCursor } from '../../../shared/rpc/task-rpc'
+import type { CreateTaskInput, OpenTaskSessionInput, RetryKnowledgeRunInput, StartConflictResolutionInput, TaskFeedCursor } from '../../../shared/rpc/task-rpc'
 import { HarnessStore } from '../harness/harness-store'
 import { IntegrationService } from '../integrations/integration-service'
 import { TaskWorktrees } from './task-worktrees'
@@ -29,6 +30,10 @@ import { WorkspaceChanges } from '../git/workspace-changes'
 import { TaskGitSynchronization } from './task-git-synchronization'
 import { makeVaultGit } from '../git/vault-git'
 import { ConfigService } from '../config/config-service'
+import { WikiService } from '../../../shared/wiki-service'
+import { listMarkdown, parsePage, readObjectTypes, readPage } from '../wiki/page-files'
+import { pageLinkTargets, rawCitationTargets } from '../wiki/knowledge-links'
+import { validatePageProperties } from '../../../shared/wiki'
 
 const failure = (reason: HarnessStoreError['reason']) =>
   new HarnessStoreError({
@@ -51,6 +56,7 @@ export const TaskServiceLive = Layer.effect(
     const workers = yield* AgentWorkerPool
     const vault = yield* VaultContext
     const config = yield* ConfigService
+    const wiki = yield* WikiService
     const workspace = yield* WorkspaceChanges
     const changes = yield* GitChangeApplications
     const synchronization = yield* TaskGitSynchronization
@@ -99,7 +105,7 @@ export const TaskServiceLive = Layer.effect(
       } else {
         // Capability health is checked by TaskResources inside the Worker, after admission.
         yield* worktrees.reserve({ id: input.id, type: 'agent', receipt: null,
-          configuration: { goal: input.goal, agent: input.agent, model: null, skillIds: [], integrationIds, resourceIds } })
+          configuration: { goal: input.goal, agent: input.agent, model: null, skillIds: [], integrationIds, resourceIds, rawInput: null } })
       }
       return yield* store.task(input.id)
     })
@@ -137,6 +143,13 @@ export const TaskServiceLive = Layer.effect(
     /** Explicit completion reaps live Sessions before the durable worktree release checkpoint. */
     const completeUnlocked = Effect.fn('TaskService.completeUnlocked')(function* (taskId: string) {
       const task = yield* store.task(taskId)
+      if (task.type === 'agent' && task.configuration.rawInput && task.state === 'active') {
+        const publication = task.summary?.publication
+        if (!publication || !['completed', 'not-required'].includes(publication.state)) return yield* failure('invalid-state')
+        if (publication.state === 'completed' && !(yield* sql`SELECT id FROM git_operations
+          WHERE id=${publication.synchronizationId} AND task_id=${taskId} AND kind='synchronize'
+            AND state='completed'`).length) return yield* failure('invalid-state')
+      }
       const history = yield* store.runs(taskId)
       if (history.some(run => run.endedAt === null))
         return yield* new HarnessStoreError({ reason: 'task-busy', message: 'Stop the active Run before completing this Task.' })
@@ -144,10 +157,12 @@ export const TaskServiceLive = Layer.effect(
         return yield* failure('invalid-state')
       yield* Effect.forEach(yield* store.sessions(taskId), (session) => sessions.close(taskId, session.id), { concurrency: 'unbounded' })
       return yield* worktrees.complete(taskId)
-    })
+    }, Effect.mapError(safeError))
     const complete = (taskId: string) => completeUnlocked(taskId).pipe(gate.withPermit)
     /** Routine executions are immutable Task associations; reopening them is explicit and manual. */
     const reopen = Effect.fn('TaskService.reopen')(function* (taskId: string) {
+      const task = yield* store.task(taskId)
+      if (task.type === 'agent' && task.configuration.rawInput) return yield* failure('invalid-state')
       if (yield* routines.executionForTask(taskId)) return yield* failure('invalid-state')
       if (yield* sessions.hasLiveTask(taskId)) return yield* failure('task-busy')
       yield* worktrees.reopen(taskId)
@@ -227,11 +242,47 @@ export const TaskServiceLive = Layer.effect(
       }
     })
     const openSession = Effect.fn('TaskService.openSession')(function* (input: OpenTaskSessionInput) {
+      const task = yield* store.task(input.taskId)
+      if (task.type === 'agent' && task.configuration.rawInput) return yield* failure('invalid-state')
       yield* prepareSession(input)
       const saved = (yield* store.sessions(input.taskId)).find((session) => session.id === input.sessionId)
       if (!saved) return yield* failure('not-found')
       return saved
     }, gate.withPermit)
+    /** Explicitly continue a terminal Knowledge Run against its original frozen raw input. */
+    const retryKnowledgeRun = Effect.fn('TaskService.retryKnowledgeRun')(function* (input: RetryKnowledgeRunInput) {
+      const task = yield* store.task(input.taskId)
+      if (task.type !== 'agent' || !task.configuration.rawInput) return yield* failure('invalid-state')
+      const history = yield* queue.list(input.taskId)
+      const previous = history.find(run => run.id === input.previousRunId)
+      if (!previous || !['execution', 'recovery'].includes(previous.purpose)) return yield* failure('invalid-state')
+      const existing = history.find(run => run.id === input.retryRunId)
+      if (existing) {
+        if (existing.taskId !== input.taskId || existing.sessionId !== previous.sessionId ||
+          existing.purpose !== 'recovery' || existing.resumesRunId !== previous.id || existing.source !== 'recovery')
+          return yield* failure('invalid-state')
+        return existing
+      }
+      if (task.state !== 'active') return yield* failure('invalid-state')
+      if (history.at(-1)?.id !== previous.id || !['failed', 'interrupted', 'cancelled'].includes(previous.state) ||
+        (yield* sql`SELECT id FROM git_operations WHERE task_id=${input.taskId} AND kind='synchronize' LIMIT 1`).length)
+        return yield* failure('invalid-state')
+      const session = (yield* store.sessions(input.taskId)).find(value => value.id === previous.sessionId)
+      if (!session || session.purpose !== 'task') return yield* failure('invalid-state')
+      const original = history.find(run => run.sessionId === previous.sessionId && run.purpose === 'execution')
+      if (!original) return yield* failure('invalid-state')
+      const { fromCommit, toCommit } = task.configuration.rawInput
+      const prompt = [
+        'Continue the interrupted Knowledge intake in this Task and inspect its saved messages and Wiki draft before editing.',
+        `Raw fromCommit: ${fromCommit ?? '(initial full snapshot)'}`,
+        `Raw toCommit: ${toCommit}`,
+        'Use only this frozen Git raw range. Read files with git show <toCommit>:<raw-path>; inspect the Git diff for deletions. Do not consume newer raw changes.',
+        'Finish the evidence-backed Wiki assets, relationships, and pinned citations. Use the existing ObjectTypes; do not edit raws or delete or trash Pages.',
+        `Original frozen instructions:\n${original.prompt}`
+      ].join('\n\n')
+      return yield* queue.submit({ id: input.retryRunId, taskId: input.taskId, sessionId: previous.sessionId,
+        prompt, purpose: 'recovery', resumesRunId: previous.id, source: 'recovery' })
+    }, gate.withPermit, Effect.mapError(safeError), Effect.tap(() => notifications.wake))
     /** Checks Session ownership before returning any saved conversation content. */
     const history = Effect.fn('TaskService.history')(function* (taskId: string, sessionId: string) {
       yield* store.task(taskId)
@@ -329,12 +380,15 @@ export const TaskServiceLive = Layer.effect(
         if (!view?.record?.resources.some(resource => resource.id === resourceId)
           || !view.resources.some(resource => resource.id === resourceId)) return yield* failure('invalid-state')
       }
-      return yield* routines.save(input)
+      const saved = yield* routines.save(input)
+      if (saved.trigger.type === 'event' && saved.enabled) yield* reconcileKnowledge()
+      return saved
     })
     /** Creates one enabled hourly Ingestion Routine after a resource is actually ready. */
     const ensureDefaultRoutines = Effect.fn('TaskService.ensureDefaultRoutines')(function* () {
       const { timeZone } = yield* config.get.pipe(Effect.mapError(safeError))
       const available = yield* integrations.list.pipe(Effect.mapError(safeError))
+      yield* routines.ensureRawIntake
       const current = yield* routines.list
       for (const view of available) {
         if (!view.record || view.record.error !== null || view.states[view.record.state]?.kind !== 'ready') continue
@@ -352,6 +406,140 @@ export const TaskServiceLive = Layer.effect(
         }
       }
     }, gate.withPermit)
+    /** Reconcile a transient raws-changed wake-up against durable Git and Task history. */
+    const reconcileKnowledge = Effect.fn('TaskService.reconcileKnowledge')(function* () {
+      const routine = (yield* routines.list).find(item => item.type === 'agent' && item.trigger.type === 'event')
+      if (!routine || routine.type !== 'agent' || !routine.enabled) return
+      const latest = (yield* sql<{ id: string; state: string; toCommit: string | null }>`SELECT id, state,
+        json_extract(configuration, '$.rawInput.toCommit') AS toCommit FROM tasks
+        WHERE routine_id=${routine.id} ORDER BY rowid DESC LIMIT 1`)[0]
+      if (latest && latest.state !== 'completed') return
+      const fromCommit = latest?.toCommit ?? null
+      const main = join(vault.directory, 'workspace')
+      const toCommit = (yield* git(main, ['rev-parse', 'HEAD'])).trim()
+      const paths = fromCommit === null
+        ? (yield* git(main, ['ls-tree', '-r', '--name-only', '-z', toCommit, '--', 'raws'])).split('\0').filter(Boolean)
+        : (yield* git(main, ['diff', '--name-only', '--no-renames', '-z', fromCommit, toCommit, '--', 'raws'])).split('\0').filter(Boolean)
+      if (!paths.length) return
+      const taskId = randomUUID()
+      yield* worktrees.reserve({ id: taskId, type: 'agent', receipt: null, configuration: {
+        ...routine.configuration, rawInput: { fromCommit, toCommit }
+      } })
+      yield* sql`UPDATE tasks SET routine_id=${routine.id}, routine_revision=${routine.revision} WHERE id=${taskId}`
+      const sessionId = randomUUID()
+      const runId = randomUUID()
+      yield* prepareSession({ taskId, sessionId, agent: routine.configuration.agent,
+        ...(routine.configuration.model ? { model: routine.configuration.model } : {}) })
+      const prompt = [
+        'Organize the frozen raw input into evidence-backed Wiki knowledge assets.',
+        `Raw fromCommit: ${fromCommit ?? '(initial full snapshot)'}`,
+        `Raw toCommit: ${toCommit}`,
+        `Raw paths:\n${paths.map(path => `- ${path}`).join('\n')}`,
+        'Read each raw file from the frozen Git tree with git show <toCommit>:<raw-path>, not from a newer working-tree projection. For deletions, inspect the Git diff and prior blob.',
+        'Create or update coherent Pages for Projects, Persons, Organizations, Meetings, Decisions, Events, and Notes as warranted by evidence.',
+        'Read wiki/_types.json and existing Wiki Pages before editing. Each new Page is a Markdown file with YAML frontmatter containing a stable id, title, objectType, createdAt, updatedAt, and properties. Use valid option IDs from the existing ObjectType definitions.',
+        'icon must be a string; use an empty string ("") when absent. cover may be a URL string or null when absent. parentId may be null when the Page has no parent.',
+        'Use [label](folio-page:<pageId>) for Page relationships and [source](folio-raw:<toCommit>/<raw-path>#<encoded-record-id>) for source citations. Omit the fragment when no stable record ID exists.',
+        'Use existing ObjectTypes. Do not change wiki/_types.json, raws, or other workspace files. Do not delete or trash Pages or change their IDs. Do not create placeholder milestones. Folio will return validation issues to this Session for repair.',
+        `Additional goal: ${routine.configuration.goal}`
+      ].join('\n\n')
+      yield* queue.submit({ id: runId, taskId, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
+      yield* Effect.logInfo('Raw knowledge intake Task queued', {
+        routineId: routine.id, taskId, runId, fromCommit, toCommit, rawPathCount: paths.length
+      })
+      yield* notifications.wake
+    }, sql.withTransaction, gate.withPermit, Effect.mapError(safeError))
+
+    /** Validate the complete authored Wiki against the frozen raw head before admitting publication. */
+    const inspectKnowledgeResult = Effect.fn('TaskService.inspectKnowledgeResult')(function* (
+      task: Extract<TaskRecord, { type: 'agent' }>, checkout: string, baseline: string
+    ) {
+      const input = task.configuration.rawInput
+      if (!input) return yield* failure('invalid-state')
+      const fields = (yield* git(checkout, ['diff', '--name-status', '--no-renames', '-z', baseline, '--'])).split('\0').filter(Boolean)
+      const changed = new Map<string, string>()
+      for (let index = 0; index + 1 < fields.length; index += 2) changed.set(fields[index + 1]!, fields[index]!)
+      for (const path of (yield* git(checkout, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)) changed.set(path, 'A')
+      const issues: string[] = []
+      for (const [path, status] of changed) {
+        if (!/^wiki\/(?!_types\.json$).+\.md$/.test(path)) issues.push(`${path}: Knowledge results may edit only Wiki Page Markdown.`)
+        if (status === 'D') issues.push(`${path}: Page deletion is not permitted.`)
+        else {
+          const info = yield* Effect.promise(() => lstat(join(checkout, path)).catch(() => null))
+          if (!info?.isFile() || info.isSymbolicLink()) issues.push(`${path}: Expected a regular Wiki Page file.`)
+        }
+      }
+      if (!changed.size) return { paths: [] as string[], issues }
+      const root = join(checkout, 'wiki')
+      const typesResult = yield* Effect.tryPromise({ try: () => readObjectTypes(root), catch: safeError }).pipe(Effect.result)
+      if (typesResult._tag === 'Failure') {
+        issues.push('wiki/_types.json: ObjectTypes are invalid or unavailable.')
+        return { paths: [...changed.keys()], issues }
+      }
+      const types = typesResult.success
+      const paths = yield* Effect.tryPromise({ try: () => listMarkdown(root), catch: safeError })
+      const pages = [] as Awaited<ReturnType<typeof readPage>>[]
+      for (const path of paths) {
+        // Page parsing is repair feedback. Preserve the schema field or YAML error
+        // so the Agent can fix the document instead of investigating Task storage.
+        const result = yield* Effect.tryPromise({ try: () => readPage(root, path),
+          catch: error => error instanceof Error ? error : new Error('Wiki Page could not be read.') }).pipe(Effect.result)
+        if (result._tag === 'Failure') issues.push(`wiki/${path}: ${result.failure.message}`)
+        else pages.push(result.success)
+      }
+      const ids = new Set<string>()
+      for (const page of pages) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(page.id)) issues.push(`wiki/${page.path}: Invalid Page ID.`)
+        if (ids.has(page.id)) issues.push(`wiki/${page.path}: Duplicate Page ID ${page.id}.`)
+        ids.add(page.id)
+      }
+      const rawPaths = new Set((yield* git(join(vault.directory, 'workspace'),
+        ['ls-tree', '-r', '--name-only', '-z', input.toCommit, '--', 'raws'])).split('\0').filter(Boolean))
+      if (input.fromCommit) {
+        for (const path of (yield* git(join(vault.directory, 'workspace'),
+          ['diff', '--name-only', '--diff-filter=D', '--no-renames', '-z', input.fromCommit, input.toCommit, '--', 'raws'])).split('\0').filter(Boolean)) rawPaths.add(path)
+      }
+      for (const page of pages) {
+        const path = `wiki/${page.path}`
+        const type = types.objectTypes.find(candidate => candidate.id === page.objectType)
+        if (!type) issues.push(`${path}: Unknown ObjectType ${page.objectType}.`)
+        else {
+          try { validatePageProperties(page, type) }
+          catch (error) { issues.push(`${path}: ${(error as Error).message}`) }
+        }
+        const ancestry = new Set([page.id])
+        let parentId = page.parentId
+        while (parentId) {
+          if (ancestry.has(parentId)) { issues.push(`${path}: Page hierarchy contains a cycle.`); break }
+          ancestry.add(parentId)
+          const parent = pages.find(candidate => candidate.id === parentId)
+          if (!parent) { issues.push(`${path}: Parent Page is missing.`); break }
+          parentId = parent.parentId
+        }
+        for (const id of pageLinkTargets(page.body)) if (!ids.has(id)) issues.push(`${path}: Folio Page link target is missing: ${id}.`)
+        if (!changed.has(path)) continue
+        if (page.trashed) issues.push(`${path}: Knowledge results may not trash Pages.`)
+        const priorSource = yield* git(checkout, ['show', `${baseline}:${path}`]).pipe(Effect.catch(() => Effect.succeed('')))
+        if (priorSource) {
+          try {
+            if (parsePage(page.path, priorSource, page.createdAt).id !== page.id)
+              issues.push(`${path}: Existing Page ID cannot change.`)
+          } catch { issues.push(`${path}: Previous Page metadata cannot be verified.`) }
+        }
+        const previousCitations = new Set(rawCitationTargets(priorSource))
+        if (!priorSource && !rawCitationTargets(page.body).length)
+          issues.push(`${path}: New knowledge Pages need a pinned raw citation.`)
+        for (const citation of rawCitationTargets(page.body)) {
+          if (previousCitations.has(citation)) continue
+          const match = /^folio-raw:([a-f0-9]{40}|[a-f0-9]{64})\/(raws\/[^#]+)(?:#([^#]+))?$/.exec(citation)
+          if (!match || match[1] !== input.toCommit || !rawPaths.has(match[2]!) ||
+            match[2]!.split('/').some(part => !part || part === '.' || part === '..') ||
+            (match[3] !== undefined && !/^([A-Za-z0-9._~-]|%[A-Fa-f0-9]{2})+$/.test(match[3]!)))
+            issues.push(`${path}: Invalid or unresolvable raw citation ${citation}.`)
+        }
+      }
+      return { paths: [...changed.keys()].filter(path => /^wiki\/(?!_types\.json$).+\.md$/.test(path)).sort(), issues }
+    })
     /** Creates or coalesces one current execution, then optionally starts its Task Run. */
     const prepareRoutine = Effect.fn('TaskService.prepareRoutine')(function* (input: RunRoutine, mode: 'check' | 'settled' = 'check') {
       const execution = yield* routines.schedule(input.routineId, yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis)), mode)
@@ -451,9 +639,10 @@ export const TaskServiceLive = Layer.effect(
       return yield* Effect.uninterruptibleMask(restore => Effect.gen(function* () {
         const execution = yield* routines.executionForTask(taskId)
         let task = yield* store.task(taskId)
-        if (!execution || task.type !== 'ingestion' || execution.windowStart === null || execution.windowEnd === null) return yield* failure('invalid-state')
+        if (!execution || task.type !== 'ingestion' || execution.windowStart === null || execution.windowEnd === null || execution.timeZone === null || execution.routineDate === null) return yield* failure('invalid-state')
         const windowStart = execution.windowStart
         const windowEnd = execution.windowEnd
+        const timeZone = execution.timeZone
         const namespace = ingestionNamespace(task, execution.routineDate)
         const previousState = task.receipt.state
         const startedAt = yield* now
@@ -479,7 +668,7 @@ export const TaskServiceLive = Layer.effect(
                   : yield* worktrees.resetIngestion(taskId, namespace)
                 stage = 'ingest-provider'
                 yield* integrations.ingest(task.configuration.integrationId, task.configuration.resourceId,
-                  join(checkout.path, namespace), { start: windowStart, end: windowEnd, timeZone: execution.timeZone })
+                  join(checkout.path, namespace), { start: windowStart, end: windowEnd, timeZone })
                 stage = 'commit-raws'
                 paths = yield* rawPaths(task, namespace)
                 if (paths.length) {
@@ -515,6 +704,8 @@ export const TaskServiceLive = Layer.effect(
           }
           stage = 'save-receipt'
           yield* finishIngestionSuccess(current, operation.publishedHead, paths)
+          if (paths.length) yield* reconcileKnowledge().pipe(Effect.catch(error =>
+            Effect.logWarning('Raw Signal reconciliation will be retried on the next Routine check.', { taskId }, error)))
           // Business success is already durable. Alignment and release are recoverable cleanup.
           yield* synchronization.align(operation.id).pipe(Effect.andThen(worktrees.complete(taskId)), Effect.catch(error =>
             Effect.logWarning('Successful Ingestion cleanup will be retried.', { taskId, operationId: operation.id }, error)))
@@ -568,7 +759,7 @@ export const TaskServiceLive = Layer.effect(
         if (previous) {
           const execution = yield* routines.executionForTask(previous.taskId)
           if (!execution || execution.routineId !== input.routineId || previous.source !== 'routine') return yield* failure('invalid-state')
-          return { execution, task: yield* store.task(previous.taskId), run: previous }
+          return { execution: yield* Schema.decodeUnknownEffect(ScheduledRoutineExecution)(execution), task: yield* store.task(previous.taskId), run: previous }
         }
       }
       const prepared = yield* prepareRoutine(input, mode)
@@ -584,7 +775,7 @@ export const TaskServiceLive = Layer.effect(
       const prompt = `${task.configuration.goal}\n\nRoutine execution window (use this timezone and these exact ISO timestamps for extraction):\n- time-zone: ${execution.timeZone}\n- start: ${routineTimestampAt(execution.windowStart, execution.timeZone)}\n- end: ${routineTimestampAt(execution.windowEnd, execution.timeZone)}`
       yield* prepareSession({ taskId: task.id, sessionId, agent: task.configuration.agent, ...(execution.model ? { model: execution.model } : {}) })
       const run = yield* queue.submit({ id: runId, taskId: task.id, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
-      return { execution: (yield* routines.executionForTask(task.id))!, task, run }
+      return { execution: yield* Schema.decodeUnknownEffect(ScheduledRoutineExecution)(yield* routines.executionForTask(task.id)), task, run }
     })
     /** Starts host-owned work only after admission commits, so the fiber never inherits a transaction connection. */
     const submitRoutine = Effect.fn('TaskService.submitRoutine')(function* (input: RunRoutine, mode: 'check' | 'settled' = 'check') {
@@ -596,8 +787,85 @@ export const TaskServiceLive = Layer.effect(
       Effect.mapError(safeError), gate.withPermit, Effect.tap(() => notifications.wake))
     const runRoutine = (input: RunRoutine) => submitRoutine(input).pipe(Effect.flatMap(result => result
       ? Effect.succeed(result) : Effect.fail(new HarnessStoreError({ reason: 'invalid-state', message: 'No unprocessed time window is available.' }))))
+    /** Replays validation and publication after a successful Knowledge Run or process loss. */
+    const settleKnowledge = Effect.fn('TaskService.settleKnowledge')(function* (request: RunRecord) {
+      const task = yield* store.task(request.taskId)
+      if (task.type !== 'agent' || !task.configuration.rawInput || task.state !== 'active') return
+      const history = yield* store.runs(task.id)
+      if (history.some(run => run.sequence > request.sequence && run.purpose === request.purpose)) return
+      const operationId = `knowledge-${task.id}`
+      const existing = yield* synchronization.get(operationId).pipe(Effect.catchTag('HarnessStoreError', error =>
+        error.reason === 'not-found' ? Effect.succeed(null) : Effect.fail(error)))
+      if (request.purpose === 'conflict-resolution' && existing?.state === 'conflict') {
+        const checkout = yield* synchronization.resolutionDirectory(task.id, operationId)
+        const baseline = (yield* git(checkout, ['rev-parse', 'HEAD'])).trim()
+        const inspection = yield* inspectKnowledgeResult(task, checkout, baseline)
+        const unresolved = (yield* git(checkout, ['diff', '--name-only', '--diff-filter=U', '-z'])).split('\0').filter(Boolean)
+        const issues = [...inspection.issues, ...unresolved.map(path => `${path}: Git conflict is unresolved.`)]
+        if (issues.length) {
+          const later = history.some(run => run.sequence > request.sequence)
+          if (!later) {
+            yield* queue.submit({ id: randomUUID(), taskId: task.id, sessionId: request.sessionId,
+              prompt: `Repair the complete Wiki conflict resolution. Folio found:\n${issues.map(issue => `- ${issue}`).join('\n')}\n\nEdit the same coordinator files, then finish.`,
+              purpose: 'conflict-resolution', resumesRunId: null, source: 'conflict-resolution' })
+            yield* notifications.wake
+          }
+          return
+        }
+        yield* synchronization.acceptAgentResolution(task.id, operationId, request.id)
+      }
+      let operation = existing ? yield* synchronization.get(operationId) : null
+      if (!operation) {
+        const checkout = join(vault.directory, 'worktrees', task.id)
+        if (!task.worktreeBase || (yield* git(checkout, ['rev-parse', 'HEAD'])).trim() !== task.worktreeBase)
+          return yield* new HarnessStoreError({ reason: 'invalid-state', message: 'Knowledge Task branch changed during execution.' })
+        const inspection = yield* inspectKnowledgeResult(task, checkout, task.worktreeBase)
+        if (inspection.issues.length) {
+          const original = history.find(run => run.sessionId === request.sessionId && run.purpose === 'execution')
+          yield* queue.submit({ id: randomUUID(), taskId: task.id, sessionId: request.sessionId,
+            prompt: `Repair the complete Wiki result before publication. Folio found:\n${inspection.issues.map(issue => `- ${issue}`).join('\n')}\n\nKeep the frozen raw input and edit only Wiki Page Markdown.\n\nOriginal frozen instructions:\n${original?.prompt ?? request.prompt}`,
+            purpose: 'execution', resumesRunId: null, source: 'routine' })
+          yield* notifications.wake
+          return
+        }
+        if (!inspection.paths.length) {
+          yield* sql`UPDATE runs SET sync_state='not-required' WHERE task_id=${task.id} AND state='succeeded'`
+          yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'not-required') WHERE id=${task.id}`
+          yield* completeUnlocked(task.id)
+          yield* reconcileKnowledge()
+          return
+        }
+        operation = yield* synchronization.publishKnowledge({ id: operationId, taskId: task.id, paths: inspection.paths })
+      } else if (operation.state === 'pending' || operation.state === 'prepared' || operation.state === 'published') {
+        operation = yield* synchronization.publish(operationId)
+        if (operation.state === 'published') operation = yield* synchronization.align(operationId)
+      }
+      if (operation.state === 'conflict') {
+        yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'conflict',
+          '$.publication.synchronizationId', ${operationId}) WHERE id=${task.id}`
+        const sessionsForTask = yield* store.sessions(task.id)
+        const source = sessionsForTask.find(session => session.id === request.sessionId && session.purpose === 'task')
+          ?? sessionsForTask.find(session => session.purpose === 'task')
+        if (source && !history.some(run => run.purpose === 'conflict-resolution')) {
+          yield* startConflictResolution({ taskId: task.id, operationId, sourceSessionId: source.id,
+            sessionId: randomUUID(), runId: randomUUID() })
+        }
+        return
+      }
+      if (operation.state !== 'completed') return
+      yield* sql`UPDATE tasks SET summary=json_set(summary, '$.publication.state', 'completed',
+        '$.publication.synchronizationId', ${operationId}) WHERE id=${task.id}`
+      yield* wiki.refresh
+      yield* completeUnlocked(task.id)
+      yield* reconcileKnowledge()
+    }, Effect.mapError(safeError))
     /** Replayable post-processing is derived from durable requests, never an in-memory callback. */
     const settleSuccessfulExecution = (request: RunRecord) => Effect.gen(function* () {
+      const task = yield* store.task(request.taskId)
+      if (task.type === 'agent' && task.configuration.rawInput) {
+        yield* settleKnowledge(request)
+        return
+      }
       if (request.purpose === 'conflict-resolution') {
         const session = (yield* store.sessions(request.taskId)).find(value => value.id === request.sessionId)
         if (!session?.syncOperationId) return yield* failure('invalid-state')
@@ -617,7 +885,7 @@ export const TaskServiceLive = Layer.effect(
     /** A user stop intentionally abandons the current window as a repair gap. */
     const settleCancelledRoutine = (taskId: string) => Effect.gen(function* () {
       const execution = yield* routines.executionForTask(taskId)
-      if (!execution) return
+      if (!execution || execution.windowStart === null) return
       // Keep the stopped worktree and partial output for inspection/repair.
       // schedule() decides whether the stopped boundary is old enough to start one
       // follow-up window. A short delta intentionally waits for the regular check.
@@ -663,7 +931,11 @@ export const TaskServiceLive = Layer.effect(
       // A crash may land after the final Run receipt but before worktree release. Reconcile
       // durable Routine state before admitting another batch; one dirty Task cannot stop peers.
       for (const task of yield* store.tasks) {
-        if (task.type === 'agent') yield* completeRoutineAfterReceipt(task.id)
+        if (task.type === 'agent' && task.configuration.rawInput) {
+          const latest = (yield* queue.list(task.id)).at(-1)
+          if (latest?.state === 'succeeded') yield* settleKnowledge(latest).pipe(Effect.catch(error => Effect.logWarning(
+            'Knowledge Task publication will be retried.', { taskId: task.id }, error)))
+        } else if (task.type === 'agent') yield* completeRoutineAfterReceipt(task.id)
         else if (task.state === 'completed' && task.worktreeState !== 'released') {
           const rows = yield* sql<{ id: string; state: string }>`SELECT id, state FROM git_operations
             WHERE task_id=${task.id} ORDER BY sequence DESC LIMIT 1`
@@ -677,6 +949,7 @@ export const TaskServiceLive = Layer.effect(
       const current = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis))
       for (const routine of yield* routines.list) {
         if (!routine.enabled) continue
+        if (routine.trigger.type !== 'schedule') continue
         const today = routineDateAt(current, routine.trigger.timeZone)
         const due = checkedDates.get(routine.id) !== today || routine.nextTriggerAt === null || routine.nextTriggerAt <= current
         // A normal scheduler tick is only a check. Settled execution is handled
@@ -689,11 +962,16 @@ export const TaskServiceLive = Layer.effect(
             Effect.catch(error => Effect.logWarning('Routine dispatch could not complete; its execution remains retryable.', { vaultId: vault.id, routineId: routine.id }, error)))
         }
       }
+      yield* reconcileKnowledge()
     }).pipe(Effect.mapError(safeError))
     /** Returns only this Task's actionable operation after proving the Task belongs to the Vault. */
     const pendingTaskSynchronizations = Effect.fn('TaskService.pendingTaskSynchronizations')(function* (taskId: string) {
       yield* store.task(taskId)
       return (yield* synchronization.pending).filter((operation) => operation.taskId === taskId)
+    })
+    const requireManualWikiTask = Effect.fn('TaskService.requireManualWikiTask')(function* (taskId: string) {
+      const task = yield* store.task(taskId)
+      if (task.type !== 'agent' || task.configuration.rawInput) return yield* failure('invalid-state')
     })
     /** Only a save attributed to the displayed Run may alter its publication snapshot. */
     const recordWikiSave = Effect.fn('TaskService.recordWikiSave')(function* (taskId: string, runIds: readonly string[], saveId: string) {
@@ -769,11 +1047,28 @@ export const TaskServiceLive = Layer.effect(
       if (task.type !== 'agent') return yield* failure('invalid-state')
       const operation = yield* synchronization.get(id)
       if (operation.taskId !== taskId) return yield* failure('not-found')
+      if (task.configuration.rawInput) {
+        if (action === 'abort') return yield* failure('invalid-state')
+        if (operation.state === 'conflict') {
+          if ((yield* queue.list(taskId)).some(run => ['queued', 'preparing', 'running'].includes(run.state)))
+            return yield* failure('task-busy')
+          const checkout = yield* synchronization.resolutionDirectory(taskId, id)
+          // A conflict has no published head yet. Its checkout is based on the main
+          // commit used to prepare the operation, so compare the resolved tree to HEAD.
+          const baseline = (yield* git(checkout, ['rev-parse', 'HEAD'])).trim()
+          const inspected = yield* inspectKnowledgeResult(task, checkout, baseline)
+          if (inspected.issues.length) return yield* new HarnessStoreError({ reason: 'invalid-state',
+            message: inspected.issues.join('\n') })
+        } else if (!['prepared', 'published', 'completed'].includes(operation.state)) return yield* failure('invalid-state')
+      }
       const settled = yield* action === 'resolve' ? synchronization.resolve(id) : synchronization.abort(id)
       yield* recordWikiSynchronization(settled)
-      if (settled.state === 'completed') yield* completeRoutineAfterReceipt(taskId)
+      if (settled.state === 'completed' && task.configuration.rawInput) {
+        const latest = (yield* queue.list(taskId)).filter(run => run.state === 'succeeded').at(-1)
+        if (latest) yield* settleKnowledge(latest)
+      } else if (settled.state === 'completed') yield* completeRoutineAfterReceipt(taskId)
       return settled
-    })
+    }, Effect.mapError(safeError))
     const cancelIngestion = Effect.fn('TaskService.cancelIngestion')(function* (taskId: string) {
       const task = yield* store.task(taskId)
       if (task.type !== 'ingestion' || !['pending', 'running'].includes(task.receipt.state)) return yield* failure('invalid-state')
@@ -832,16 +1127,19 @@ export const TaskServiceLive = Layer.effect(
           const context = yield* synchronization.resolutionContext(taskId, id)
           return { files: context.files, commonBase: context.commonBase, canonicalDiff: context.canonicalDiff, taskDiff: context.taskDiff }
         }),
+      taskWikiConflictFiles: (taskId, id) => synchronization.resolutionFiles(taskId, id),
+      writeTaskWikiConflictResolution: input => synchronization.writeResolution(input),
       saveWorkspaceFiles: (input) => changes.save({ ...input, taskId: null }),
-      saveTaskWikiFiles: changes.save,
-      saveRunWikiFiles: (input) => changes.saveRunWiki(input).pipe(Effect.tap(saved => recordWikiSave(input.taskId, input.runIds, saved.id))),
-      confirmRunWikiUnchanged: (input) => changes.confirmRunWikiUnchanged(input).pipe(
+      saveTaskWikiFiles: (input) => requireManualWikiTask(input.taskId).pipe(Effect.andThen(changes.save(input))),
+      saveRunWikiFiles: (input) => requireManualWikiTask(input.taskId).pipe(Effect.andThen(changes.saveRunWiki(input)),
+        Effect.tap(saved => recordWikiSave(input.taskId, input.runIds, saved.id))),
+      confirmRunWikiUnchanged: (input) => requireManualWikiTask(input.taskId).pipe(Effect.andThen(changes.confirmRunWikiUnchanged(input)),
         Effect.tap(() => markWikiUnchanged(input.taskId, input.runId)),
         Effect.tap(() => completeRoutineAfterReceipt(input.taskId))),
-      synchronizeTaskWiki: (input) => synchronization.synchronize(input).pipe(
+      synchronizeTaskWiki: (input) => requireManualWikiTask(input.taskId).pipe(Effect.andThen(synchronization.synchronize(input)),
         Effect.tap(recordWikiSynchronization),
         Effect.tap((operation) => operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void)),
-      reprepareTaskWiki: (input) => synchronization.reprepare(input).pipe(
+      reprepareTaskWiki: (input) => requireManualWikiTask(input.taskId).pipe(Effect.andThen(synchronization.reprepare(input)),
         Effect.tap(recordWikiSynchronization),
         Effect.tap((operation) => operation.state === 'completed' ? completeRoutineAfterReceipt(input.taskId) : Effect.void)),
       resolveTaskWikiConflict: (taskId, id) => conflictAction(taskId, id, 'resolve'),
@@ -859,7 +1157,12 @@ export const TaskServiceLive = Layer.effect(
       get,
       openSession,
       closeSession: sessions.close,
-      startRun: (input) => queue.submit({ ...input, source: input.purpose === 'recovery' ? 'recovery' : 'manual' }).pipe(gate.withPermit, Effect.tap(() => notifications.wake)),
+      startRun: (input) => Effect.gen(function* () {
+        const task = yield* store.task(input.taskId)
+        if (task.type === 'agent' && task.configuration.rawInput) return yield* failure('invalid-state')
+        return yield* queue.submit({ ...input, source: input.purpose === 'recovery' ? 'recovery' : 'manual' })
+      }).pipe(gate.withPermit, Effect.tap(() => notifications.wake)),
+      retryKnowledgeRun,
       startConflictResolution,
       inspectRun: (taskId, runId) => Effect.gen(function* () {
         yield* runs.inspect(taskId, runId)

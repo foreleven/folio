@@ -1,21 +1,23 @@
 import type { ExecutionCounts } from './execution'
 import { Context, Effect } from 'effect'
 import type { HarnessStoreError, SessionRecord, TaskRecord, RunRecord } from './harness'
-import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution } from './routine'
-import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput, TaskDetail, SessionHistory, RoutineRunResult, TaskFeedPage, TaskFeedCursor } from './rpc/task-rpc'
+import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution, ScheduledRoutineExecution } from './routine'
+import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput, RetryKnowledgeRunInput, TaskDetail, SessionHistory, RoutineRunResult, TaskFeedPage, TaskFeedCursor } from './rpc/task-rpc'
 import type {
   ConfirmRunWikiUnchanged,
   SaveRunWikiFiles,
   SaveTaskWikiFiles,
   SaveWorkspaceFiles,
   GitConflictContext,
+  GitConflictFile,
   GitChangeApplication,
   ReprepareTaskWiki,
   SynchronizeTaskWiki,
   GitSyncOperation,
   WorkspaceChangesView,
   WorkspaceDiffInput,
-  WorkspaceFileDiff
+  WorkspaceFileDiff,
+  WriteGitConflictResolution
 } from './git-change'
 
 /** Services for one Vault; identity comes from its main-owned context. */
@@ -29,6 +31,8 @@ export class TaskService extends Context.Service<
       readonly diffTaskWiki: (taskId: string, input: WorkspaceDiffInput) => Effect.Effect<WorkspaceFileDiff, HarnessStoreError>
     }
     readonly taskWikiConflictContext: (taskId: string, id: string) => Effect.Effect<typeof GitConflictContext.Type, HarnessStoreError>
+    readonly taskWikiConflictFiles: (taskId: string, id: string) => Effect.Effect<readonly GitConflictFile[], HarnessStoreError>
+    readonly writeTaskWikiConflictResolution: (input: WriteGitConflictResolution) => Effect.Effect<void, HarnessStoreError>
     readonly saveWorkspaceFiles: (input: SaveWorkspaceFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly saveTaskWikiFiles: (input: SaveTaskWikiFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
     readonly saveRunWikiFiles: (input: SaveRunWikiFiles) => Effect.Effect<GitChangeApplication, HarnessStoreError>
@@ -55,13 +59,14 @@ export class TaskService extends Context.Service<
     readonly ensureDefaultRoutine: Effect.Effect<void, HarnessStoreError>
     readonly saveRoutine: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
     readonly runRoutine: (input: RunRoutine) => Effect.Effect<RoutineRunResult, HarnessStoreError>
-    readonly prepareRoutine: (input: RunRoutine) => Effect.Effect<{ execution: RoutineExecution; task: TaskRecord }, HarnessStoreError>
+    readonly prepareRoutine: (input: RunRoutine) => Effect.Effect<{ execution: ScheduledRoutineExecution; task: TaskRecord }, HarnessStoreError>
     readonly create: (input: CreateTaskInput) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly complete: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly reopen: (taskId: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly get: (id: string) => Effect.Effect<TaskDetail, HarnessStoreError>
     readonly history: (taskId: string, sessionId: string) => Effect.Effect<SessionHistory, HarnessStoreError>
     readonly startRun: (input: StartTaskRunInput) => Effect.Effect<RunRecord, HarnessStoreError>
+    readonly retryKnowledgeRun: (input: RetryKnowledgeRunInput) => Effect.Effect<RunRecord, HarnessStoreError>
     readonly startConflictResolution: (input: StartConflictResolutionInput) => Effect.Effect<RunRecord, HarnessStoreError>
     readonly inspectRun: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>
     readonly cancelRun: (taskId: string, runId: string) => Effect.Effect<RunRecord, HarnessStoreError>

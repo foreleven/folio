@@ -8,11 +8,12 @@ const mocks = vi.hoisted(() => ({ snapshot: {} as unknown, read: vi.fn(), save: 
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
   useAtomSet: (kind: string) => kind === 'read' ? mocks.read : kind === 'save' ? mocks.save : mocks.saveTypes,
-  useAtomValue: () => ({ _tag: 'Success', value: mocks.snapshot })
+  useAtomValue: (query: string) => ({ _tag: 'Success', value: query === 'wiki.projectTimeline' ? [] : mocks.snapshot })
 }))
-vi.mock('../rpc/wiki-rpc', () => ({ WikiRpcClient: { query: () => ({}), readPage: 'read', savePage: 'save', saveTypes: 'types' } }))
+vi.mock('../rpc/wiki-rpc', () => ({ WikiRpcClient: { query: (method: string) => method, readPage: 'read', savePage: 'save', saveTypes: 'types' } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en-US' }))
 vi.mock('./PageContentEditor', () => ({ PageContentEditor: ({ value, onChange }: { value: string; onChange: (value: string) => void }) => <textarea aria-label="Page content" value={value} onChange={event => onChange(event.target.value)} /> }))
+vi.mock('./RawCitationPreview', () => ({ RawCitationPreview: () => null }))
 const one: PageDocument = { ...newPageMetadata('one', 'project'), title: 'Alpha', body: 'Original', path: 'one.md', version: 'v1' }
 const two: PageDocument = { ...newPageMetadata('two', 'note', 'one'), title: 'Beta', body: 'Second', path: 'two.md', version: 'v2' }
 beforeEach(() => {
@@ -69,10 +70,10 @@ describe('Wiki knowledge workflow', () => {
     render(<WikiPanel active onActivate={() => {}}>{({ navigation, content }) => <>{navigation(() => {})}{content}</>}</WikiPanel>)
     await openAlpha()
     fireEvent.change(screen.getByRole('textbox', { name: 'Page title' }), { target: { value: 'Updated' } })
-    fireEvent.change(screen.getByRole('combobox', { name: 'Status' }), { target: { value: 'In progress' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Status' }), { target: { value: 'in_progress' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Page content' }), { target: { value: '# Updated\n\nKnowledge' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ payload: { input: expect.objectContaining({ expectedVersion: 'v1', body: '# Updated\n\nKnowledge', metadata: expect.objectContaining({ title: 'Updated', properties: { status: 'In progress' } }) }) } }))
+    await waitFor(() => expect(mocks.save).toHaveBeenCalledWith({ payload: { input: expect.objectContaining({ expectedVersion: 'v1', body: '# Updated\n\nKnowledge', metadata: expect.objectContaining({ title: 'Updated', properties: { status: 'in_progress' } }) }) } }))
     await screen.findByText('Saved', { exact: true })
   })
 

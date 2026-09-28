@@ -29,7 +29,7 @@ export function RoutineEditor({ initial, onSaved, onCancel }: { initial: { id: s
   const refresh = useAtomRefresh(ConfigRpcClient.watch)
   if (!initial.record && config._tag === 'Failure') return <div role="alert"><p>Could not load the default time zone.</p><Button onClick={refresh}>Retry</Button></div>
   if (!initial.record && config._tag !== 'Success') return <Skeleton role="status" className="h-72 w-full" />
-  return <RoutineEditorForm initial={initial} onSaved={onSaved} onCancel={onCancel} defaultTimeZone={config._tag === 'Success' ? config.value.timeZone : initial.record!.trigger.timeZone} />
+  return <RoutineEditorForm initial={initial} onSaved={onSaved} onCancel={onCancel} defaultTimeZone={config._tag === 'Success' ? config.value.timeZone : initial.record?.trigger.type === 'schedule' ? initial.record.trigger.timeZone : 'UTC'} />
 }
 
 /** Edits typed Routine intent; the executor type is immutable after creation. */
@@ -41,14 +41,15 @@ function RoutineEditorForm({ initial, onSaved, onCancel, defaultTimeZone }: { in
   const [draft, setDraft] = useState<Draft>(() => {
     const record = initial.record
     if (!record) return newAgentDraft(defaultTimeZone)
-    const schedule = { name: record.name, intervalMinutes: record.trigger.intervalMinutes, timeZone: record.trigger.timeZone, enabled: record.enabled }
+    const schedule = { name: record.name, intervalMinutes: record.trigger.type === 'schedule' ? record.trigger.intervalMinutes : 60, timeZone: record.trigger.type === 'schedule' ? record.trigger.timeZone : defaultTimeZone, enabled: record.enabled }
     return record.type === 'agent'
       ? { ...schedule, type: 'agent', configuration: { ...record.configuration, skillIds: [...record.configuration.skillIds], integrationIds: [...record.configuration.integrationIds], resourceIds: [...record.configuration.resourceIds] } }
       : { ...schedule, type: 'ingestion', configuration: { ...record.configuration } }
   })
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const valid = draft.name.trim() && draft.intervalMinutes >= 1 && (draft.type === 'ingestion'
+  const systemIntake = initial.record?.trigger.type === 'event'
+  const valid = draft.name.trim() && (systemIntake || draft.intervalMinutes >= 1) && (draft.type === 'ingestion'
     ? draft.configuration.integrationId && draft.configuration.resourceId
     : draft.configuration.goal.trim() && (draft.configuration.agent !== 'pi'
       || Boolean(draft.configuration.model?.providerId && draft.configuration.model.modelId)))
@@ -60,7 +61,7 @@ function RoutineEditorForm({ initial, onSaved, onCancel, defaultTimeZone }: { in
     try {
       const input = draft.type === 'agent' ? {
         id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
-        trigger: { type: 'schedule' as const, intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone }, enabled: draft.enabled, type: draft.type,
+        trigger: systemIntake ? { type: 'event' as const, signal: 'raws-changed' as const } : { type: 'schedule' as const, intervalMinutes: draft.intervalMinutes, timeZone: draft.timeZone }, enabled: draft.enabled, type: draft.type,
         configuration: { ...draft.configuration, goal: draft.configuration.goal.trim(), model: draft.configuration.agent === 'pi' ? draft.configuration.model : null }
       } as const : {
         id: initial.id, expectedRevision: initial.record?.revision ?? null, name: draft.name.trim(),
@@ -79,13 +80,13 @@ function RoutineEditorForm({ initial, onSaved, onCancel, defaultTimeZone }: { in
   return <Card><form onSubmit={event => { event.preventDefault(); void submit() }}>
     <CardHeader className="border-b"><CardTitle>{initial.record ? (chinese ? '编辑 Routine' : 'Edit Routine') : (chinese ? '新建 Routine' : 'New Routine')}</CardTitle><CardDescription>{chinese ? 'Ingestion 直接从一个集成资源生成 raws；Agent Routine 执行对话任务。' : 'Ingestion writes raws from one Integration resource; Agent Routines run conversational tasks.'}</CardDescription></CardHeader>
     <CardContent className="pt-4"><fieldset disabled={pending}><FieldGroup className="gap-4">
-      <Field><FieldLabel htmlFor="routine-name">{chinese ? '名称' : 'Name'}</FieldLabel><Input id="routine-name" value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></Field>
+      <Field><FieldLabel htmlFor="routine-name">{chinese ? '名称' : 'Name'}</FieldLabel><Input id="routine-name" disabled={systemIntake} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></Field>
       <div className="grid gap-4 sm:grid-cols-3">
-        <Field><FieldLabel htmlFor="routine-type">{chinese ? '类型' : 'Type'}</FieldLabel><select id="routine-type" className={selectClass} value={draft.type} disabled={Boolean(initial.record)} onChange={event => setDraft(event.target.value === 'ingestion' ? newIngestionDraft(draft.timeZone) : newAgentDraft(draft.timeZone))}><option value="agent">Agent</option><option value="ingestion">Ingestion</option></select></Field>
+        {!systemIntake && <><Field><FieldLabel htmlFor="routine-type">{chinese ? '类型' : 'Type'}</FieldLabel><select id="routine-type" className={selectClass} value={draft.type} disabled={Boolean(initial.record)} onChange={event => setDraft(event.target.value === 'ingestion' ? newIngestionDraft(draft.timeZone) : newAgentDraft(draft.timeZone))}><option value="agent">Agent</option><option value="ingestion">Ingestion</option></select></Field>
         <Field><FieldLabel htmlFor="routine-interval">{chinese ? '检查周期（分钟）' : 'Check interval (minutes)'}</FieldLabel><Input id="routine-interval" type="number" min={1} value={draft.intervalMinutes} onChange={event => setDraft({ ...draft, intervalMinutes: Number(event.target.value) })} /></Field>
-        <Field><FieldLabel htmlFor="routine-timezone">{chinese ? '时区' : 'Time zone'}</FieldLabel><Input id="routine-timezone" value={draft.timeZone} onChange={event => setDraft({ ...draft, timeZone: event.target.value })} /></Field>
+        <Field><FieldLabel htmlFor="routine-timezone">{chinese ? '时区' : 'Time zone'}</FieldLabel><Input id="routine-timezone" value={draft.timeZone} onChange={event => setDraft({ ...draft, timeZone: event.target.value })} /></Field></>}
       </div>
-      {draft.type === 'agent' ? <AgentFields draft={draft} setDraft={setDraft} chinese={chinese} integrations={integrations} />
+      {draft.type === 'agent' ? <AgentFields draft={draft} setDraft={setDraft} chinese={chinese} integrations={systemIntake ? null : integrations} />
         : <IngestionFields draft={draft} setDraft={setDraft} chinese={chinese} integrations={integrations} />}
       <label className="flex items-center gap-2 text-ui"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />{chinese ? '启用 Routine' : 'Enable Routine'}</label>
     </FieldGroup></fieldset></CardContent>

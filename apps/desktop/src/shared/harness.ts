@@ -6,13 +6,16 @@ export const AgentKind = Schema.Literals(['pi', 'codex'])
 const Id = Schema.NonEmptyString
 const Goal = Schema.NonEmptyString.check(Schema.makeFilter((value) => value.trim().length > 0))
 /** Immutable Agent inputs. Credentials remain in Agent and Integration stores. */
+export const RawInput = Schema.Struct({ fromCommit: Schema.NullOr(Schema.String), toCommit: Schema.String })
+export type RawInput = typeof RawInput.Type
 export const AgentTaskConfiguration = Schema.Struct({
   goal: Goal,
   agent: AgentKind,
   model: Schema.NullOr(SessionModelSelection),
   skillIds: Schema.Array(Id),
   integrationIds: Schema.Array(Id),
-  resourceIds: Schema.Array(Id)
+  resourceIds: Schema.Array(Id),
+  rawInput: Schema.NullOr(RawInput)
 })
 export type AgentTaskConfiguration = typeof AgentTaskConfiguration.Type
 export const IngestionTaskConfiguration = Schema.Struct({

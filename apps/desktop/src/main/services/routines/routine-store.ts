@@ -9,6 +9,8 @@ import {
   RoutineExecution,
   RoutineExecutionStatus,
   RoutineRecord,
+  RoutineTrigger,
+  ScheduledRoutineExecution,
   ScheduleTrigger,
   SaveRoutine,
   routineDateAt,
@@ -26,22 +28,22 @@ const fail = (reason: HarnessStoreError['reason'], message?: string) => new Harn
 })
 
 const RoutineRowCommon = {
-  id: Schema.String, name: Schema.String, trigger: Schema.fromJsonString(ScheduleTrigger),
+  id: Schema.String, name: Schema.String, trigger: Schema.fromJsonString(RoutineTrigger),
   enabled: Schema.Union([Schema.Boolean, Schema.Number]), revision: Schema.Int,
   nextTriggerAt: Schema.NullOr(Schema.Number), lastTriggerAt: Schema.NullOr(Schema.Number),
   createdAt: Schema.Number, updatedAt: Schema.Number
 }
 const DbRoutine = Schema.Union([
   Schema.Struct({ ...RoutineRowCommon, type: Schema.Literal('agent'), configuration: Schema.fromJsonString(AgentRoutineConfiguration) }),
-  Schema.Struct({ ...RoutineRowCommon, type: Schema.Literal('ingestion'), configuration: Schema.fromJsonString(IngestionRoutineConfiguration) })
+  Schema.Struct({ ...RoutineRowCommon, trigger: Schema.fromJsonString(ScheduleTrigger), type: Schema.Literal('ingestion'), configuration: Schema.fromJsonString(IngestionRoutineConfiguration) })
 ])
 const DbExecution = Schema.Struct({
   routineId: Schema.String, taskId: Schema.String, type: Schema.Literals(['agent', 'ingestion']),
   runId: Schema.NullOr(Schema.String), cancelRequested: Schema.Union([Schema.Boolean, Schema.Number]),
   triggerTime: Schema.Number,
-  windowStart: Schema.Number, windowEnd: Schema.Number,
+  windowStart: Schema.NullOr(Schema.Number), windowEnd: Schema.NullOr(Schema.Number),
   model: Schema.NullOr(Schema.fromJsonString(AgentTaskConfiguration.fields.model)),
-  timeZone: Schema.String, routineRevision: Schema.Int, status: RoutineExecutionStatus,
+  timeZone: Schema.NullOr(ScheduleTrigger.fields.timeZone), routineRevision: Schema.Int, status: RoutineExecutionStatus,
   startedAt: Schema.NullOr(Schema.Number), endedAt: Schema.NullOr(Schema.Number),
   createdAt: Schema.Number, updatedAt: Schema.Number
 })
@@ -50,7 +52,8 @@ function decodeRoutine(row: typeof DbRoutine.Type): RoutineRecord {
   return { ...row, enabled: row.enabled === true || row.enabled === 1 }
 }
 function decodeExecution(row: typeof DbExecution.Type): RoutineExecution {
-  return { ...row, routineDate: routineDateAt(row.windowStart, row.timeZone), cancelRequested: row.cancelRequested === true || row.cancelRequested === 1 }
+  return { ...row, routineDate: row.windowStart !== null && row.timeZone !== null ? routineDateAt(row.windowStart, row.timeZone) : null,
+    cancelRequested: row.cancelRequested === true || row.cancelRequested === 1 }
 }
 const initialIngestionReceipt = (): IngestionReceipt => ({
   state: 'pending', attemptCount: 0, cancelRequested: false,
@@ -62,7 +65,8 @@ export class RoutineStore extends Context.Service<RoutineStore, {
   readonly list: Effect.Effect<readonly RoutineRecord[], HarnessStoreError>
   readonly get: (id: string) => Effect.Effect<RoutineRecord, HarnessStoreError>
   readonly save: (input: SaveRoutine) => Effect.Effect<RoutineRecord, HarnessStoreError>
-  readonly schedule: (routineId: string, at?: number, mode?: 'check' | 'settled') => Effect.Effect<RoutineExecution | null, HarnessStoreError>
+  readonly ensureRawIntake: Effect.Effect<RoutineRecord, HarnessStoreError>
+  readonly schedule: (routineId: string, at?: number, mode?: 'check' | 'settled') => Effect.Effect<ScheduledRoutineExecution | null, HarnessStoreError>
   readonly allExecutions: Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
   readonly executions: (routineId: string) => Effect.Effect<readonly RoutineExecution[], HarnessStoreError>
   readonly executionForTask: (taskId: string) => Effect.Effect<RoutineExecution | null, HarnessStoreError>
@@ -81,30 +85,38 @@ export class RoutineStore extends Context.Service<RoutineStore, {
       Effect.flatMap(decodeRoutines), Effect.map(rows => rows.map(decodeRoutine)), Effect.mapError(safe)
     )
 
+    /** Tasks own execution history; schedule rows only enrich Tasks with frozen source windows. */
     const readExecutionRows = (routineId?: string, taskId?: string) =>
-      sql`SELECT s.routine_id AS routineId, t.id AS taskId, t.type,
+      sql`SELECT t.routine_id AS routineId, t.id AS taskId, t.type,
         CASE WHEN t.type='agent' THEN r.id ELSE NULL END AS runId,
         CASE WHEN t.type='agent' THEN COALESCE(r.cancel_requested, 0)
           ELSE COALESCE(json_extract(t.receipt, '$.cancelRequested'), 0) END AS cancelRequested,
-        s.trigger_time AS triggerTime,
+        COALESCE(s.trigger_time, t.created_at) AS triggerTime,
         s.window_start AS windowStart, s.window_end AS windowEnd,
         CASE WHEN t.type='agent' THEN json_extract(t.configuration, '$.model') ELSE NULL END AS model,
         s.time_zone AS timeZone, t.routine_revision AS routineRevision,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.state')
           WHEN t.state='cancelled' THEN 'cancelled'
+          WHEN t.state='completed' THEN 'succeeded'
+          WHEN s.task_id IS NULL AND EXISTS (SELECT 1 FROM git_operations operation
+            WHERE operation.task_id=t.id AND operation.kind='synchronize' AND operation.state='conflict') THEN 'conflict'
+          WHEN s.task_id IS NULL AND r.state='succeeded' THEN 'pending'
           WHEN r.state='queued' THEN 'pending' ELSE COALESCE(r.state, 'pending') END AS status,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.startedAt') ELSE r.started_at END AS startedAt,
         CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.endedAt') ELSE r.ended_at END AS endedAt,
         t.created_at AS createdAt,
-        MAX(s.created_at,
+        MAX(t.created_at,
           COALESCE(CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.endedAt') ELSE r.ended_at END,
             CASE WHEN t.type='ingestion' THEN json_extract(t.receipt, '$.startedAt') ELSE r.started_at END,
-            s.created_at)) AS updatedAt
-        FROM routine_schedules s JOIN tasks t ON t.id=s.task_id LEFT JOIN runs r ON t.type='agent' AND r.sequence=(
+            t.created_at)) AS updatedAt
+        FROM tasks t LEFT JOIN routine_schedules s ON s.task_id=t.id LEFT JOIN runs r ON t.type='agent' AND r.sequence=(
           SELECT MAX(sequence) FROM runs WHERE task_id=t.id AND purpose<>'conflict-resolution')
-        WHERE (${routineId ?? null} IS NULL OR s.routine_id=${routineId ?? null})
+        WHERE t.routine_id IS NOT NULL AND (${routineId ?? null} IS NULL OR t.routine_id=${routineId ?? null})
           AND (${taskId ?? null} IS NULL OR t.id=${taskId ?? null})
-        ORDER BY s.window_start DESC, s.trigger_time DESC, t.id`.pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
+        ORDER BY t.created_at DESC, t.id DESC`.pipe(Effect.flatMap(decodeExecutions), Effect.mapError(safe))
+
+    const readScheduledRows = (routineId: string, taskId?: string) => readExecutionRows(routineId, taskId).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(ScheduledRoutineExecution))))
 
     const get = Effect.fn('RoutineStore.get')(function* (id: string) {
       const rows = yield* sql`SELECT id, name, type, configuration,
@@ -136,6 +148,13 @@ export class RoutineStore extends Context.Service<RoutineStore, {
           trigger: previous.trigger, enabled: previous.enabled
         })) return previous
         if (previous ? previous.revision !== value.expectedRevision : value.expectedRevision !== null) return yield* fail('invalid-state')
+        if (value.type === 'agent' && value.trigger.type === 'event') {
+          if (!previous || previous.type !== 'agent' || previous.trigger.type !== 'event'
+            || previous.trigger.signal !== 'raws-changed' || value.trigger.signal !== 'raws-changed'
+            || value.name !== previous.name || value.configuration.integrationIds.length
+            || value.configuration.resourceIds.length || value.configuration.skillIds.length)
+            return yield* fail('invalid-state', 'The system Raw knowledge intake Routine cannot be repurposed.')
+        } else if (previous?.trigger.type === 'event') return yield* fail('invalid-state', 'The system Raw knowledge intake Routine cannot be repurposed.')
         if (value.type === 'ingestion') {
           const occupied = yield* sql<{ id: string }>`SELECT id FROM routines WHERE type='ingestion'
             AND json_extract(configuration, '$.integrationId')=${value.configuration.integrationId}
@@ -166,8 +185,9 @@ export class RoutineStore extends Context.Service<RoutineStore, {
     const schedule = Effect.fn('RoutineStore.schedule')(function* (routineId: string, at = Date.now(), mode: 'check' | 'settled' = 'check') {
       return yield* sql.withTransaction(Effect.gen(function* () {
         const routine = yield* get(routineId)
+        if (routine.trigger.type !== 'schedule') return yield* fail('invalid-state', 'Event Routines have no time window.')
         if (!routine.enabled) return yield* fail('invalid-state', 'Routine is paused.')
-        const candidates = yield* readExecutionRows(routineId)
+        const candidates = yield* readScheduledRows(routineId)
         const today = routineDateAt(at, routine.trigger.timeZone)
         const todayStart = routineDayStart(today, routine.trigger.timeZone)
         const time = yield* now
@@ -203,7 +223,7 @@ export class RoutineStore extends Context.Service<RoutineStore, {
           yield* worktrees.reserve({ id: taskId, type: 'agent', receipt: null, configuration: {
             goal: routine.configuration.goal, agent: routine.configuration.agent, model: routine.configuration.model,
             skillIds: routine.configuration.skillIds, integrationIds: routine.configuration.integrationIds,
-            resourceIds: routine.configuration.resourceIds
+            resourceIds: routine.configuration.resourceIds, rawInput: null
           } })
         } else {
           yield* worktrees.reserve({ id: taskId, type: 'ingestion', receipt: initialIngestionReceipt(), configuration: routine.configuration })
@@ -215,10 +235,25 @@ export class RoutineStore extends Context.Service<RoutineStore, {
           VALUES (${taskId}, ${routineId}, ${at}, ${windowStart}, ${windowEnd}, ${routine.trigger.timeZone}, ${time})`
         yield* sql`UPDATE routines SET next_trigger_at=${at + routine.trigger.intervalMinutes * 60_000},
           last_trigger_at=${at}, updated_at=${time} WHERE id=${routineId}`
-        return (yield* readExecutionRows(routineId, taskId))[0]!
+        return (yield* readScheduledRows(routineId, taskId))[0]!
       }))
     }, Effect.mapError(safe))
 
-    return RoutineStore.of({ list: readRoutines, get, save, schedule, allExecutions: readExecutionRows(), executions, executionForTask })
+    /** The unique event trigger is the system Routine's durable identity. */
+    const ensureRawIntake = Effect.fn('RoutineStore.ensureRawIntake')(function* () {
+      const existing = (yield* readRoutines).find(routine => routine.type === 'agent' && routine.trigger.type === 'event')
+      if (existing) return existing
+      const time = yield* now
+      const id = randomUUID()
+      yield* sql`INSERT OR IGNORE INTO routines (id, name, type, configuration, trigger, enabled,
+        revision, next_trigger_at, last_trigger_at, created_at, updated_at)
+        VALUES (${id}, 'Raw knowledge intake', 'agent', ${JSON.stringify({
+          goal: 'Organize newly ingested raw material into evidence-backed Wiki assets.',
+          agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: []
+        })}, ${JSON.stringify({ type: 'event', signal: 'raws-changed' })}, 1, 1, NULL, NULL, ${time}, ${time})`
+      return (yield* readRoutines).find(routine => routine.type === 'agent' && routine.trigger.type === 'event')!
+    }, Effect.mapError(safe))
+
+    return RoutineStore.of({ list: readRoutines, get, save, ensureRawIntake: ensureRawIntake(), schedule, allExecutions: readExecutionRows(), executions, executionForTask })
   }))
 }

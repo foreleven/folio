@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { GitChangeApplications } from '../git/git-change-applications'
 import { HarnessStore } from '../harness/harness-store'
+import { RoutineStore } from '../routines/routine-store'
 import { vaultDatabaseLayer } from '../vault/vault-database'
 import { initializeVaultWorkspace } from '../vault/vault-workspace'
 import { makeVaultGit } from '../git/vault-git'
@@ -21,7 +22,8 @@ beforeEach(async () => {
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 function layer() {
-  return Layer.mergeAll(TaskGitSynchronization.layer(root), GitChangeApplications.layer(root), TaskWorktrees.layer(root)).pipe(
+  return Layer.mergeAll(TaskGitSynchronization.layer(root), GitChangeApplications.layer(root), RoutineStore.layer).pipe(
+    Layer.provideMerge(TaskWorktrees.layer(root)),
     Layer.provideMerge(HarnessStore.layer(root)),
     Layer.provideMerge(vaultDatabaseLayer(root)),
     Layer.provideMerge(NodeServices.layer)
@@ -32,10 +34,65 @@ const setup = Effect.gen(function* () {
   const workspace = yield* initializeVaultWorkspace(root, join(root, 'entry'))
   const worktrees = yield* TaskWorktrees
   const task = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null,
-    configuration: { goal: 'test', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+    configuration: { goal: 'test', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [], rawInput: null } })
   return { workspace, task, worktrees, changes: yield* GitChangeApplications,
     synchronization: yield* TaskGitSynchronization, git: yield* makeVaultGit }
 })
+
+/** Exercise the same save/prepare split as Ingestion before canonical publication. */
+const prepareRaws = Effect.fnUntraced(function* () {
+  const routines = yield* RoutineStore
+  const routineId = '99999999-9999-4999-8999-999999999999'
+  yield* routines.save({ id: routineId, expectedRevision: null, name: 'IM', type: 'ingestion',
+    configuration: { integrationId: 'lark', resourceId: 'im' },
+    trigger: { type: 'schedule', intervalMinutes: 60, timeZone: 'Asia/Shanghai' }, enabled: true })
+  const execution = (yield* routines.schedule(routineId, Date.parse('2026-09-28T01:00:00+08:00')))!
+  const ingestion = yield* (yield* TaskWorktrees).ensure(execution.taskId)
+  const path = 'raws/lark/im/2026-09-28/chat.md'
+  yield* Effect.promise(() => mkdir(join(ingestion.path, 'raws/lark/im/2026-09-28'), { recursive: true }))
+  yield* Effect.promise(() => writeFile(join(ingestion.path, path), 'new messages\n'))
+  const raw = yield* (yield* GitChangeApplications).saveTaskRaws({ id: 'raw-save', taskId: execution.taskId,
+    expectedParent: ingestion.baselineCommit, paths: [path] })
+  const publication = yield* (yield* TaskGitSynchronization).prepare({ id: 'raw-publish', taskId: execution.taskId,
+    expectedSourceHead: raw.commit })
+  return { publication, path }
+})
+
+it('publishes raws while an earlier Wiki publication is prepared', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const { workspace, task, changes, synchronization } = yield* setup
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki/note.md'), 'pending knowledge\n'))
+    const wiki = yield* changes.save({ id: 'wiki-save', taskId: 'task', expectedParent: task.baselineCommit,
+      paths: ['wiki/note.md'] })
+    expect((yield* synchronization.prepare({ id: 'wiki-publish', taskId: 'task', expectedSourceHead: wiki.commit })).state).toBe('prepared')
+
+    const { publication, path } = yield* prepareRaws()
+    expect(publication.state).toBe('prepared')
+
+    expect((yield* synchronization.publish('raw-publish')).state).toBe('published')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, path), 'utf8'))).toBe('new messages\n')
+    expect((yield* synchronization.get('wiki-publish')).state).toBe('prepared')
+    expect((yield* synchronization.publish('wiki-publish')).state).toBe('published')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'note.md'), 'utf8'))).toBe('pending knowledge\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, path), 'utf8'))).toBe('new messages\n')
+  }).pipe(Effect.provide(layer())))
+}, 15_000)
+
+it('publishes Wiki without waiting for an earlier raw publication', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const { workspace, task, changes, synchronization } = yield* setup
+    const { publication, path } = yield* prepareRaws()
+    expect(publication.state).toBe('prepared')
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki/note.md'), 'knowledge\n'))
+    const wiki = yield* changes.save({ id: 'wiki-save', taskId: 'task', expectedParent: task.baselineCommit,
+      paths: ['wiki/note.md'] })
+    expect((yield* synchronization.synchronize({ id: 'wiki-publish', taskId: 'task', expectedSourceHead: wiki.commit })).state).toBe('completed')
+    expect((yield* synchronization.get('raw-publish')).state).toBe('prepared')
+    expect((yield* synchronization.publish('raw-publish')).state).toBe('published')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'note.md'), 'utf8'))).toBe('knowledge\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, path), 'utf8'))).toBe('new messages\n')
+  }).pipe(Effect.provide(layer())))
+}, 15_000)
 
 it('publishes and aligns a Task through one compact synchronization operation', async () => {
   await Effect.runPromise(Effect.gen(function* () {
@@ -54,6 +111,107 @@ it('publishes and aligns a Task through one compact synchronization operation', 
     ])
   }).pipe(Effect.provide(layer())))
 })
+
+it('publishes a Knowledge Task draft with one Git operation and no Task save', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const workspace = yield* initializeVaultWorkspace(root, join(root, 'entry'))
+    const worktrees = yield* TaskWorktrees
+    const task = yield* worktrees.create({ id: 'knowledge', type: 'agent', receipt: null,
+      configuration: { goal: 'organize', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: workspace.initialCommit } } })
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki', 'finding.md'), '# Finding\n'))
+    const synchronization = yield* TaskGitSynchronization
+    expect((yield* synchronization.publishKnowledge({ id: 'knowledge-publish', taskId: 'knowledge',
+      paths: ['wiki/finding.md'] })).state).toBe('completed')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'finding.md'), 'utf8'))).toBe('# Finding\n')
+    expect(yield* (yield* SqlClient.SqlClient)`SELECT kind, state FROM git_operations WHERE task_id='knowledge'`).toEqual([
+      { kind: 'synchronize', state: 'completed' }
+    ])
+    expect((yield* (yield* makeVaultGit)(task.path, ['status', '--porcelain'])).trim()).toBe('')
+  }).pipe(Effect.provide(layer())))
+})
+
+it('keeps a conflicting Knowledge intent at the head of the Wiki publication queue', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const workspace = yield* initializeVaultWorkspace(root, join(root, 'entry'))
+    const changes = yield* GitChangeApplications
+    yield* Effect.promise(() => writeFile(join(workspace.wiki, 'shared.md'), 'base\n'))
+    const base = yield* changes.save({ id: 'base', taskId: null, expectedParent: workspace.initialCommit,
+      paths: ['wiki/shared.md'] })
+    const task = yield* (yield* TaskWorktrees).create({ id: 'knowledge', type: 'agent', receipt: null,
+      configuration: { goal: 'organize', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: base.commit } } })
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki/shared.md'), 'knowledge\n'))
+    yield* Effect.promise(() => writeFile(join(workspace.wiki, 'shared.md'), 'canonical\n'))
+    yield* changes.save({ id: 'main-edit', taskId: null, expectedParent: base.commit, paths: ['wiki/shared.md'] })
+    const synchronization = yield* TaskGitSynchronization
+    const first = yield* synchronization.publishKnowledge({ id: 'first-intent', taskId: 'knowledge',
+      paths: ['wiki/shared.md'] })
+    expect(first.state).toBe('conflict')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'shared.md'), 'utf8'))).toBe('canonical\n')
+    const later = yield* (yield* TaskWorktrees).create({ id: 'later-knowledge', type: 'agent', receipt: null,
+      configuration: { goal: 'organize', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: base.commit } } })
+    yield* Effect.promise(() => writeFile(join(later.path, 'wiki/later.md'), 'later knowledge\n'))
+    expect(yield* synchronization.publishKnowledge({ id: 'later-intent', taskId: 'later-knowledge',
+      paths: ['wiki/later.md'] }).pipe(Effect.flip)).toMatchObject({ reason: 'task-busy',
+      message: 'An earlier Wiki publication is still pending.' })
+    const { publication, path } = yield* prepareRaws()
+    expect((yield* synchronization.publish(publication.id)).state).toBe('published')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, path), 'utf8'))).toBe('new messages\n')
+    expect((yield* synchronization.get('first-intent')).state).toBe('conflict')
+    expect(yield* synchronization.publish('later-intent').pipe(Effect.flip)).toMatchObject({ reason: 'task-busy' })
+    const candidates = yield* synchronization.resolutionFiles('knowledge', 'first-intent')
+    expect(candidates).toMatchObject([{ path: 'wiki/shared.md', canonical: 'canonical\n', task: 'knowledge\n' }])
+    yield* synchronization.writeResolution({ taskId: 'knowledge', operationId: 'first-intent',
+      files: [{ path: 'wiki/shared.md', content: 'merged\n' }] })
+    // A lost reply after staging must still expose the same file and accept the same choice.
+    expect(yield* synchronization.resolutionFiles('knowledge', 'first-intent')).toMatchObject([
+      { path: 'wiki/shared.md', working: 'merged\n' }
+    ])
+    yield* synchronization.writeResolution({ taskId: 'knowledge', operationId: 'first-intent',
+      files: [{ path: 'wiki/shared.md', content: 'merged\n' }] })
+    expect((yield* synchronization.resolve('first-intent')).state).toBe('completed')
+    expect((yield* synchronization.publishKnowledge({ id: 'later-intent', taskId: 'later-knowledge',
+      paths: ['wiki/later.md'] })).state).toBe('completed')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'shared.md'), 'utf8'))).toBe('merged\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'later.md'), 'utf8'))).toBe('later knowledge\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.workspace, path), 'utf8'))).toBe('new messages\n')
+    expect(yield* (yield* SqlClient.SqlClient)`SELECT kind, state FROM git_operations WHERE task_id='knowledge'`).toEqual([
+      { kind: 'synchronize', state: 'completed' }
+    ])
+  }).pipe(Effect.provide(layer())))
+}, 15_000)
+
+it('recovers a Knowledge publication after the Task checkout resets but its receipt fails', async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    const workspace = yield* initializeVaultWorkspace(root, join(root, 'entry'))
+    const task = yield* (yield* TaskWorktrees).create({ id: 'knowledge', type: 'agent', receipt: null,
+      configuration: { goal: 'organize', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: workspace.initialCommit } } })
+    yield* Effect.promise(() => writeFile(join(task.path, 'wiki', 'finding.md'), '# Finding\n'))
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TRIGGER fail_knowledge_receipt BEFORE UPDATE OF state ON git_operations
+      WHEN OLD.id='knowledge-publish' AND NEW.state='completed' BEGIN SELECT RAISE(ABORT, 'receipt failed'); END`
+    const synchronization = yield* TaskGitSynchronization
+    expect((yield* synchronization.publishKnowledge({ id: 'knowledge-publish', taskId: 'knowledge',
+      paths: ['wiki/finding.md'] }).pipe(Effect.flip)).reason).toBe('storage')
+    const published = yield* synchronization.get('knowledge-publish')
+    expect(published.state).toBe('published')
+    // Canonical publication releases FIFO even when the prior alignment receipt failed.
+    const later = yield* (yield* TaskWorktrees).create({ id: 'later-knowledge', type: 'agent', receipt: null,
+      configuration: { goal: 'organize', agent: 'codex', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: published.publishedHead! } } })
+    yield* Effect.promise(() => writeFile(join(later.path, 'wiki/later.md'), '# Later\n'))
+    expect((yield* synchronization.publishKnowledge({ id: 'later-publish', taskId: 'later-knowledge',
+      paths: ['wiki/later.md'] })).state).toBe('completed')
+    expect((yield* synchronization.get('knowledge-publish')).state).toBe('published')
+    yield* sql`DROP TRIGGER fail_knowledge_receipt`
+    expect((yield* synchronization.align('knowledge-publish')).state).toBe('completed')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'finding.md'), 'utf8'))).toBe('# Finding\n')
+    expect(yield* Effect.promise(() => readFile(join(workspace.wiki, 'later.md'), 'utf8'))).toBe('# Later\n')
+  }).pipe(Effect.provide(layer())))
+}, 15_000)
 
 it('rebuilds a prepared Task layer when main advances before publication', async () => {
   await Effect.runPromise(Effect.gen(function* () {

@@ -19,9 +19,10 @@ import {
   ZapIcon
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { routineDateState, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
+import { routineDateAt, routineDateState, type RoutineExecution, type RoutineRecord } from '../../../shared/routine'
 import { useLocale } from '../preferences'
 import { TaskRpcClient } from '../rpc/task-rpc'
+import { ConfigRpcClient } from '../rpc/config-rpc'
 import { RoutineEditor } from './RoutineEditor'
 
 type ExecutionStatus = RoutineExecution['status']
@@ -68,7 +69,8 @@ function formatDate(date: string, chinese: boolean): string {
 }
 
 function formatNextTrigger(record: RoutineRecord, chinese: boolean): string {
-  return record.nextTriggerAt === null ? (chinese ? '未安排' : 'Not scheduled') : formatTime(record.nextTriggerAt, record.trigger.timeZone, chinese)
+  return record.trigger.type === 'event' ? (chinese ? 'raws 变化时' : 'When raws change')
+    : record.nextTriggerAt === null ? (chinese ? '未安排' : 'Not scheduled') : formatTime(record.nextTriggerAt, record.trigger.timeZone, chinese)
 }
 
 function latestExecution(rows: readonly RoutineExecution[], routineId: string): RoutineExecution | undefined {
@@ -78,6 +80,8 @@ function latestExecution(rows: readonly RoutineExecution[], routineId: string): 
 /** Routine landing page: a compact operational dashboard with one card per automation. */
 export function RoutinePanel(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
+  const config = useAtomValue(ConfigRpcClient.watch)
+  const displayTimeZone = config._tag === 'Success' ? config.value.timeZone : 'UTC'
   const routinesQuery = TaskRpcClient.query('routines.list', {})
   const executionsQuery = TaskRpcClient.query('routines.allExecutions', {})
   const routines = useAtomValue(routinesQuery)
@@ -102,6 +106,11 @@ export function RoutinePanel(): React.JSX.Element {
     refreshExecutions()
   }
 
+  if (config._tag !== 'Success') return <p role="status" className="text-support text-muted-foreground">
+    {config._tag === 'Failure' ? (chinese ? '无法加载显示时区。' : 'Could not load the display time zone.')
+      : (chinese ? '正在加载时区…' : 'Loading time zone…')}
+  </p>
+
   if (editing)
     return (
       <RoutineEditor
@@ -120,6 +129,7 @@ export function RoutinePanel(): React.JSX.Element {
         record={selected}
         executions={allExecutions.filter((row) => row.routineId === selected.id)}
         executionsLoading={executions._tag !== 'Success'}
+        displayTimeZone={displayTimeZone}
         onBack={() => setSelectedId(null)}
         onEdit={() => setEditing({ id: selected.id, record: selected })}
         refresh={refresh}
@@ -131,6 +141,7 @@ export function RoutinePanel(): React.JSX.Element {
       chinese={chinese}
       records={records}
       executions={allExecutions}
+      displayTimeZone={displayTimeZone}
       loading={routines._tag !== 'Success'}
       executionsLoading={executions._tag !== 'Success'}
       failed={routines._tag === 'Failure'}
@@ -145,6 +156,7 @@ function RoutineDashboard({
   chinese,
   records,
   executions,
+  displayTimeZone,
   loading,
   executionsLoading,
   failed,
@@ -155,6 +167,7 @@ function RoutineDashboard({
   chinese: boolean
   records: readonly RoutineRecord[]
   executions: readonly RoutineExecution[]
+  displayTimeZone: string
   loading: boolean
   executionsLoading: boolean
   failed: boolean
@@ -257,6 +270,7 @@ function RoutineDashboard({
                     execution={latestExecution(executions, record.id)}
                     executionsLoading={executionsLoading}
                     chinese={chinese}
+                    displayTimeZone={displayTimeZone}
                     onClick={() => onSelect(record.id)}
                   />
                 ))}
@@ -295,12 +309,14 @@ function RoutineCard({
   execution,
   executionsLoading,
   chinese,
+  displayTimeZone,
   onClick
 }: {
   record: RoutineRecord
   execution: RoutineExecution | undefined
   executionsLoading: boolean
   chinese: boolean
+  displayTimeZone: string
   onClick: () => void
 }): React.JSX.Element {
   return (
@@ -318,7 +334,7 @@ function RoutineCard({
           <div className="min-w-0">
             <h4 className="truncate text-ui font-semibold">{record.name}</h4>
             <p className="mt-0.5 truncate text-support text-muted-foreground">
-              {record.type === 'agent' ? record.configuration.agent : 'Ingestion'} · {record.trigger.intervalMinutes} min
+              {record.type === 'agent' ? record.configuration.agent : 'Ingestion'} · {record.trigger.type === 'schedule' ? `${record.trigger.intervalMinutes} min` : 'raws-changed'}
             </p>
           </div>
         </div>
@@ -336,7 +352,7 @@ function RoutineCard({
                 ? '加载中…'
                 : 'Loading…'
               : execution
-                ? formatTime(execution.triggerTime, execution.timeZone, chinese)
+                ? formatTime(execution.triggerTime, execution.timeZone ?? displayTimeZone, chinese)
                 : chinese
                   ? '暂无记录'
                   : 'No runs yet'}
@@ -352,6 +368,7 @@ function RoutineDetail({
   record,
   executions,
   executionsLoading,
+  displayTimeZone,
   onBack,
   onEdit,
   refresh
@@ -359,6 +376,7 @@ function RoutineDetail({
   record: RoutineRecord
   executions: readonly RoutineExecution[]
   executionsLoading: boolean
+  displayTimeZone: string
   onBack: () => void
   onEdit: () => void
   refresh: () => void
@@ -370,6 +388,7 @@ function RoutineDetail({
   const cancel = useAtomSet(TaskRpcClient.cancelRun, { mode: 'promise' })
   const cancelIngestion = useAtomSet(TaskRpcClient.cancelIngestion, { mode: 'promise' })
   const retryIngestion = useAtomSet(TaskRpcClient.retryIngestion, { mode: 'promise' })
+  const retryKnowledge = useAtomSet(TaskRpcClient.retryKnowledgeRun, { mode: 'promise' })
   const [busy, setBusy] = useState(false)
   const stopInFlight = useRef(false)
   const [stopRequestedTaskId, setStoppingTaskId] = useState<string | null>(null)
@@ -377,11 +396,15 @@ function RoutineDetail({
   const [message, setMessage] = useState('')
   const [promptOpen, setPromptOpen] = useState(false)
   const runRequest = useRef<{ routineId: string; requestId: string } | null>(null)
-  const dates = useMemo(() => [...new Set(executions.map(row => row.routineDate))].sort().reverse(), [executions])
+  const retryRequest = useRef<{ taskId: string; previousRunId: string; retryRunId: string } | null>(null)
+  // Event Tasks have no source window. Group their creation time in the saved display zone.
+  const datedExecutions = useMemo(() => executions.map(row => ({ ...row,
+    displayDate: row.routineDate ?? routineDateAt(row.createdAt, displayTimeZone) })), [executions, displayTimeZone])
+  const dates = useMemo(() => [...new Set(datedExecutions.map(row => row.displayDate))].sort().reverse(), [datedExecutions])
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [visibleDays, setVisibleDays] = useState(31)
   const activeDate = selectedDate && dates.includes(selectedDate) ? selectedDate : (dates[0] ?? null)
-  const activeRows = executions.filter((row) => row.routineDate === activeDate).sort((left, right) => left.triggerTime - right.triggerTime)
+  const activeRows = datedExecutions.filter((row) => row.displayDate === activeDate).sort((left, right) => left.createdAt - right.createdAt)
 
   async function invoke(kind: 'run' | 'prepare'): Promise<void> {
     if (busy) return
@@ -417,7 +440,7 @@ function RoutineDetail({
       }
       const input = record.type === 'agent'
         ? { ...schedule, type: 'agent' as const, configuration: record.configuration }
-        : { ...schedule, type: 'ingestion' as const, configuration: record.configuration }
+        : { ...schedule, trigger: record.trigger, type: 'ingestion' as const, configuration: record.configuration }
       await save({
         payload: { input }
       })
@@ -448,12 +471,18 @@ function RoutineDetail({
   }
 
   async function retryExecution(execution: RoutineExecution): Promise<void> {
-    if (execution.type !== 'ingestion' || busy) return
+    if (busy || (execution.type === 'agent' && (execution.windowStart !== null || !execution.runId))) return
     setBusy(true)
     setMessage('')
     try {
-      await retryIngestion({ payload: { taskId: execution.taskId } })
-      setMessage(chinese ? '已重新开始 Ingestion。' : 'Ingestion restarted.')
+      if (execution.type === 'ingestion') await retryIngestion({ payload: { taskId: execution.taskId } })
+      else {
+        if (retryRequest.current?.taskId !== execution.taskId || retryRequest.current.previousRunId !== execution.runId)
+          retryRequest.current = { taskId: execution.taskId, previousRunId: execution.runId!, retryRunId: crypto.randomUUID() }
+        await retryKnowledge({ payload: retryRequest.current })
+        retryRequest.current = null
+      }
+      setMessage(chinese ? '已重新提交任务。' : 'Task retry submitted.')
       refresh()
     } catch {
       setMessage(chinese ? '重试请求未确认，请重试。' : 'The retry request was not confirmed. Retry.')
@@ -483,13 +512,13 @@ function RoutineDetail({
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void toggle()}>
             {record.enabled ? (chinese ? '暂停' : 'Pause') : chinese ? '启用' : 'Enable'}
           </Button>
-          {record.type === 'agent' ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void invoke('prepare')}>
+          {record.type === 'agent' && record.trigger.type === 'schedule' ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void invoke('prepare')}>
             {chinese ? '准备任务' : 'Prepare task'}
           </Button> : null}
-          <Button size="sm" disabled={busy || !record.enabled} onClick={() => void invoke('run')}>
+          {record.trigger.type === 'schedule' && <Button size="sm" disabled={busy || !record.enabled} onClick={() => void invoke('run')}>
             <PlayIcon aria-hidden="true" />
             {chinese ? '运行一次' : 'Run once'}
-          </Button>
+          </Button>}
         </div>
       </header>
       {message ? (
@@ -505,8 +534,8 @@ function RoutineDetail({
               <span className="text-support text-muted-foreground">{chinese ? '状态' : 'Status'}</span>
               <Badge variant={record.enabled ? 'success' : 'outline'}>{record.enabled ? (chinese ? '运行中' : 'Active') : chinese ? '已暂停' : 'Paused'}</Badge>
             </div>
-            <DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.trigger.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
-            <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.trigger.timeZone} />
+            {record.trigger.type === 'schedule' ? <><DetailItem label={chinese ? '检查周期' : 'Check interval'} value={`${record.trigger.intervalMinutes} ${chinese ? '分钟' : 'minutes'}`} />
+            <DetailItem label={chinese ? '时区' : 'Time zone'} value={record.trigger.timeZone} /></> : <DetailItem label={chinese ? '触发方式' : 'Trigger'} value="raws-changed" />}
             {record.type === 'agent' ? <>
               <DetailItem label="Agent" value={record.configuration.agent} />
               {record.configuration.model ? <DetailItem label={chinese ? '模型' : 'Model'} value={`${record.configuration.model.providerId} / ${record.configuration.model.modelId}`} /> : null}
@@ -541,7 +570,7 @@ function RoutineDetail({
             ) : (
               <ul className="space-y-0.5">
                 {dates.slice(0, visibleDays).map((date) => {
-                  const dayRows = executions.filter((row) => row.routineDate === date)
+                  const dayRows = datedExecutions.filter((row) => row.displayDate === date)
                   const state = routineDateState(dayRows)
                   return (
                     <li key={date}>
@@ -575,12 +604,12 @@ function RoutineDetail({
             </div>
             {activeDate && activeRows.length ? (
               <span className="text-support text-muted-foreground">
-                {activeRows.length} {chinese ? '个执行窗口' : 'execution window(s)'}
+                {activeRows.length} {record.trigger.type === 'schedule' ? (chinese ? '个执行窗口' : 'execution window(s)') : (chinese ? '个执行任务' : 'execution task(s)')}
               </span>
             ) : null}
           </div>
           {activeDate && activeRows.length ? (
-            <ExecutionProcess rows={activeRows} chinese={chinese} stoppingTaskId={stoppingTaskId} onStop={(row) => void stopExecution(row)} onRetry={(row) => void retryExecution(row)} />
+            <ExecutionProcess rows={activeRows} chinese={chinese} displayTimeZone={displayTimeZone} stoppingTaskId={stoppingTaskId} onStop={(row) => void stopExecution(row)} onRetry={(row) => void retryExecution(row)} />
           ) : (
             <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed p-6 text-center">
               {activeDate ? (
@@ -597,8 +626,8 @@ function RoutineDetail({
                     ? '这可能是尚未触发的日期，或需要人工处理的间隔。'
                     : 'This date has not been triggered, or it needs manual handling.'
                   : chinese
-                    ? '运行一次 Routine 后，执行过程会显示在这里。'
-                    : 'Run the Routine once and its execution process will appear here.'}
+                    ? record.trigger.type === 'event' ? 'raws 变化产生任务后，执行过程会显示在这里。' : '运行一次 Routine 后，执行过程会显示在这里。'
+                    : record.trigger.type === 'event' ? 'Tasks created by raw changes will appear here.' : 'Run the Routine once and its execution process will appear here.'}
               </p>
             </div>
           )}
@@ -630,9 +659,10 @@ function DetailItem({ label, value }: { label: string; value: string }): React.J
   )
 }
 
-function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
+function ExecutionProcess({ rows, chinese, displayTimeZone, stoppingTaskId, onStop, onRetry }: {
   rows: readonly RoutineExecution[]
   chinese: boolean
+  displayTimeZone: string
   stoppingTaskId: string | null
   onStop: (row: RoutineExecution) => void
   onRetry: (row: RoutineExecution) => void
@@ -653,7 +683,9 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
                   <Badge variant={statusVariant(row.status)}>{statusLabel(row.status, chinese)}</Badge>
                 </div>
                 <p className="mt-1 text-support text-muted-foreground">
-                  {formatTime(row.windowStart, row.timeZone, chinese)} → {formatTime(row.windowEnd, row.timeZone, chinese)}
+                  {row.windowStart !== null && row.windowEnd !== null && row.timeZone !== null
+                    ? `${formatTime(row.windowStart, row.timeZone, chinese)} → ${formatTime(row.windowEnd, row.timeZone, chinese)}`
+                    : chinese ? 'raws 变化触发' : 'Triggered by raw changes'}
                 </p>
               </div>
               {row.taskId ? (
@@ -670,7 +702,8 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
                       {stoppingTaskId === row.taskId || row.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : chinese ? '停止执行' : 'Stop'}
                     </Button>
                   ) : null}
-                  {row.type === 'ingestion' && ['failed', 'interrupted', 'cancelled', 'conflict'].includes(row.status) ? <Button
+                  {(row.type === 'ingestion' && ['failed', 'interrupted', 'cancelled', 'conflict'].includes(row.status)
+                    || row.type === 'agent' && row.windowStart === null && row.runId && ['failed', 'interrupted', 'cancelled'].includes(row.status)) ? <Button
                     type="button" variant="outline" size="sm" onClick={() => onRetry(row)}
                   ><RefreshCwIcon aria-hidden="true" />{chinese ? '重试' : 'Retry'}</Button> : null}
                   <span className="font-mono text-support text-muted-foreground" title={row.taskId}>
@@ -680,13 +713,13 @@ function ExecutionProcess({ rows, chinese, stoppingTaskId, onStop, onRetry }: {
               ) : null}
             </div>
             <div className="mt-4 grid gap-3 border-t pt-3 sm:grid-cols-3">
-              <ProcessStep icon={TimerIcon} label={chinese ? '触发时间' : 'Triggered'} value={formatTime(row.triggerTime, row.timeZone, chinese)} />
+              <ProcessStep icon={TimerIcon} label={chinese ? '触发时间' : 'Triggered'} value={formatTime(row.triggerTime, row.timeZone ?? displayTimeZone, chinese)} />
               <ProcessStep
                 icon={row.taskId ? CheckCircle2Icon : Clock3Icon}
                 label={chinese ? '任务' : 'Task'}
                 value={row.taskId ? (chinese ? '已关联' : 'Attached') : chinese ? '等待创建' : 'Waiting'}
               />
-              <ProcessStep icon={row.endedAt ? CheckCircle2Icon : PlayIcon} label={chinese ? '结束时间' : 'Finished'} value={formatTime(row.endedAt, row.timeZone, chinese)} />
+              <ProcessStep icon={row.endedAt ? CheckCircle2Icon : PlayIcon} label={chinese ? '结束时间' : 'Finished'} value={formatTime(row.endedAt, row.timeZone ?? displayTimeZone, chinese)} />
             </div>
           </div>
         </li>

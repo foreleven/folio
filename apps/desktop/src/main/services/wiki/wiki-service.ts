@@ -1,12 +1,14 @@
 import { GitChangeApplications } from '../git/git-change-applications'
+import { makeVaultGit } from '../git/vault-git'
 import { Effect, Layer } from 'effect'
 import { SqlClient } from 'effect/unstable/sql'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { HarnessStoreError } from '../../../shared/harness'
 import { WikiService } from '../../../shared/wiki-service'
-import { validatePageProperties, type PageSummary, type SaveObjectTypes, type SavePage, type WikiSnapshot } from '../../../shared/wiki'
+import { validatePageProperties, type PageSummary, type ProjectTimelineEntry, type RawCitationView, type SaveObjectTypes, type SavePage, type WikiSnapshot } from '../../../shared/wiki'
 import { type PageFile, listMarkdown, parsePage, readObjectTypes, readPage, serializePage, validateTypes, versionOf, wikiPath, writeWikiFile } from './page-files'
+import { pageLinkTargets } from './knowledge-links'
 
 export { WikiService } from '../../../shared/wiki-service'
 const storage = (error: unknown) => error instanceof HarnessStoreError ? error : new HarnessStoreError({
@@ -21,6 +23,8 @@ export function wikiServiceLayer(directory: string) {
   return Layer.effect(WikiService, Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     const changes = yield* GitChangeApplications
+    const git = yield* makeVaultGit
+    const main = join(directory, 'workspace')
     const root = join(directory, 'workspace', 'wiki')
     const scan = Effect.fn('Wiki.scan')(function* () {
       const { objectTypes, typesVersion } = yield* attempt(() => readObjectTypes(root))
@@ -39,6 +43,12 @@ export function wikiServiceLayer(directory: string) {
         issues.push({ path: page.path, message: 'Duplicate Page ID; give each file a unique id.' })
         return false
       })
+      const linked = pages.flatMap(page => pageLinkTargets(page.body).map(targetId => ({ sourceId: page.id, targetId, path: page.path })))
+      const knownIds = new Set(pages.map(page => page.id))
+      for (const link of linked) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(link.targetId)) issues.push({ path: link.path, message: `Invalid Folio Page link: ${link.targetId}` })
+        else if (!knownIds.has(link.targetId)) issues.push({ path: link.path, message: `Folio Page link target is missing: ${link.targetId}` })
+      }
       for (const page of pages) {
         const type = objectTypes.find(type => type.id === page.objectType)
         if (!type) issues.push({ path: page.path, message: `Unknown ObjectType: ${page.objectType}` })
@@ -59,17 +69,21 @@ export function wikiServiceLayer(directory: string) {
       }
       // Index replacement is atomic. Invalid/deleted files cannot leave stale readable rows.
       yield* sql.withTransaction(Effect.gen(function* () {
+        yield* sql`DELETE FROM links`
         yield* sql`DELETE FROM wiki_pages`
         yield* sql`DELETE FROM wiki_object_types`
         for (const type of objectTypes) yield* sql`INSERT INTO wiki_object_types (id, definition) VALUES (${type.id}, ${JSON.stringify(type)})`
         for (const page of pages) yield* sql`INSERT INTO wiki_pages (id, path, object_type, parent_id, title, metadata, frontmatter, version)
           VALUES (${page.id}, ${page.path}, ${page.objectType}, ${page.parentId}, ${page.title}, ${JSON.stringify(summary(page))}, ${JSON.stringify(page.frontmatter)}, ${page.version})`
+        for (const link of linked.filter(link => /^[a-zA-Z0-9_-]+$/.test(link.targetId)))
+          yield* sql`INSERT INTO links (source_id, target_id) VALUES (${link.sourceId}, ${link.targetId})`
       })).pipe(Effect.mapError(storage))
       return { pages: pages.map(summary), objectTypes, typesVersion, issues } satisfies WikiSnapshot
     })
+    let indexed = yield* scan()
+    const refresh = scan().pipe(Effect.tap(snapshot => Effect.sync(() => { indexed = snapshot })))
     const find = Effect.fn('Wiki.find')(function* (id: string) {
-      const snapshot = yield* scan()
-      const page = snapshot.pages.find(page => page.id === id)
+      const page = indexed.pages.find(page => page.id === id)
       if (!page) return yield* new HarnessStoreError({ reason: 'not-found', message: 'Page is missing or has invalid metadata. Refresh the Wiki.' })
       return page
     })
@@ -77,8 +91,59 @@ export function wikiServiceLayer(directory: string) {
       const page = yield* find(id)
       return yield* attempt(() => readPage(root, page.path))
     })
+    /** Reverse links are indexed from Markdown; sort parsed instants while preserving authored offsets. */
+    const projectTimeline = Effect.fn('Wiki.projectTimeline')(function* (id: string) {
+      const project = yield* find(id)
+      if (project.objectType !== 'project' || project.trashed) return yield* invalid('Choose an active Project Page.')
+      const rows = yield* sql<{ sourceId: string }>`SELECT source_id AS sourceId FROM links WHERE target_id=${id}`
+      const linked = new Set(rows.map(row => row.sourceId))
+      return indexed.pages.filter(page => linked.has(page.id) && !page.trashed &&
+        (page.objectType === 'meeting' || page.objectType === 'decision' || page.objectType === 'event') &&
+        typeof page.properties.occurredAt === 'string' && Number.isFinite(Date.parse(page.properties.occurredAt)))
+        .map(page => ({ id: page.id, title: page.title, objectType: page.objectType as ProjectTimelineEntry['objectType'],
+          occurredAt: page.properties.occurredAt as string }))
+        .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt) || left.id.localeCompare(right.id))
+    }, Effect.mapError(storage))
+    /** Resolve the exact canonical raw tree named by a citation, including proven deletions. */
+    const rawCitation = Effect.fn('Wiki.rawCitation')(function* (uri: string) {
+      const match = /^folio-raw:([a-f0-9]{40}|[a-f0-9]{64})\/(raws\/[^#]+)(?:#([^#]+))?$/.exec(uri)
+      const commit = match?.[1]
+      const path = match?.[2]
+      const fragment = match?.[3] ?? null
+      if (!commit || !path || path.split('/').some(part => !part || part === '.' || part === '..') ||
+        path.includes('\\') || (fragment !== null && !/^([A-Za-z0-9._~-]|%[A-Fa-f0-9]{2})+$/.test(fragment)))
+        return yield* invalid('Invalid raw citation.')
+      const canonical = yield* git(main, ['merge-base', '--is-ancestor', commit, 'HEAD']).pipe(
+        Effect.as(true), Effect.catch(() => Effect.succeed(false)))
+      if (!canonical) return yield* invalid('Raw citation commit is outside canonical history.')
+      const atCommit = `${commit}:${path}`
+      const exists = yield* git(main, ['cat-file', '-e', atCommit]).pipe(
+        Effect.as(true), Effect.catch(() => Effect.succeed(false)))
+      let prior: string | null = null
+      if (!exists) {
+        const candidates = yield* sql<{ fromCommit: string | null }>`SELECT json_extract(configuration, '$.rawInput.fromCommit') AS fromCommit
+          FROM tasks WHERE type='agent' AND state='completed'
+            AND json_extract(configuration, '$.rawInput.toCommit')=${commit}`
+        for (const candidate of candidates) {
+          if (!candidate.fromCommit) continue
+          const deleted = yield* git(main, ['--literal-pathspecs', 'diff', '--name-only', '--diff-filter=D',
+            '--no-renames', candidate.fromCommit, commit, '--', path]).pipe(
+            Effect.map(text => text.trim() === path), Effect.catch(() => Effect.succeed(false)))
+          if (deleted) { prior = candidate.fromCommit; break }
+        }
+        if (!prior) return yield* invalid('Raw citation path is missing from its frozen evidence range.')
+      }
+      const blob = `${prior ?? commit}:${path}`
+      const size = Number((yield* git(main, ['cat-file', '-s', blob])).trim())
+      const identity = { commit, path, fragment }
+      if (!Number.isSafeInteger(size) || size > 1024 * 1024) return { kind: 'too-large', ...identity } satisfies RawCitationView
+      const content = yield* git(main, ['show', blob])
+      if (!prior) return { kind: 'file', ...identity, content } satisfies RawCitationView
+      const diff = yield* git(main, ['--literal-pathspecs', 'diff', '--no-ext-diff', prior, commit, '--', path])
+      return { kind: 'deletion', ...identity, priorContent: content, diff } satisfies RawCitationView
+    }, Effect.mapError(storage))
     const save = Effect.fn('Wiki.save')(function* (input: SavePage) {
-      const snapshot = yield* scan()
+      const snapshot = indexed
       const metadata = input.metadata
       const current = snapshot.pages.find(page => page.id === metadata.id)
       if (input.expectedVersion === null ? current !== undefined : !current || current.version !== input.expectedVersion)
@@ -96,11 +161,6 @@ export function wikiServiceLayer(directory: string) {
         if (!parent || (!metadata.trashed && parent.trashed)) return yield* invalid('Choose an existing Page outside trash as the parent.')
         parentId = parent.parentId
       }
-      for (const field of type.properties.filter(field => field.kind === 'relation')) {
-        const ids = metadata.properties[field.key]
-        if (Array.isArray(ids) && ids.some(id => !snapshot.pages.some(page => page.id === id)))
-          return yield* invalid(`A related Page in ${field.name} is missing.`)
-      }
       const path = current?.path ?? `${metadata.id}.md`
       const previous = yield* attempt(async () => {
         const file = await wikiPath(root, path)
@@ -113,11 +173,11 @@ export function wikiServiceLayer(directory: string) {
       const content = serializePage(next, input.body, previous)
       yield* Effect.try({ try: () => parsePage(path, content, next.createdAt), catch: storage })
       yield* attempt(() => writeWikiFile(root, path, content))
-      yield* scan()
+      yield* refresh
       return yield* attempt(() => readPage(root, path))
     })
     const saveTypes = Effect.fn('Wiki.saveTypes')(function* (input: SaveObjectTypes) {
-      const snapshot = yield* scan()
+      const snapshot = indexed
       if (snapshot.typesVersion !== input.expectedVersion) return yield* invalid('ObjectTypes changed. Reload before saving.')
       yield* Effect.try({ try: () => validateTypes(input.objectTypes), catch: error => invalid((error as Error).message) })
       for (const page of snapshot.pages) {
@@ -125,12 +185,23 @@ export function wikiServiceLayer(directory: string) {
         if (!type) return yield* invalid(`ObjectType is used by Page: ${page.title}`)
         yield* Effect.try({ try: () => validatePageProperties(page, type), catch: error => invalid(`${page.title}: ${(error as Error).message}`) })
       }
+      for (const original of snapshot.objectTypes) {
+        const next = input.objectTypes.find(type => type.id === original.id)
+        if (!next) continue
+        for (const property of original.properties) {
+          const replacement = next.properties.find(field => field.key === property.key)
+          if (replacement && replacement.kind !== property.kind) return yield* invalid(`Property kind cannot change: ${original.name}.${property.name}`)
+        }
+      }
       yield* attempt(() => writeWikiFile(root, '_types.json', `${JSON.stringify(input.objectTypes, null, 2)}\n`))
-      return yield* scan()
+      return yield* refresh
     })
     return WikiService.of({
-      snapshot: scan(),
+      snapshot: Effect.sync(() => indexed),
+      refresh,
       read,
+      projectTimeline,
+      rawCitation,
       save: input => changes.editWorkspace(save(input).pipe(Effect.map(value => ({ value, paths: [`wiki/${value.path}`] })))),
       saveTypes: input => changes.editWorkspace(saveTypes(input).pipe(Effect.map(value => ({ value, paths: ['wiki/_types.json'] }))))
     })

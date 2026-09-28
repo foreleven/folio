@@ -48,6 +48,59 @@ const finish = (id: string, state: 'succeeded' | 'failed' | 'interrupted' | 'can
 })
 
 describe('RoutineStore bounded execution windows', () => {
+  it('lists event Routine Tasks without requiring or inventing a scheduled window', async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* RoutineStore
+      const routine = yield* store.ensureRawIntake
+      if (routine.type !== 'agent') throw new Error('Expected Agent Routine')
+      const tasks = yield* HarnessStore
+      const taskId = '44444444-4444-4444-8444-444444444444'
+      yield* tasks.createTask({ id: taskId, type: 'agent', receipt: null,
+        configuration: { ...routine.configuration, rawInput: { fromCommit: null, toCommit: 'a'.repeat(40) } } })
+      yield* tasks.createTask({ id: '55555555-5555-4555-8555-555555555555', type: 'agent', receipt: null,
+        configuration: { ...routine.configuration, rawInput: null } })
+      const sql = yield* SqlClient.SqlClient
+      const createdAt = Date.parse('2026-09-28T10:15:40+08:00')
+      yield* sql`UPDATE tasks SET routine_id=${routine.id}, routine_revision=${routine.revision}, created_at=${createdAt} WHERE id=${taskId}`
+      yield* tasks.createSession({ id: sessionId, taskId, agent: 'codex', adapterVersion: '1', purpose: 'task', syncOperationId: null })
+      const queue = yield* ExecutionQueue
+      yield* queue.submit({ id: runId(8), taskId, sessionId, prompt: 'Organize raw input', purpose: 'execution', resumesRunId: null, source: 'routine' })
+      const expected = { routineId: routine.id, taskId, runId: runId(8), triggerTime: createdAt,
+        routineDate: null, windowStart: null, windowEnd: null, timeZone: null, status: 'pending' }
+      expect(yield* store.executions(routine.id)).toMatchObject([expected])
+      expect(yield* store.allExecutions).toMatchObject([expected])
+      expect(yield* store.executionForTask(taskId)).toMatchObject(expected)
+      expect(yield* sql`SELECT task_id FROM routine_schedules WHERE task_id=${taskId}`).toEqual([])
+      yield* queue.claim('knowledge-owner')
+      yield* sql`UPDATE runs SET baseline_commit='verified' WHERE id=${runId(8)}`
+      yield* queue.running(runId(8), 'knowledge-owner')
+      yield* queue.finish(runId(8), 'knowledge-owner', 'interrupted')
+      expect(yield* store.executions(routine.id)).toMatchObject([{ ...expected, status: 'interrupted' }])
+      yield* queue.submit({ id: runId(9), taskId, sessionId, prompt: 'Retry the frozen input', purpose: 'recovery', resumesRunId: runId(8), source: 'recovery' })
+      yield* queue.claim('retry-owner')
+      yield* sql`UPDATE runs SET baseline_commit='verified' WHERE id=${runId(9)}`
+      yield* queue.running(runId(9), 'retry-owner')
+      yield* queue.finish(runId(9), 'retry-owner', 'succeeded')
+      // Agent success still awaits the Task's canonical publication/no-change receipt.
+      expect(yield* store.executions(routine.id)).toMatchObject([{ ...expected, runId: runId(9), status: 'pending' }])
+      yield* sql`UPDATE runs SET sync_state='not-required' WHERE id=${runId(9)}`
+      yield* sql`UPDATE tasks SET state='completed' WHERE id=${taskId}`
+      expect(yield* store.executions(routine.id)).toMatchObject([{ ...expected, runId: runId(9), status: 'succeeded' }])
+    }).pipe(Effect.provide(layer())))
+  })
+
+  it('keeps the built-in raw intake trigger system-owned', async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* RoutineStore
+      const raw = yield* store.ensureRawIntake
+      if (raw.type !== 'agent') throw new Error('Expected Agent Routine')
+      expect((yield* store.save({ id: raw.id, expectedRevision: raw.revision, name: raw.name,
+        type: 'agent', configuration: raw.configuration, trigger: { type: 'schedule', intervalMinutes: 60, timeZone: 'UTC' },
+        enabled: raw.enabled }).pipe(Effect.flip)).reason).toBe('invalid-state')
+      expect((yield* store.get(raw.id)).trigger).toMatchObject({ type: 'event', signal: 'raws-changed' })
+    }).pipe(Effect.provide(layer())))
+  })
+
   it.each([
     ['Asia/Shanghai', '2026-09-19T03:00:00Z', '2026-09-18T16:00:00Z'],
     ['America/New_York', '2026-03-08T16:00:00Z', '2026-03-08T05:00:00Z'],

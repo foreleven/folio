@@ -104,8 +104,13 @@ export function validateTypes(types: readonly ObjectType[]): void {
     if (!/^[a-z][a-z0-9_-]*$/.test(type.id)) throw new Error('Invalid ObjectType ID')
     if (new Set(type.properties.map(field => field.key)).size !== type.properties.length) throw new Error('Duplicate property key')
     for (const field of type.properties) {
-      if (!/^[a-z][a-z0-9_-]*$/.test(field.key)) throw new Error('Invalid property key')
-      if (new Set(field.options).size !== field.options.length) throw new Error('Duplicate select option')
+      if (!/^[a-z][a-zA-Z0-9_-]*$/.test(field.key)) throw new Error('Invalid property key')
+      if (new Set(field.options.map(option => option.id)).size !== field.options.length) throw new Error('Duplicate option ID')
+      if (field.options.some(option => !/^[a-z][a-z0-9_-]*$/.test(option.id))) throw new Error('Invalid option ID')
+      if (['select', 'multi-select', 'status'].includes(field.kind)) {
+        if (field.kind === 'status' && field.options.some(option => !option.group)) throw new Error('Status options need a lifecycle group')
+        if (field.kind !== 'status' && field.options.some(option => option.group)) throw new Error('Only status options have lifecycle groups')
+      } else if (field.options.length) throw new Error('This property kind has no options')
     }
   }
 }

@@ -2,23 +2,20 @@ import type { ObjectType, PageMetadata, PageSummary, PropertyDefinition } from '
 
 type Value = PageMetadata['properties'][string]
 const inputClass = 'min-w-0 w-full rounded border border-transparent bg-transparent px-2 py-1.5 text-sm hover:bg-muted/50 focus:border-ring focus:outline-none'
-function PropertyInput({ field, value, pages, onChange, chinese }: {
-  field: PropertyDefinition; value: Value | undefined; pages: readonly PageSummary[]; onChange: (value: Value) => void; chinese: boolean
+function PropertyInput({ field, value, onChange, chinese }: {
+  field: PropertyDefinition; value: Value | undefined; onChange: (value: Value) => void; chinese: boolean
 }) {
   if (field.kind === 'checkbox') return <input aria-label={field.name} type="checkbox" checked={value === true} onChange={event => onChange(event.target.checked)} />
-  if (field.kind === 'select') return <select className={inputClass} aria-label={field.name} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)}>
-    <option value="">{chinese ? '未设置' : 'Empty'}</option>{field.options.map(option => <option key={option}>{option}</option>)}
+  if (field.kind === 'select' || field.kind === 'status') return <select className={inputClass} aria-label={field.name} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)}>
+    <option value="">{chinese ? '未设置' : 'Empty'}</option>{field.options.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
   </select>
-  if (field.kind === 'relation' || (field.kind === 'multi-select' && field.options.length)) {
+  if (field.kind === 'multi-select') {
     const selected = Array.isArray(value) ? value : []
-    const options = field.kind === 'relation' ? pages.filter(page => !page.trashed).map(page => ({ id: page.id, name: page.title || (chinese ? '未命名' : 'Untitled') })) : field.options.map(option => ({ id: option, name: option }))
-    return <details aria-label={field.name} className="rounded px-2 py-1 text-sm"><summary className="cursor-pointer">{selected.map(id => options.find(option => option.id === id)?.name ?? id).join(', ') || (chinese ? '选择…' : 'Select…')}</summary>
-      <div className="max-h-44 overflow-y-auto py-2">{options.map(option => <label key={option.id} className="flex gap-2 py-1"><input type="checkbox" checked={selected.includes(option.id)} onChange={event => onChange(event.target.checked ? [...selected, option.id] : selected.filter(id => id !== option.id))} />{option.name}</label>)}</div>
+    return <details aria-label={field.name} className="rounded px-2 py-1 text-sm"><summary className="cursor-pointer">{selected.map(id => field.options.find(option => option.id === id)?.name ?? id).join(', ') || (chinese ? '选择…' : 'Select…')}</summary>
+      <div className="max-h-44 overflow-y-auto py-2">{field.options.map(option => <label key={option.id} className="flex gap-2 py-1"><input type="checkbox" checked={selected.includes(option.id)} onChange={event => onChange(event.target.checked ? [...selected, option.id] : selected.filter(id => id !== option.id))} />{option.name}</label>)}</div>
     </details>
   }
-  if (field.kind === 'multi-select') return <input className={inputClass} aria-label={field.name} placeholder={chinese ? '标签，以逗号分隔' : 'Comma-separated tags'}
-    value={Array.isArray(value) ? value.join(', ') : ''} onChange={event => onChange(event.target.value.split(',').map(item => item.trim()))} onBlur={() => { if (Array.isArray(value)) onChange([...new Set(value.filter(Boolean))]) }} />
-  return <input className={inputClass} aria-label={field.name} type={field.kind === 'number' ? 'number' : field.kind === 'date' ? 'date' : field.kind === 'url' ? 'url' : 'text'}
+  return <input className={inputClass} aria-label={field.name} type={field.kind === 'number' ? 'number' : field.kind === 'date' ? 'date' : field.kind === 'url' ? 'url' : field.kind === 'email' ? 'email' : field.kind === 'phone' ? 'tel' : 'text'}
     placeholder={chinese ? '未设置' : 'Empty'} value={typeof value === 'string' || typeof value === 'number' ? value : ''}
     onChange={event => onChange(field.kind === 'number' ? (event.target.value === '' ? null : Number(event.target.value)) : event.target.value)} />
 }
@@ -39,7 +36,7 @@ export function PageProperties({ page, objectTypes, pages, onChange, chinese }: 
     </select>
     {type?.properties.map(field => <div key={field.key} className="contents">
       <span className="text-muted-foreground">{field.name}</span>
-      <PropertyInput field={field} value={page.properties[field.key]} pages={pages} chinese={chinese} onChange={value => onChange({ ...page, properties: { ...page.properties, [field.key]: value } })} />
+      <PropertyInput field={field} value={page.properties[field.key]} chinese={chinese} onChange={value => onChange({ ...page, properties: { ...page.properties, [field.key]: value } })} />
     </div>)}
   </div>
 }

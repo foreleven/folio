@@ -76,4 +76,14 @@ describe('Task creation', () => {
     expect(mocks.create).toHaveBeenCalledWith({ payload: { taskId: 'completed' } })
     expect(mocks.refresh).toHaveBeenCalledTimes(1)
   })
+
+  it('keeps completed Knowledge Task history visible without offering reopen', async () => {
+    mocks.tasks = [{ id: 'knowledge', type: 'agent', receipt: null, state: 'completed', worktreeState: 'released',
+      configuration: { goal: 'Organize raws', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [],
+        rawInput: { fromCommit: null, toCommit: 'a'.repeat(40) } } }]
+    render(<TaskPanel />)
+    expect(screen.queryByRole('button', { name: 'Reopen' })).toBeNull()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Sessions' })))
+    expect(screen.getByTestId('sessions').textContent).toBe('knowledge')
+  })
 })

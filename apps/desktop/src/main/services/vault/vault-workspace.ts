@@ -20,8 +20,9 @@ const instructions = `# Vault workspace
 - Page frontmatter: id (stable UUID), title, objectType, parentId (Page ID or null), icon, cover,
   favorite (boolean), trashed (boolean), createdAt and updatedAt (ISO timestamps), properties (mapping).
 - Keep the body after the closing frontmatter delimiter. Preserve existing Page IDs and metadata.
-- Use wiki/<id>.md for new Pages. Use parentId for hierarchy and Page IDs for relation properties.
-- Do not duplicate IDs. Link to related Pages with relative Markdown links and cite raw sources.
+- Use wiki/<id>.md for new Pages. Use parentId for hierarchy.
+- Do not duplicate IDs. Link to related Pages with [label](folio-page:<pageId>) and cite
+  frozen raw evidence with [source](folio-raw:<commit>/<raw-path>#<encoded-record-id>).
 - Do not change wiki/_types.json unless the task explicitly calls for changing the knowledge schema.
 `
 

@@ -37,6 +37,14 @@ A durable, isolated unit of work. Its kind determines whether Folio executes it 
 **Task configuration**:
 The immutable inputs frozen when a Task is created. Execution state, errors, timestamps, and commit receipts are not configuration.
 
+**Trigger**:
+The mechanism that causes a Routine to create a Task. A schedule trigger checks time-based windows; an event trigger names a domain Signal such as `raws-changed` without embedding provider-specific matching data.
+_Avoid_: Check interval, dispatch record
+
+**Scheduled Task window**:
+The source-data range frozen in the schedule record associated with a Task. It remains stable across Task retries; its local date is derived from the window start and timezone rather than stored as a separate Task fact.
+_Avoid_: Routine date column, duplicated Task window
+
 **Routine configuration**:
 The editable, revisioned inputs for one Routine executor type. A Task freezes the Routine configuration revision used to create it.
 
@@ -112,7 +120,59 @@ _Avoid_: Last-writer-wins overwrite
 An Agent operation that transforms committed raw changes into personal wiki knowledge. It consumes raw material but does not fetch source data from the provider.
 
 **Knowledge Routine**:
-An Agent Routine whose business goal is Knowledge organization from pending raw changes. Its processing and batching semantics are deferred until that workflow is implemented.
+An Agent Routine whose business goal is Knowledge organization from pending raw changes. Its input is fixed from canonical raw history, and its completion advances that Routine's derived processing checkpoint.
+
+**Raw knowledge intake**:
+The single system-owned Knowledge Routine in a Vault that turns pending raw material into coherent Wiki assets. It owns entity extraction, source citation, relationship creation, and updates to existing Pages rather than splitting those concerns across competing raw consumers.
+_Avoid_: Per-entity raw Routine
+
+**Knowledge asset layer**:
+The evidence-backed Wiki representation curated from raw material: stable entities, events, facts, decisions, relationships, and their source citations. It does not own action management or longitudinal reflection.
+_Avoid_: Raw archive, action system, cognitive trajectory
+
+**Project**:
+A knowledge asset representing a sustained effort and its current lifecycle status. Its milestones are evidence-backed Events linked to the Project when they are discovered, not fields or placeholder Events created with the Project.
+_Avoid_: Project deadline, automatic Milestone
+
+**Person**:
+A knowledge asset representing an individual. Email addresses and phone numbers are typed properties; organization membership uses a Knowledge link rather than duplicating an organization name as text.
+_Avoid_: Company-name relation as text
+
+**Organization**:
+A stable knowledge asset representing a company, team, customer, supplier, or other named organization. Relationships between an Organization and people, Projects, or other assets use Knowledge links.
+_Avoid_: Organization name embedded as a relation property
+
+**Note**:
+A generic knowledge asset for material without a stronger ObjectType. Its tags provide lightweight classification but never stand in for explicit links to people, Projects, or other assets.
+_Avoid_: Tag-as-relationship
+
+**Decision**:
+An evidence-backed choice with a lifecycle status that remains part of the user's knowledge even when it implies later work. The default statuses are Proposed (`not_started`), Accepted (`complete`), and Superseded (`complete`). Unadopted alternatives and review discussion remain in the body or in Notes/Events rather than becoming rejected Decisions. A Decision links to its Projects, Meetings, people, and sources; it is not itself an action or Task.
+_Avoid_: To-do, inferred intention
+
+**Event**:
+An evidence-backed occurrence with a time and relationships to relevant knowledge assets. Meetings are time-bearing knowledge assets, and other milestones or state changes may be represented as Events; a generic Event has no required classification field.
+_Avoid_: Ingestion event, Signal
+
+**Time-bearing asset**:
+A Meeting, Decision, or Event that uses the shared `occurredAt` instant with an explicit UTC offset and links to related knowledge assets. Type-specific aliases and timezone-free local values are avoided so timelines can project assets uniformly.
+_Avoid_: Per-type timeline fields
+
+**Page property**:
+A typed scalar or option value describing one Wiki asset. The basic kinds are text, number, checkbox, date, datetime, URL, email, phone, select, multi-select, and status. Select-like values store stable option IDs rather than display names, allowing labels to change without invalidating Pages. A status option also belongs to one lifecycle group—`not_started`, `in_progress`, or `complete`—so different ObjectTypes can use domain-specific labels while retaining common lifecycle semantics. Page identity and relationships are not properties.
+_Avoid_: Relation property, duplicated Page metadata
+
+**Knowledge link**:
+An explicit Markdown link whose target is the stable `folio-page:<pageId>` identity of another Wiki asset. Markdown is authoritative; the Vault maintains a rebuildable `links` index for reverse relationships and timelines rather than duplicating relation lists in frontmatter.
+_Avoid_: Mirrored relation property
+
+**Raw citation**:
+A link from a knowledge asset to source evidence identified by canonical raw commit, raw path, and when available an opaque provider source-record ID. Folio validates the Git evidence boundary but leaves record-ID interpretation to the Integration; a citation may stop at file level when no stable record ID exists. A path deleted within the cited Knowledge Task input remains valid evidence at that Task's `toCommit`, where it resolves to the deletion diff or prior content. The citation never silently follows the latest mutable raw projection.
+_Avoid_: Live raw path, Knowledge link
+
+**Project timeline**:
+The chronological projection of Meetings, Decisions, and other time-bearing Events that link to a Project. It is derived from the link graph rather than maintained as a duplicate authored list in the Project body.
+_Avoid_: Embedded timeline copy
 
 **Raw material**:
 Provider-derived source content committed to the Vault for later processing. Raw material is immutable input from the perspective of Knowledge organization.
@@ -135,5 +195,47 @@ The canonical directory owned by one Integration resource and Routine date: `raw
 _Avoid_: Provider-specific top-level raw directory
 
 **Raw processing checkpoint**:
-The last raw commit processed by one Knowledge Routine. Checkpoints are consumer-specific, so processing by one Routine does not acknowledge changes for another.
+The `toCommit` of the latest completed Knowledge Task for one Routine, derived from Task history rather than stored as a separate cursor. Checkpoints are consumer-specific, so processing by one Routine does not acknowledge changes for another.
 _Avoid_: Global processed commit
+
+**Knowledge Task input**:
+The fixed `fromCommit` and `toCommit` selected from canonical history for a Knowledge Routine. A null `fromCommit` means the initial full raw snapshot; retries use the same endpoints, and later raw publications belong to later work.
+_Avoid_: Live raw head, moving Task window
+
+**Initial Knowledge Task input**:
+The complete set of raw files present at a Knowledge Task's `toCommit` when its `fromCommit` is null. It is a full snapshot rather than a synthetic diff from the Vault's initial commit.
+_Avoid_: Initial raw diff
+
+**Wiki publication queue**:
+The Vault-wide ordering of Wiki results awaiting canonical publication. Folio publishes only the head item, and a conflicted item retains its place while its diff is resolved and merged; all Folio-originated Wiki edits use this same ordering.
+_Avoid_: Parallel Wiki merge, per-Task publication lane
+
+**Wiki publication intent**:
+One frozen, complete Wiki result submitted to the publication queue. A Knowledge Task contributes its aggregate result rather than exposing its Runs or intermediate saves as separate publications; conflict resolution continues the same intent.
+_Avoid_: Save commit, conflict follow-up publication
+
+**Signal**:
+A transient, coalescible notice that committed raw material may need a Knowledge Routine's attention. It wakes the Routine but does not contain the changed files, require acknowledgement, or determine what remains unprocessed; the Routine's own checkpoint and Git history do that.
+_Avoid_: Raw change ledger, processing checkpoint
+
+## Task presentation
+
+**Task summary**:
+A durable snapshot of the latest terminal execution result for one Task. Agent Tasks derive it from execution Runs, excluding conflict-resolution Runs; Ingestion Tasks construct it from the completed source window and publication outcome. It is presentation-ready history, not a projection reconstructed from the current raws files.
+_Avoid_: Live raws projection, Task log
+
+**Task publication**:
+The Git result associated with a Task summary. A raws publication references its raw operation; a Wiki publication references the Task's single aggregate publication intent. Publication state is separate from an Agent discovery, because a Run may finish before its Wiki changes are published.
+_Avoid_: Change ID, commit result
+
+**Agent discovery**:
+The final complete assistant message of an Agent Run, excluding thought, tool-call, and user messages. If the Run ends unsuccessfully, the last received assistant content may be retained with an incomplete marker; a Run without assistant content contributes only its execution status and error.
+_Avoid_: Agent thought, tool output, live stream
+
+**Task feed time**:
+The Task's durable creation time used to order the Vault overview Feed. It is always `createdAt`, including for Ingestion Tasks; source-window timestamps describe what was processed but do not reorder the Task.
+_Avoid_: Summary time, source time
+
+**Display time zone**:
+The globally saved time zone used to interpret dates and times in the Vault Feed and to initialize new Routine schedules. It starts from the system time zone on first initialization and remains stable until explicitly changed by the user; existing Routines and frozen windows retain their own time zones.
+_Avoid_: Live system time zone, Routine time zone

@@ -4,7 +4,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { GitSyncOperation, WorkspaceChangesView, WorkspaceFileDiff } from '../../../shared/git-change'
 import { TaskWikiChangesPanel } from './TaskWikiChangesPanel'
 
-const mocks = vi.hoisted(() => ({ save: vi.fn(), saveRun: vi.fn(), confirmRun: vi.fn(), sync: vi.fn(), reprepare: vi.fn(), startConflict: vi.fn(), resolveConflict: vi.fn(), abortConflict: vi.fn(), refresh: vi.fn(), query: vi.fn((method: string, payload: unknown) => ({ method, payload })),
+const mocks = vi.hoisted(() => ({ save: vi.fn(), saveRun: vi.fn(), confirmRun: vi.fn(), sync: vi.fn(), reprepare: vi.fn(), startConflict: vi.fn(), resolveConflict: vi.fn(), writeResolution: vi.fn(), abortConflict: vi.fn(), refresh: vi.fn(), query: vi.fn((method: string, payload: unknown) => ({ method, payload })),
+  conflictFiles: [{ path: 'wiki/one.md', canonical: 'main text', task: 'task text', working: 'conflict markers' }],
   context: { files: ['wiki/one.md'], commonBase: 'a'.repeat(40), canonicalDiff: '-main', taskDiff: '+task' },
   detail: { sessions: [] as Array<{ id: string; purpose: string; syncOperationId?: string | null }>, runs: [] as Array<{ id: string; prompt: string; purpose: string; state: string; syncState: string; baselineCommit: string; sessionId?: string }> },
   history: { messages: [] as Array<{ id: string; runId: string | null; payload: { kind: 'message'; data: { role: string; content: unknown } } }>, tools: [] as Array<{ id: string; runId: string | null; data: Record<string, unknown> }> },
@@ -27,26 +28,75 @@ function syncOperation(overrides: Partial<GitSyncOperation> = {}): GitSyncOperat
 vi.mock('@effect/atom-react', () => ({
   useAtomRefresh: () => mocks.refresh,
   useAtomSet: (atom: string) => atom === 'save' ? mocks.save : atom === 'save-run' ? mocks.saveRun : atom === 'confirm-run' ? mocks.confirmRun : atom === 'sync' ? mocks.sync : atom === 'reprepare' ? mocks.reprepare
-    : atom === 'start-conflict' ? mocks.startConflict : atom === 'resolve-conflict' ? mocks.resolveConflict : mocks.abortConflict,
+    : atom === 'start-conflict' ? mocks.startConflict : atom === 'resolve-conflict' ? mocks.resolveConflict : atom === 'write-resolution' ? mocks.writeResolution : mocks.abortConflict,
   useAtomValue: (query: { method: string }) => query.method === 'tasks.wikiDiff' ? { _tag: 'Success', value: mocks.diff }
     : query.method === 'tasks.wikiConflictContext' ? { _tag: 'Success', value: mocks.context }
+    : query.method === 'tasks.wikiConflictFiles' ? { _tag: 'Success', value: mocks.conflictFiles }
     : query.method === 'tasks.sessionHistory' ? { _tag: 'Success', value: mocks.history }
     : query.method === 'tasks.get' ? { _tag: 'Success', value: mocks.detail }
     : query.method === 'tasks.pendingSynchronizations' ? { _tag: 'Success', value: mocks.operations }
       : { _tag: 'Success', value: mocks.view }
 }))
-vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { query: mocks.query, saveTaskWikiFiles: 'save', saveRunWikiFiles: 'save-run', confirmRunWikiUnchanged: 'confirm-run', synchronizeTaskWiki: 'sync', reprepareTaskWiki: 'reprepare', startConflictResolution: 'start-conflict', resolveTaskWikiConflict: 'resolve-conflict', abortTaskWikiConflict: 'abort-conflict' } }))
+vi.mock('../rpc/task-rpc', () => ({ TaskRpcClient: { query: mocks.query, saveTaskWikiFiles: 'save', saveRunWikiFiles: 'save-run', confirmRunWikiUnchanged: 'confirm-run', synchronizeTaskWiki: 'sync', reprepareTaskWiki: 'reprepare', startConflictResolution: 'start-conflict', resolveTaskWikiConflict: 'resolve-conflict', writeTaskWikiConflictResolution: 'write-resolution', abortTaskWikiConflict: 'abort-conflict' } }))
 vi.mock('../preferences', () => ({ useLocale: () => 'en' }))
 
 afterEach(() => {
   cleanup(); window.sessionStorage.clear(); vi.clearAllMocks(); mocks.save.mockReset(); mocks.saveRun.mockReset(); mocks.confirmRun.mockReset(); mocks.sync.mockReset(); mocks.reprepare.mockReset()
-  mocks.startConflict.mockReset(); mocks.resolveConflict.mockReset(); mocks.abortConflict.mockReset()
+  mocks.startConflict.mockReset(); mocks.resolveConflict.mockReset(); mocks.writeResolution.mockReset(); mocks.abortConflict.mockReset()
   mocks.view = { head: 'a'.repeat(40), registered: true, files: [
     { path: 'wiki/one.md', status: 'modified', selectable: true }, { path: 'wiki/two.md', status: 'added', selectable: true }
   ], pending: [] }
   mocks.operations = []; mocks.diff = { kind: 'text', text: '+hello <script>unsafe()</script>' }
   mocks.context = { files: ['wiki/one.md'], commonBase: 'a'.repeat(40), canonicalDiff: '-main', taskDiff: '+task' }
+  mocks.conflictFiles = [{ path: 'wiki/one.md', canonical: 'main text', task: 'task text', working: 'conflict markers' }]
   mocks.detail = { sessions: [], runs: [] }; mocks.history = { messages: [], tools: [] }
+})
+
+it('lets a person choose final knowledge content after the conflict Agent stops', async () => {
+  mocks.operations = [syncOperation({ id: 'conflict-sync', state: 'conflict' })]
+  mocks.detail = { sessions: [{ id: 'conflict-session', purpose: 'conflict-resolution', syncOperationId: 'conflict-sync' }], runs: [
+    { id: 'conflict-run', sessionId: 'conflict-session', prompt: 'resolve', purpose: 'conflict-resolution', state: 'failed', syncState: 'failed', baselineCommit: 'a'.repeat(40) }
+  ] }
+  render(<TaskWikiChangesPanel taskId="task" knowledge />)
+  expect(screen.queryByRole('button', { name: 'Save selected files' })).toBeNull()
+  expect((screen.getByRole('button', { name: 'Complete merge' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Keep Task' }))
+  expect((screen.getByLabelText('wiki/one.md final content') as HTMLTextAreaElement).value).toBe('task text')
+  fireEvent.change(screen.getByLabelText('wiki/one.md final content'), { target: { value: 'merged text' } })
+  mocks.writeResolution.mockResolvedValueOnce(undefined)
+  mocks.resolveConflict.mockResolvedValueOnce({ state: 'completed' })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Complete merge' })))
+  expect(mocks.writeResolution).toHaveBeenCalledWith({ payload: { input: {
+    taskId: 'task', operationId: 'conflict-sync', files: [{ path: 'wiki/one.md', content: 'merged text' }]
+  } } })
+  expect(mocks.resolveConflict).toHaveBeenCalledWith({ payload: { taskId: 'task', id: 'conflict-sync' } })
+})
+
+it('holds knowledge choices for retry and waits for an active conflict Agent', async () => {
+  mocks.operations = [syncOperation({ id: 'conflict-sync', state: 'conflict' })]
+  mocks.detail = { sessions: [{ id: 'conflict-session', purpose: 'conflict-resolution', syncOperationId: 'conflict-sync' }], runs: [
+    { id: 'conflict-run', sessionId: 'conflict-session', prompt: 'resolve', purpose: 'conflict-resolution', state: 'running', syncState: 'not-required', baselineCommit: 'a'.repeat(40) }
+  ] }
+  const panel = render(<TaskWikiChangesPanel taskId="task" knowledge />)
+  expect(screen.queryByRole('button', { name: 'Complete merge' })).toBeNull()
+  mocks.detail.runs[0]!.state = 'failed'
+  panel.rerender(<TaskWikiChangesPanel taskId="task" knowledge />)
+  fireEvent.click(screen.getByRole('button', { name: 'Keep main' }))
+  mocks.writeResolution.mockRejectedValueOnce(new Error('lost response')).mockResolvedValueOnce(undefined)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Complete merge' })))
+  const request = mocks.writeResolution.mock.calls[0]![0]
+  mocks.resolveConflict.mockResolvedValueOnce({ state: 'completed' })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry merge' })))
+  expect(mocks.writeResolution.mock.calls[1]![0]).toEqual(request)
+})
+
+it('resumes a prepared knowledge publication using its existing operation', async () => {
+  mocks.operations = [syncOperation({ id: 'knowledge-sync', state: 'prepared' })]
+  render(<TaskWikiChangesPanel taskId="task" knowledge />)
+  expect(screen.queryByRole('button', { name: 'Reprepare after main changed' })).toBeNull()
+  mocks.resolveConflict.mockResolvedValueOnce({ state: 'completed' })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Continue publication' })))
+  expect(mocks.resolveConflict).toHaveBeenCalledWith({ payload: { taskId: 'task', id: 'knowledge-sync' } })
 })
 
 it('previews and explicitly saves selected Task files, then synchronizes with a new stable ID', async () => {

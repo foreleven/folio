@@ -15,7 +15,7 @@ function displayContent(content: Schema.Json | undefined): string {
 }
 
 /** Explicit Prompt dispatch and durable history. Query refreshes never restore or resend execution. */
-export function TaskConversation({ taskId, sessionId }: { taskId: string; sessionId: string }): React.JSX.Element {
+export function TaskConversation({ taskId, sessionId, readOnly = false }: { taskId: string; sessionId: string; readOnly?: boolean }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   const detailQuery = TaskRpcClient.query('tasks.get', { id: taskId })
   const historyQuery = TaskRpcClient.query('tasks.sessionHistory', { taskId, sessionId })
@@ -133,7 +133,7 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.payload.data, null, 2)}</pre>
       </details>) : null}
       {run.error ? <p role="alert" className="text-support text-destructive">{run.error}</p> : null}
-      {['failed', 'interrupted', 'cancelled'].includes(run.state) ? <Button variant="ghost" size="sm" disabled={pending || !!active}
+      {!readOnly && ['failed', 'interrupted', 'cancelled'].includes(run.state) ? <Button variant="ghost" size="sm" disabled={pending || !!active}
         onClick={() => { if (run.baselineCommit) setRecoveryId(run.id); else { setRecoveryId(null); setPrompt(run.prompt) } }}>{chinese ? '从这一轮继续' : 'Continue from this run'}</Button> : null}
     </article>)}
     {history._tag === 'Success' && history.value.messages.some(message => message.runId === null)
@@ -141,7 +141,8 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
         {history.value.messages.filter(message => message.runId === null && message.payload.kind === 'message').map(message => <p key={message.id} className="whitespace-pre-wrap break-words">{displayContent(message.payload.data.content)}</p>)}
         {history.value.messages.filter(tool => tool.runId === null && tool.payload.kind === 'tool_call').map(tool => <pre key={tool.id} className="max-h-64 overflow-auto whitespace-pre-wrap break-words">{JSON.stringify(tool.payload.data, null, 2)}</pre>)}
       </details> : null}
-    <form className="space-y-2" onSubmit={event => { event.preventDefault(); void submit() }}>
+    {readOnly ? active ? <Button variant="outline" disabled={pending} onClick={() => void stop(active.id)}>{active.state === 'queued' ? (chinese ? '取消排队' : 'Cancel queued run') : (chinese ? '停止运行' : 'Stop run')}</Button> : null
+      : <form className="space-y-2" onSubmit={event => { event.preventDefault(); void submit() }}>
       {recoveryId ? <p className="text-support">{chinese ? '请输入新的恢复指令，先检查已有进展；不会重放原指令。' : 'Enter a new recovery instruction that checks existing progress. The original prompt will not be replayed.'}
         <Button type="button" variant="ghost" size="sm" disabled={pending} onClick={() => setRecoveryId(null)}>{chinese ? '取消接续' : 'Clear recovery'}</Button></p> : null}
       <label className="block space-y-1 text-ui"><span>{chinese ? '指令' : 'Prompt'}</span>
@@ -157,6 +158,6 @@ export function TaskConversation({ taskId, sessionId }: { taskId: string; sessio
       {failed ? <p role="alert" className="text-support text-destructive">{routineBusy
         ? (chinese ? '同一 Routine 的另一个任务仍在执行或等待同步，请在处理完成后重试。' : 'Another Task from this Routine is running or awaiting synchronization. Resolve it before retrying.')
         : chinese ? '操作未能确认。请刷新记录；再次提交相同指令会沿用原请求。' : 'The operation could not be confirmed. Refresh history; retrying the same prompt reuses its request.'}</p> : null}
-    </form>
+    </form>}
   </section>
 }

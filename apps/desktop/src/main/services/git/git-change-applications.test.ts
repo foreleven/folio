@@ -106,7 +106,7 @@ it('derives Task branch and worktree paths instead of persisting them', async ()
     yield* initializeVaultWorkspace(root, join(root, 'entry'))
     const worktrees = yield* TaskWorktrees
     const checkout = yield* worktrees.create({ id: 'task', type: 'agent', receipt: null,
-      configuration: { goal: 'test', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] } })
+      configuration: { goal: 'test', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [], rawInput: null } })
     const task = yield* (yield* HarnessStore).task('task')
     expect(task).toMatchObject({ branch: 'folio/task/task', worktree: join(root, 'worktrees/task') })
     expect(checkout.path).toBe(task.worktree)

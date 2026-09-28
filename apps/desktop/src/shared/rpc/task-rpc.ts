@@ -1,4 +1,4 @@
-import { RoutineExecution, RoutineId, RoutineRecord, RunRoutine, SaveRoutine } from '../routine'
+import { RoutineExecution, RoutineId, RoutineRecord, RunRoutine, SaveRoutine, ScheduledRoutineExecution } from '../routine'
 import { MessageRecord } from '../harness-events'
 import { SessionModelSelection } from '../model'
 import { Schema } from 'effect'
@@ -8,6 +8,7 @@ import { VaultMiddleware } from './vault-middleware'
 import {
   ConfirmRunWikiUnchanged,
   GitConflictContext,
+  GitConflictFile,
   GitChangeApplication,
   GitSyncOperation,
   ReprepareTaskWiki,
@@ -17,7 +18,8 @@ import {
   SynchronizeTaskWiki,
   WorkspaceChangesView,
   WorkspaceDiffInput,
-  WorkspaceFileDiff
+  WorkspaceFileDiff,
+  WriteGitConflictResolution
 } from '../git-change'
 
 const TaskId = Schema.String.check(Schema.isUUID())
@@ -59,6 +61,8 @@ export const StartTaskRunInput = Schema.Struct({
   resumesRunId: Schema.NullOr(TaskId)
 })
 export type StartTaskRunInput = typeof StartTaskRunInput.Type
+export const RetryKnowledgeRunInput = Schema.Struct({ taskId: TaskId, previousRunId: TaskId, retryRunId: TaskId })
+export type RetryKnowledgeRunInput = typeof RetryKnowledgeRunInput.Type
 /** Stable identities for one coordinator Run; main builds the conflict Prompt and execution target. */
 export const StartConflictResolutionInput = Schema.Struct({
   taskId: TaskId,
@@ -71,7 +75,7 @@ export type StartConflictResolutionInput = typeof StartConflictResolutionInput.T
 export const SessionHistory = Schema.Struct({ messages: Schema.Array(MessageRecord) })
 export type SessionHistory = typeof SessionHistory.Type
 
-export const RoutineRunResult = Schema.Struct({ execution: RoutineExecution, task: TaskRecord, run: Schema.NullOr(RunRecord) })
+export const RoutineRunResult = Schema.Struct({ execution: ScheduledRoutineExecution, task: TaskRecord, run: Schema.NullOr(RunRecord) })
 export type RoutineRunResult = typeof RoutineRunResult.Type
 
 /** Renderer supplies identities and intent only; main owns paths, branches and capability selection. */
@@ -86,7 +90,7 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('routines.run', { payload: { input: RunRoutine }, success: RoutineRunResult, error: HarnessStoreError }),
   Rpc.make('routines.prepare', {
     payload: { input: RunRoutine },
-    success: Schema.Struct({ execution: RoutineExecution, task: TaskRecord }),
+    success: Schema.Struct({ execution: ScheduledRoutineExecution, task: TaskRecord }),
     error: HarnessStoreError
   }),
   Rpc.make('tasks.list', { payload: {}, success: Schema.Array(TaskRecord), error: HarnessStoreError }),
@@ -104,6 +108,14 @@ export class TaskRpcs extends RpcGroup.make(
     payload: { taskId: TaskId, id: SynchronizeTaskWiki.fields.id },
     success: GitConflictContext,
     error: HarnessStoreError
+  }),
+  Rpc.make('tasks.wikiConflictFiles', {
+    payload: { taskId: TaskId, id: SynchronizeTaskWiki.fields.id },
+    success: Schema.Array(GitConflictFile),
+    error: HarnessStoreError
+  }),
+  Rpc.make('tasks.writeWikiConflictResolution', {
+    payload: { input: WriteGitConflictResolution }, success: Schema.Void, error: HarnessStoreError
   }),
   Rpc.make('tasks.saveWikiFiles', { payload: { input: SaveTaskWikiFiles }, success: GitChangeApplication, error: HarnessStoreError }),
   Rpc.make('tasks.saveRunWikiFiles', { payload: { input: SaveRunWikiFiles }, success: GitChangeApplication, error: HarnessStoreError }),
@@ -138,6 +150,7 @@ export class TaskRpcs extends RpcGroup.make(
   Rpc.make('tasks.openSession', { payload: OpenTaskSessionInput, success: SessionRecord, error: HarnessStoreError }),
   Rpc.make('tasks.sessionHistory', { payload: SessionIdentity, success: SessionHistory, error: HarnessStoreError }),
   Rpc.make('tasks.startRun', { payload: StartTaskRunInput, success: RunRecord, error: HarnessStoreError }),
+  Rpc.make('tasks.retryKnowledgeRun', { payload: RetryKnowledgeRunInput, success: RunRecord, error: HarnessStoreError }),
   Rpc.make('tasks.startConflictResolution', { payload: StartConflictResolutionInput, success: RunRecord, error: HarnessStoreError }),
   Rpc.make('tasks.inspectRun', { payload: { taskId: TaskId, runId: TaskId }, success: RunRecord, error: HarnessStoreError }),
   Rpc.make('tasks.cancelRun', { payload: { taskId: TaskId, runId: TaskId }, success: RunRecord, error: HarnessStoreError }),

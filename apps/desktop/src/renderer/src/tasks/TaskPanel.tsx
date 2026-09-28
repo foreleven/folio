@@ -120,8 +120,8 @@ export function TaskPanel(): React.JSX.Element {
           <span>{task.type === 'agent' ? (task.configuration.agent === 'pi' ? 'pi' : 'Codex') : `Ingestion · ${task.receipt.state}`} · {task.state === 'completed'
             ? (chinese ? '已完成' : 'Completed') : task.worktreeState === 'ready'
               ? (chinese ? '工作区已就绪' : 'Workspace ready') : (chinese ? '工作区待准备' : 'Workspace pending')}</span>
-          {task.type === 'agent' && task.state === 'active' ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
-          {task.type === 'agent' && task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
+          {task.type === 'agent' && (task.state === 'active' || task.configuration.rawInput != null) ? <Button variant="outline" size="sm" onClick={() => setSelectedTask(selectedTask === task.id ? null : task.id)}>{chinese ? '会话' : 'Sessions'}</Button> : null}
+          {task.type === 'agent' && task.configuration.rawInput == null && task.state === 'completed' && task.worktreeState === 'released' ? <Button variant="outline" size="sm" disabled={reopeningTask !== null}
             onClick={() => void reopenTask(task.id)}>{reopeningTask === task.id ? (chinese ? '正在重开…' : 'Reopening…') : (chinese ? '重开' : 'Reopen')}</Button> : null}
           {task.type === 'ingestion' && ['pending', 'running'].includes(task.receipt.state) ? <Button variant="outline" size="sm" disabled={reopeningTask !== null || task.receipt.cancelRequested}
             onClick={() => void updateIngestion(task.id, 'cancel')}>{reopeningTask === task.id || task.receipt.cancelRequested ? (chinese ? '正在停止…' : 'Stopping…') : (chinese ? '停止' : 'Stop')}</Button> : null}

@@ -12,8 +12,10 @@ import './wiki.css'
 
 const extensions = [StarterKit.configure({ link: {
   openOnClick: false,
-  // Explicit Page links need URI validation, not a process-global autolink protocol registration.
-  isAllowedUri: (url, { defaultValidate }) => /^folio-page:[a-zA-Z0-9_-]+$/.test(url) || defaultValidate(url)
+  // Folio identity and pinned evidence links stay local to this editor instance.
+  isAllowedUri: (url, { defaultValidate }) => /^folio-page:[a-zA-Z0-9_-]+$/.test(url)
+    || /^folio-raw:(?:[a-f0-9]{40}|[a-f0-9]{64})\/raws\/[^\s#]+(?:#[A-Za-z0-9._~%-]+)?$/.test(url)
+    || defaultValidate(url)
 } }), Markdown, TableKit,
   TaskList, TaskItem.configure({ nested: true }), Image]
 const blocks = [

@@ -3,6 +3,7 @@ import { TaskWikiChangesPanel } from './TaskWikiChangesPanel'
 import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { Button } from '@folio/ui/components/ui/button'
 import { useRef, useState } from 'react'
+import { v5 as uuidv5 } from 'uuid'
 import type { SessionRecord, TaskRecord } from '../../../shared/harness'
 import type { OpenTaskSessionInput } from '../../../shared/rpc/task-rpc'
 import { useLocale } from '../preferences'
@@ -12,6 +13,7 @@ import { TaskRpcClient } from '../rpc/task-rpc'
 /** Explicitly initializes/restores Sessions. No render, selection or retry sends a Prompt. */
 export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agent' }> }): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
+  const knowledge = task.configuration.rawInput !== null
   const query = TaskRpcClient.query('tasks.get', { id: task.id })
   const detail = useAtomValue(query)
   const refresh = useAtomRefresh(query)
@@ -19,6 +21,7 @@ export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agen
   const settings = useAtomValue(modelsAtom)
   const open = useAtomSet(TaskRpcClient.openSession, { mode: 'promise' })
   const close = useAtomSet(TaskRpcClient.closeSession, { mode: 'promise' })
+  const retryKnowledge = useAtomSet(TaskRpcClient.retryKnowledgeRun, { mode: 'promise' })
   const [conversation, setConversation] = useState<string | null>(null)
   const [showChanges, setShowChanges] = useState(false)
   const [modelKey, setModelKey] = useState<string | null>(null)
@@ -29,6 +32,9 @@ export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agen
   const choices = catalog._tag === 'Success' && settings._tag === 'Success' && task.configuration.agent === 'pi'
     ? catalog.value.models.filter(model => model.source === 'builtin' && settings.value.configuredProviders?.includes(model.providerId)) : []
   const routine = detail._tag === 'Success' ? detail.value.routine : null
+  const latestRun = detail._tag === 'Success' ? detail.value.runs.at(-1) : undefined
+  const retryableKnowledgeRun = knowledge && latestRun && ['execution', 'recovery'].includes(latestRun.purpose)
+    && ['failed', 'interrupted', 'cancelled'].includes(latestRun.state) ? latestRun : null
   const routineModelKey = routine?.model ? JSON.stringify([routine.model.providerId, routine.model.modelId]) : ''
   // A user selection (including clearing it) takes precedence over the immutable Routine default.
   const selectedModelKey = modelKey ?? routineModelKey
@@ -71,9 +77,21 @@ export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agen
     finally { busy.current = false; setPending(false); refresh() }
   }
 
+  /** A deterministic retry identity survives a lost response without changing frozen raw endpoints. */
+  async function retryFailedKnowledge(): Promise<void> {
+    if (busy.current || !retryableKnowledgeRun) return
+    busy.current = true; setPending(true); setMessage('')
+    try {
+      await retryKnowledge({ payload: { taskId: task.id, previousRunId: retryableKnowledgeRun.id,
+        retryRunId: uuidv5(`folio:knowledge-retry:${task.id}:${retryableKnowledgeRun.id}`, uuidv5.URL) } })
+      setMessage(chinese ? '已排队继续处理相同的 raw 输入。' : 'Queued a retry using the same frozen raw input.')
+    } catch { setMessage(chinese ? '重试未能确认，请刷新后再试。' : 'Retry was not confirmed. Refresh and try again.') }
+    finally { busy.current = false; setPending(false); refresh() }
+  }
+
   return <div className="space-y-3 border-t pt-3">
-    {routine ? <p className="text-support text-muted-foreground">{chinese ? '来自 Routine 执行：' : 'From Routine execution: '}{routine.routineDate}</p> : null}
-    <div className="flex flex-wrap items-end gap-3">
+    {routine ? <p className="text-support text-muted-foreground">{chinese ? '来自 Routine 执行：' : 'From Routine execution: '}{routine.routineDate ?? (chinese ? 'raws 变化触发' : 'Triggered by raw changes')}</p> : null}
+    {!knowledge ? <div className="flex flex-wrap items-end gap-3">
       <div className="space-y-1 text-ui"><span className="block">{chinese ? '会话 Agent' : 'Session Agent'}</span>
         <span className="inline-flex h-8 items-center rounded-md border px-2">{task.configuration.agent === 'pi' ? 'pi' : 'Codex'}</span>
       </div>
@@ -87,20 +105,23 @@ export function TaskSessions({ task }: { task: Extract<TaskRecord, { type: 'agen
         </select>
       </label> : null}
       <Button disabled={pending || (task.configuration.agent === 'pi' && !model)} onClick={() => void initialize()}>{chinese ? '新建会话' : 'New session'}</Button>
-    </div>
-    {task.configuration.agent === 'pi' && choices.length === 0 ? <p className="text-support text-muted-foreground">{chinese ? '请先在 Agent 设置中配置 Provider。' : 'Configure a Provider in Agent settings first.'}</p> : null}
+    </div> : null}
+    {!knowledge && task.configuration.agent === 'pi' && choices.length === 0 ? <p className="text-support text-muted-foreground">{chinese ? '请先在 Agent 设置中配置 Provider。' : 'Configure a Provider in Agent settings first.'}</p> : null}
     {message ? <p role="status" className="text-support">{message}</p> : null}
+    {retryableKnowledgeRun ? <Button variant="outline" size="sm" disabled={pending} onClick={() => void retryFailedKnowledge()}>
+      {pending ? (chinese ? '正在重试…' : 'Retrying…') : (chinese ? '重试知识整理' : 'Retry knowledge intake')}
+    </Button> : null}
     {detail._tag === 'Success' ? <ul className="space-y-2">{detail.value.sessions.map(session => <li key={session.id} className="flex flex-wrap items-center justify-between gap-2 text-support">
       <span>{session.agent} · {session.modelProfile ? `${session.modelProfile.provider.providerId} / ${session.modelProfile.modelId}` : session.id}</span>
       <div className="flex gap-2">
         <Button variant="ghost" size="sm" onClick={() => setConversation(session.id)}>{chinese ? '查看对话' : 'Conversation'}</Button>
-        <Button variant="ghost" size="sm" disabled={pending} onClick={() => void initialize(session)}>{chinese ? '连接 / 重试' : 'Connect / retry'}</Button>
+        {!knowledge && session.purpose === 'task' ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => void initialize(session)}>{chinese ? '连接 / 重试' : 'Connect / retry'}</Button> : null}
         <Button variant="ghost" size="sm" disabled={pending} onClick={() => void disconnect(session)}>{chinese ? '关闭连接' : 'Close connection'}</Button>
       </div>
     </li>)}</ul> : <p className="text-support">{detail._tag === 'Failure'
       ? (chinese ? '无法读取会话。' : 'Could not load sessions.') : (chinese ? '正在加载会话…' : 'Loading sessions…')}</p>}
-    {conversation ? <TaskConversation key={conversation} taskId={task.id} sessionId={conversation} /> : null}
+    {conversation ? <TaskConversation key={conversation} taskId={task.id} sessionId={conversation} readOnly={knowledge} /> : null}
     <Button variant="outline" size="sm" onClick={() => setShowChanges(current => !current)}>{showChanges ? (chinese ? '隐藏文件变更' : 'Hide file changes') : (chinese ? '查看文件变更' : 'View file changes')}</Button>
-    {showChanges ? <TaskWikiChangesPanel taskId={task.id} /> : null}
+    {showChanges ? <TaskWikiChangesPanel taskId={task.id} knowledge={knowledge} /> : null}
   </div>
 }

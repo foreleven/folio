@@ -27,7 +27,7 @@ const setup = Effect.gen(function* () {
   yield* store.createTask({
     id: 'task',
     type: 'agent', receipt: null,
-    configuration: { goal: 'Summarize notes', agent: 'pi', model: null, skillIds: ['notes'], integrationIds: ['lark'], resourceIds: [] }
+    configuration: { goal: 'Summarize notes', agent: 'pi', model: null, skillIds: ['notes'], integrationIds: ['lark'], resourceIds: [], rawInput: null }
   })
   // Storage-only fixture: the real Git resource boundary is covered by TaskWorktrees tests.
   yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='task'`)
@@ -79,7 +79,7 @@ describe('Vault harness execution ledger', () => {
         yield* store.createTask({
           id: 'other',
           type: 'agent', receipt: null,
-          configuration: { goal: 'Other', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [] }
+          configuration: { goal: 'Other', agent: 'pi', model: null, skillIds: [], integrationIds: [], resourceIds: [], rawInput: null }
         })
         // Storage-only fixture: the real Git resource boundary is covered by TaskWorktrees tests.
         yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE tasks SET worktree_state='ready', worktree_base='baseline' WHERE id='other'`)
