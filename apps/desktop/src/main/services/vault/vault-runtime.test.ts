@@ -183,10 +183,18 @@ it('executes Ingestion without a Session and records changed raws at the canonic
   } finally { await runtime.dispose(); await rm(root, { recursive: true, force: true }) }
 }, 25_000)
 
-it.skipIf(process.platform === 'win32')('completes a Knowledge Task with no Wiki changes and keeps its raw checkpoint', async () => {
+it.skipIf(process.platform === 'win32').each([false, true])('completes a Knowledge Task with no Wiki changes after settling pending todos (%s)', async incomplete => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'folio-knowledge-unchanged-')))
   const original = await readFile(resolve('../../packages/agent/tests/fixtures/codex-app-server.mjs'), 'utf8')
-  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${original.replace('id: "native-thread"', 'id: process.cwd()')}`, { mode: 0o700 })
+  await writeFile(join(root, 'codex'), `#!/usr/bin/env node\n${original.replace('id: "native-thread"', 'id: process.cwd()')
+    .replace('const turn = { id: `turn-${++turnNumber}`', 'const turn = { id: `turn-${process.pid}-${++turnNumber}`')
+    .replace('const mode = params.input[0].text;', `const mode = params.input[0].text;
+    if (mode.startsWith('Curate the frozen raw input') || mode.startsWith('Repair the complete Wiki result')) {
+      const commit = /Raw toCommit: ([a-f0-9]+)/.exec(mode)?.[1];
+      const previous = /Raw fromCommit: ([a-f0-9]+)/.exec(mode)?.[1] ?? null;
+      const pending = ${incomplete} && !mode.startsWith('Repair the complete Wiki result');
+      writeFileSync('_intake-todo.md', '---\\nfromCommit: ' + previous + '\\ntoCommit: ' + commit + '\\nphase: completed\\n---\\n' + (pending ? '- [ ] Unresolved source judgement\\n' : '- [x] All source judgements settled\\n'));
+    }`)}`, { mode: 0o700 })
   const runtime = createRuntime(root, Layer.succeed(AgentRuntime)({ get: Effect.succeed({
     entrypoint: resolve('out/main/agent-worker.js'), agentVersion: '0.1.0', codexExecutable: join(root, 'codex')
   }) }), [readyImap()], (_integrationId, _resourceId, output) => Effect.promise(async () => {
@@ -221,6 +229,13 @@ it.skipIf(process.platform === 'win32')('completes a Knowledge Task with no Wiki
       const request = yield* tasks.claimExecution('knowledge-unchanged-test')
       expect(request?.taskId).toBe(knowledge.id)
       yield* tasks.executeRequest(request!)
+      if (incomplete) {
+        expect((yield* tasks.get(knowledge.id)).task.state).not.toBe('completed')
+        const repair = yield* tasks.claimExecution('knowledge-unchanged-repair')
+        expect(repair?.taskId).toBe(knowledge.id)
+        expect(repair?.prompt).toContain('Complete all screening and todos')
+        yield* tasks.executeRequest(repair!)
+      }
       expect((yield* tasks.get(knowledge.id)).task).toMatchObject({ state: 'completed',
         summary: { publication: { state: 'not-required' } } })
       yield* tasks.tickRoutines
@@ -244,10 +259,12 @@ it.skipIf(process.platform === 'win32').each([
     .replace('const turn = { id: `turn-${++turnNumber}`', 'const turn = { id: `turn-${process.pid}-${++turnNumber}`').replace(
     'const mode = params.input[0].text;',
     `const mode = params.input[0].text;
-    if (mode.startsWith('Organize the frozen raw input') || mode.startsWith('Continue the interrupted Knowledge intake') || mode.startsWith('Repair the complete Wiki result')) {
+    if (mode.startsWith('Curate the frozen raw input') || mode.startsWith('Continue the interrupted Knowledge intake') || mode.startsWith('Repair the complete Wiki result')) {
       const commit = /Raw toCommit: ([a-f0-9]+)/.exec(mode)?.[1];
       const path = /Raw paths:\\n- (raws\\/[^\\n]+)/.exec(mode)?.[1];
       if (!commit || !path) throw new Error('Missing frozen raw input');
+      const previous = /Raw fromCommit: ([a-f0-9]+)/.exec(mode)?.[1] ?? null;
+      writeFileSync('_intake-todo.md', '---\\nfromCommit: ' + previous + '\\ntoCommit: ' + commit + '\\nphase: completed\\n---\\n- [x] Evidence reviewed\\n');
       const citation = mode.startsWith('Repair the complete Wiki result') ? '[source](folio-raw:' + commit + '/' + path + ')\\n' : '';
       const icon = ${invalidField === 'icon'} && !mode.startsWith('Repair the complete Wiki result') ? 'icon: null\\n' : '';
       writeFileSync('wiki/asset.md', '---\\nid: asset\\ntitle: Asset\\nobjectType: note\\nproperties: {}\\ncreatedAt: 2026-09-24T00:00:00.000Z\\nupdatedAt: 2026-09-24T00:00:00.000Z\\ncover: null\\n' + icon + '---\\n# Asset\\n\\n' + citation);
@@ -291,13 +308,18 @@ it.skipIf(process.platform === 'win32').each([
       if (knowledge?.type !== 'agent' || !knowledge.configuration.rawInput) throw new Error('Expected Knowledge Task')
       const frozenInput = knowledge.configuration.rawInput
       const initialRun = (yield* tasks.get(knowledge.id)).runs.at(-1)!
-      expect(initialRun.prompt).toContain('cover may be a URL string or null')
+      expect(initialRun.prompt).toContain('cover is a URL string or null')
+      expect(initialRun.prompt).toContain('Frozen Knowledge goals:')
+      expect(initialRun.prompt).toContain('捕捉原始资料中尚未成型的想法')
+      yield* Effect.promise(() => writeFile(join(directory, 'config.json'), JSON.stringify({ knowledgeGoals: [{ id: 'replacement', description: 'New goal for later Tasks' }] })))
       yield* tasks.cancelRun(knowledge.id, initialRun.id)
       expect(yield* tasks.startRun({ id: randomUUID(), taskId: knowledge.id, sessionId: initialRun.sessionId,
         prompt: 'Unscoped work', purpose: 'execution', resumesRunId: null }).pipe(Effect.flip))
         .toMatchObject({ reason: 'invalid-state' })
       const retryInput = { taskId: knowledge.id, previousRunId: initialRun.id, retryRunId: randomUUID() }
       const retried = yield* tasks.retryKnowledgeRun(retryInput)
+      expect(retried.prompt).toContain('捕捉原始资料中尚未成型的想法')
+      expect(retried.prompt).not.toContain('New goal for later Tasks')
       expect(retried).toMatchObject({ purpose: 'recovery', resumesRunId: initialRun.id, state: 'queued' })
       expect((yield* tasks.retryKnowledgeRun(retryInput)).id).toBe(retried.id)
       const retainedTask = (yield* tasks.get(knowledge.id)).task
@@ -722,7 +744,7 @@ it.skipIf(process.platform === 'win32')('attributes Wiki synchronization when la
       sourceHead = followUpSave.commit
       // The synthetic Agent writes checkout-root diagnostics unrelated to the Wiki.
       yield* Effect.promise(() => Promise.all(['terminal-cleanup.json', 'skill-roots.json', 'native-thread.json',
-        'resumed.json', 'turn-input.json', 'interrupt.json'].map(name => rm(join(success.task.worktree, name), { force: true }))))
+        'resumed.json', 'turn-input.json', 'thread-start.json', 'interrupt.json'].map(name => rm(join(success.task.worktree, name), { force: true }))))
       const publication = yield* tasks.synchronizeTaskWiki({ id: 'publish-wiki', taskId, expectedSourceHead: followUpSave.commit })
       expect(publication.state).toBe('completed')
       expect((yield* tasks.get(taskId)).task.summary).toMatchObject({ type: 'agent',

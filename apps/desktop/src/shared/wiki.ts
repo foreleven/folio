@@ -1,4 +1,5 @@
 import { Schema } from 'effect'
+import { knowledgeTemplates } from './knowledge'
 
 export const PropertyKind = Schema.Literals(['text', 'number', 'checkbox', 'date', 'datetime', 'url', 'email', 'phone', 'select', 'multi-select', 'status'])
 export type PropertyKind = typeof PropertyKind.Type
@@ -21,6 +22,7 @@ export const PropertyDefinition = Schema.Struct({
 export type PropertyDefinition = typeof PropertyDefinition.Type
 export const ObjectType = Schema.Struct({
   id: Schema.NonEmptyString, name: Schema.NonEmptyString, icon: Schema.String,
+  template: Schema.String,
   properties: Schema.Array(PropertyDefinition)
 })
 export type ObjectType = typeof ObjectType.Type
@@ -65,9 +67,12 @@ export const SaveObjectTypes = Schema.Struct({
 })
 export type SaveObjectTypes = typeof SaveObjectTypes.Type
 
-export const defaultObjectTypes: readonly ObjectType[] = [
+const defaultTypeDefinitions: readonly Omit<ObjectType, 'template'>[] = [
   { id: 'page', name: 'Page', icon: '📄', properties: [] },
   { id: 'note', name: 'Note', icon: '📝', properties: [{ key: 'tags', name: 'Tags', kind: 'multi-select', options: [] }] },
+  { id: 'content', name: 'Content', icon: '📚', properties: [] },
+  { id: 'idea', name: 'Idea', icon: '💡', properties: [] },
+  { id: 'question', name: 'Question', icon: '❓', properties: [] },
   { id: 'project', name: 'Project', icon: '📁', properties: [
     { key: 'status', name: 'Status', kind: 'status', options: [
       { id: 'not_started', name: 'Not started', group: 'not_started' },
@@ -97,6 +102,7 @@ export const defaultObjectTypes: readonly ObjectType[] = [
     { key: 'occurredAt', name: 'Occurred at', kind: 'datetime', options: [] }
   ] }
 ]
+export const defaultObjectTypes: readonly ObjectType[] = defaultTypeDefinitions.map(type => ({ ...type, template: knowledgeTemplates[type.id] ?? '' }))
 
 /** A newly authored page has a stable identity before it reaches disk. */
 export function newPageMetadata(id: string, objectType = 'page', parentId: string | null = null): PageMetadata {

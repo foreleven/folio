@@ -13,7 +13,10 @@ import {
   RunRecord,
   SessionBinding,
   SessionRecord,
-  TaskRecord
+  TaskRecord,
+  TaskStatus,
+  emptyTaskCounts,
+  type TaskCounts
 } from '../../../shared/harness'
 import { TaskSummary } from '../../../shared/harness'
 import type { MessageRecord } from '../../../shared/harness-events'
@@ -59,6 +62,7 @@ export class HarnessStore extends Context.Service<
     readonly createTask: (input: NewTask) => Effect.Effect<void, HarnessStoreError>
     readonly task: (id: string) => Effect.Effect<TaskRecord, HarnessStoreError>
     readonly tasks: Effect.Effect<readonly TaskRecord[], HarnessStoreError>
+    readonly taskCounts: Effect.Effect<TaskCounts, HarnessStoreError>
     readonly createSession: (input: NewSession) => Effect.Effect<void, HarnessStoreError>
     readonly bindSession: (id: string, binding: SessionBinding) => Effect.Effect<void, HarnessStoreError>
     readonly sessions: (taskId: string) => Effect.Effect<readonly SessionRecord[], HarnessStoreError>
@@ -93,6 +97,35 @@ export class HarnessStore extends Context.Service<
       FROM tasks ORDER BY created_at DESC, id DESC`.pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(TaskRow))),
         Effect.map(rows => rows.map(withLocation)),
+        Effect.mapError(storageError)
+      )
+
+      /**
+       * Count Tasks once, including Ingestion. Task completion clears historical Run failures.
+       * A live worker takes precedence over queued follow-ups; publication and idle work remain
+       * pending until the Task completes. Conflict-resolution Runs also occupy a worker.
+       */
+      const taskCounts = sql`SELECT status, COUNT(*) AS count FROM (
+        SELECT CASE
+          WHEN t.state='completed' THEN 'completed'
+          WHEN t.state='cancelled' THEN 'cancelled'
+          WHEN t.type='ingestion' THEN CASE json_extract(t.receipt, '$.state')
+            WHEN 'succeeded' THEN 'pending' ELSE json_extract(t.receipt, '$.state') END
+          WHEN active.id IS NOT NULL THEN active.state
+          WHEN EXISTS (SELECT 1 FROM runs WHERE task_id=t.id AND state='queued') THEN 'queued'
+          WHEN EXISTS (SELECT 1 FROM git_operations WHERE task_id=t.id AND kind='synchronize' AND state='conflict') THEN 'conflict'
+          WHEN latest.state IN ('failed', 'interrupted', 'cancelled') THEN latest.state
+          ELSE 'pending' END AS status
+        FROM tasks t
+        LEFT JOIN runs active ON active.task_id=t.id AND active.state IN ('preparing', 'running')
+        LEFT JOIN runs latest ON latest.sequence=(SELECT MAX(sequence) FROM runs WHERE task_id=t.id)
+      ) GROUP BY status`.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({ status: TaskStatus, count: Schema.Number })))),
+        Effect.map(rows => {
+          const counts = emptyTaskCounts()
+          for (const row of rows) counts[row.status] = row.count
+          return counts
+        }),
         Effect.mapError(storageError)
       )
 
@@ -229,7 +262,7 @@ export class HarnessStore extends Context.Service<
         )
       }, Effect.mapError(storageError))
 
-      return HarnessStore.of({ createTask, task, tasks, createSession, bindSession, sessions, reserveRun, runs, recordAgentSummary })
+      return HarnessStore.of({ createTask, task, tasks, taskCounts, createSession, bindSession, sessions, reserveRun, runs, recordAgentSummary })
     })
     )
   }

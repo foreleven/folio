@@ -1,10 +1,17 @@
-import { ModelProfile } from '@folio/agent/config/schema'
+import { ModelProfile, SystemOneConfig } from '@folio/agent/config/schema'
 import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/unstable/rpc'
 import { ModelCatalogView, ModelServiceError, ModelSettingsView } from '../model'
 
 const ProfileId = Schema.Struct({ profileId: Schema.NonEmptyString })
 const SettingsResult = { success: ModelSettingsView, error: ModelServiceError }
+
+/** The key is a one-shot redacted request; watch snapshots contain connection settings only. */
+export const SaveSystemOne = Rpc.make('models.saveSystemOne', {
+  payload: Schema.Struct({ configuration: SystemOneConfig,
+    apiKey: Schema.optionalKey(Schema.Redacted(Schema.NonEmptyString, { label: 'System One credential' })) }),
+  ...SettingsResult
+})
 
 /** Provider setup does not create a model profile; the key only crosses this redacted request. */
 export const SetProviderCredential = Rpc.make('models.setProviderCredential', {
@@ -63,6 +70,7 @@ export const RebuildModelConfig = Rpc.make('models.rebuildDerivedConfig', {
 })
 
 export class ModelRpcs extends RpcGroup.make(
+  SaveSystemOne,
   SetProviderCredential,
   WatchModels,
   SaveModelProfile,

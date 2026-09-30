@@ -127,7 +127,7 @@ describe('Wiki file-backed Page service', () => {
     expect(await git(['show', 'HEAD:wiki/canonical.md'])).toContain('Content stays on disk.')
     expect(await git(['status', '--porcelain'])).toBe('?? wiki/unrelated.md\n')
     const snapshot = await runtime.runPromise(service.snapshot)
-    await runtime.runPromise(service.saveTypes({ objectTypes: [...snapshot.objectTypes, { id: 'book', name: 'Book', icon: '📚', properties: [] }], expectedVersion: snapshot.typesVersion }))
+    await runtime.runPromise(service.saveTypes({ objectTypes: [...snapshot.objectTypes, { id: 'book', name: 'Book', icon: '📚', template: '', properties: [] }], expectedVersion: snapshot.typesVersion }))
     expect(await git(['show', 'HEAD:wiki/_types.json'])).toContain('Book')
     expect(await git(['status', '--porcelain'])).toBe('?? wiki/unrelated.md\n')
   }, 15_000)
@@ -196,7 +196,7 @@ describe('Wiki file-backed Page service', () => {
   it('persists type definitions and rejects removal or incompatible changes in use', async () => {
     const initial = await runtime.runPromise(service.snapshot)
     const result = await runtime.runPromise(service.saveTypes({ objectTypes: [...defaultObjectTypes, {
-      id: 'book', name: 'Book', icon: '📚', properties: [{ key: 'rating', name: 'Rating', kind: 'number', options: [] }]
+      id: 'book', name: 'Book', icon: '📚', template: '', properties: [{ key: 'rating', name: 'Rating', kind: 'number', options: [] }]
     }], expectedVersion: initial.typesVersion }))
     expect(JSON.parse(await readFile(join(root, '_types.json'), 'utf8'))).toHaveLength(defaultObjectTypes.length + 1)
     const book = await create('book', 'book')

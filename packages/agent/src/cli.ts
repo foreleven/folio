@@ -11,6 +11,8 @@ import { resolveFolioSessionStorageDirectory } from "./config/directory.js";
 import { makeFolioAgentRuntimeComposition } from "./runtime/composition.js";
 import { makeCodexAcpBackend } from "./codex/acp-backend.js";
 import { resolveSessionSkillPaths } from "./config/session-skills.js";
+import { makeSystemOneToolExecutor } from "./system-one.js";
+import { resolveFolioAgentDirectory, resolveFolioConfigDirectory } from "./config/directory.js";
 
 const AgentKind = Schema.Literals(["pi", "codex"]);
 let selected: typeof AgentKind.Type | undefined;
@@ -31,7 +33,8 @@ if (selected !== undefined) {
     if (selected === "codex") {
       // Codex uses its local installation/auth; a Pi model profile is not a prerequisite.
       app = createFolioAgentApp({
-        backendFactory: makeCodexAcpBackend({ executable: process.env.FOLIO_CODEX_EXECUTABLE, skillPaths }),
+        backendFactory: makeCodexAcpBackend({ executable: process.env.FOLIO_CODEX_EXECUTABLE, skillPaths,
+          toolExecutor: makeSystemOneToolExecutor(resolveFolioConfigDirectory(), resolveFolioAgentDirectory()) }),
         archive: new SessionArchive(join(storageDirectory, "acp-sessions")),
       });
     } else {

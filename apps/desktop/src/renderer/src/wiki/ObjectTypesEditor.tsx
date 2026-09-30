@@ -25,7 +25,7 @@ export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
     <fieldset disabled={pending} className="space-y-6">
     <p className="text-sm text-muted-foreground">{chinese ? '属性的键和类型创建后保持不变；使用中的选项和属性不能删除。' : 'Property keys and kinds stay fixed after creation. Options and properties in use cannot be removed.'}</p>
     <div className="flex flex-wrap gap-2">{types.map(type => <Button key={type.id} variant={type.id === selected ? 'secondary' : 'ghost'} onClick={() => setSelected(type.id)}>{type.icon} {type.name}</Button>)}</div>
-    <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (!name.trim()) return; const id = `type_${crypto.randomUUID().slice(0, 8)}`; setTypes([...types, { id, name: name.trim(), icon: '📄', properties: [] }]); setSelected(id); setName('') }}>
+    <form className="flex gap-2" onSubmit={event => { event.preventDefault(); if (!name.trim()) return; const id = `type_${crypto.randomUUID().slice(0, 8)}`; setTypes([...types, { id, name: name.trim(), icon: '📄', template: '', properties: [] }]); setSelected(id); setName('') }}>
       <input aria-label={chinese ? '新类型名称' : 'New type name'} className={fieldClass} value={name} onChange={event => setName(event.target.value)} placeholder={chinese ? '例如：读书笔记' : 'For example: Book'} />
       <Button type="submit" variant="outline">{chinese ? '新建类型' : 'New type'}</Button>
     </form>
@@ -35,6 +35,9 @@ export function ObjectTypesEditor({ initial, onSave, onClose, chinese }: {
         <label className="text-sm">{chinese ? '名称' : 'Name'}<input aria-label={chinese ? '类型名称' : 'Type name'} className={`${fieldClass} ml-2`} value={current.name} onChange={event => update({ ...current, name: event.target.value })} /></label>
         {current.id !== 'page' && <Button variant="ghost" onClick={() => { setTypes(types.filter(type => type.id !== current.id)); setSelected('page') }}>{chinese ? '删除类型' : 'Delete type'}</Button>}
       </div>
+      <label className="mt-4 flex flex-col gap-2 text-sm">{chinese ? '内容模板（Markdown）' : 'Content template (Markdown)'}
+        <textarea className={`${fieldClass} min-h-36 font-mono`} value={current.template} onChange={event => update({ ...current, template: event.target.value })} />
+      </label>
       <div className="mt-5 space-y-3">{current.properties.map((field, index) => <div key={field.key} className="flex flex-wrap items-center gap-2 border-t pt-3">
         <input className={fieldClass} aria-label={`${chinese ? '属性名称' : 'Property name'} ${index + 1}`} value={field.name} onChange={event => update({ ...current, properties: current.properties.map(item => item.key === field.key ? { ...item, name: event.target.value } : item) })} />
         <span className="rounded bg-muted px-2 py-1 text-xs">{field.kind}</span>

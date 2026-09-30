@@ -1,4 +1,5 @@
 import { defaultObjectTypes } from '../../../shared/wiki'
+import { KNOWLEDGE_TODO_FILE } from '../../../shared/knowledge'
 import { Effect, FileSystem, Schema } from 'effect'
 import { lstat, rmdir, symlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
@@ -17,6 +18,7 @@ const instructions = `# Vault workspace
 - Do not leave background processes writing this workspace after a turn ends.
 - Place curated user content under wiki/ as Markdown Pages with YAML frontmatter.
 - Read wiki/_types.json before writing Pages. Use the declared objectType and its property keys.
+- Follow each ObjectType's template when curating its body. Keep knowledge-intake progress in ${KNOWLEDGE_TODO_FILE}.
 - Page frontmatter: id (stable UUID), title, objectType, parentId (Page ID or null), icon, cover,
   favorite (boolean), trashed (boolean), createdAt and updatedAt (ISO timestamps), properties (mapping).
 - Keep the body after the closing frontmatter delimiter. Preserve existing Page IDs and metadata.
@@ -47,7 +49,7 @@ export const initializeVaultWorkspace = Effect.fn('VaultWorkspace.initialize')(
       yield* fs.makeDirectory(join(staged, 'raws'))
       yield* fs.writeFileString(join(staged, 'wiki/_types.json'), JSON.stringify(defaultObjectTypes, null, 2) + '\n')
       yield* fs.writeFileString(join(staged, 'AGENTS.md'), instructions)
-      yield* fs.writeFileString(join(staged, '.gitignore'), '.DS_Store\n')
+      yield* fs.writeFileString(join(staged, '.gitignore'), `.DS_Store\n/${KNOWLEDGE_TODO_FILE}\n`)
       yield* git(staged, ['init', '--initial-branch=main', '--template='])
       yield* git(staged, ['add', '--', 'AGENTS.md', '.gitignore', 'wiki/_types.json'])
       yield* git(staged, ['commit', '-m', 'Initialize Folio vault workspace'])

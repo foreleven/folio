@@ -13,6 +13,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./model": "./src/model/index.ts",
+    "./system-one": "./src/system-one.ts",
     "./config": "./src/config/index.ts",
     "./config/schema": "./src/config/schema.ts",
     "./config/directory": "./src/config/directory.ts",

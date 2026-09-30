@@ -2,7 +2,8 @@ import type { ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk/exper
 import { Deferred, Effect, Schema, Semaphore, Stream } from "effect";
 import { randomUUID } from "node:crypto";
 import { openCodexSession, type CodexSessionOptions } from "./session.js";
-import { mapCodexEvent } from "./event-mapper.js";
+import { codexItemId, mapCodexEvent } from "./event-mapper.js";
+import { systemOneToolSpec } from "../system-one.js";
 import type { CodexServerEvent } from "./connection.js";
 
 const Turn = Schema.Struct({ id: Schema.NonEmptyString,
@@ -10,6 +11,8 @@ const Turn = Schema.Struct({ id: Schema.NonEmptyString,
 const TurnResponse = Schema.Struct({ turn: Turn });
 const TurnEvent = Schema.Struct({ threadId: Schema.String, turn: Turn });
 const ItemEvent = Schema.Struct({ threadId: Schema.String, turnId: Schema.String });
+const ToolRequest = Schema.Struct({ threadId: Schema.NonEmptyString, turnId: Schema.NonEmptyString,
+  callId: Schema.NonEmptyString, tool: Schema.NonEmptyString, arguments: Schema.Unknown });
 export type CodexTurnOutcome = "end_turn" | "cancelled" | "failed";
 
 /** Stable execution failures distinguish busy state from an unusable native process. */
@@ -28,6 +31,7 @@ interface ActiveTurn {
   outcome?: CodexTurnOutcome;
   readonly acknowledged: Deferred.Deferred<string, CodexTurnError>;
   readonly completed: Deferred.Deferred<CodexTurnOutcome, CodexTurnError>;
+  readonly tools: AbortController;
 }
 
 export interface CodexTurnRuntimeOptions extends CodexSessionOptions {
@@ -82,6 +86,7 @@ export const openCodexTurnRuntime = Effect.fn("CodexTurnRuntime.open")(function*
     );
     yield* connection.close;
     const run = active;
+    run?.tools.abort();
     active = undefined;
     if (run !== undefined) {
       if (error.reason !== "output_failed") {
@@ -118,6 +123,35 @@ export const openCodexTurnRuntime = Effect.fn("CodexTurnRuntime.open")(function*
   const receive = Effect.fn("CodexTurnRuntime.receive")(function*(event: CodexServerEvent) {
     if (terminal !== undefined) return;
     if (event.id !== undefined) {
+      if (event.method === "item/tool/call" && options.toolExecutor) {
+        const params = yield* Schema.decodeUnknownEffect(ToolRequest)(event.params).pipe(
+          Effect.mapError(() => failure("protocol_error")));
+        const run = active;
+        if (params.threadId !== nativeSessionId || !run || run.outcome !== undefined)
+          return yield* failure("protocol_error");
+        yield* bind(run, params.turnId);
+        const requestId = event.id;
+        // Keep consuming native completion/cancellation while a host decision request is pending.
+        yield* Effect.gen(function*() {
+          const id = codexItemId(params.turnId, params.callId);
+          yield* emit({ sessionUpdate: "tool_call_update", toolCallId: id, title: params.tool,
+            kind: "other", status: "in_progress", rawInput: params.arguments });
+          const result = yield* Effect.tryPromise({
+            try: signal => params.tool === systemOneToolSpec.name
+              ? options.toolExecutor!(params.tool, params.callId, params.arguments, AbortSignal.any([signal, run.tools.signal]))
+              : Promise.reject(new Error("Unknown host decision tool.")),
+            catch: error => error instanceof Error ? error.message : "Host decision tool failed.",
+          }).pipe(Effect.result);
+          const success = result._tag === "Success";
+          const texts = success ? result.success.content.flatMap(item => item.type === "text" ? [item.text] : []) : [result.failure];
+          if (active === run && terminal === undefined) yield* emit({ sessionUpdate: "tool_call_update", toolCallId: id,
+            title: params.tool, status: success ? "completed" : "failed",
+            content: texts.map(text => ({ type: "content" as const, content: { type: "text" as const, text } })) });
+          yield* connection.respond(requestId, { success, contentItems: texts.map(text => ({ type: "inputText", text })) }).pipe(
+            Effect.mapError(() => failure("connection_failed")));
+        }).pipe(Effect.catch(error => stop(error)), Effect.forkScoped);
+        return;
+      }
       // V1 has no authorization-wait state or interactive native input UI.
       yield* connection.reject(event.id).pipe(Effect.mapError(() => terminal ?? failure("connection_failed")));
       return yield* failure("unsupported_request");
@@ -154,7 +188,7 @@ export const openCodexTurnRuntime = Effect.fn("CodexTurnRuntime.open")(function*
       if (terminal !== undefined) return Effect.fail(terminal);
       if (active !== undefined) return Effect.fail(failure("busy"));
       active = { accepted: false, finishing: false, cancelRequested: false, interruptSent: false,
-        acknowledged: Deferred.makeUnsafe(), completed: Deferred.makeUnsafe() };
+        acknowledged: Deferred.makeUnsafe(), completed: Deferred.makeUnsafe(), tools: new AbortController() };
       return Effect.succeed(active);
     });
     return yield* Effect.gen(function*() {
@@ -189,6 +223,7 @@ export const openCodexTurnRuntime = Effect.fn("CodexTurnRuntime.open")(function*
           Effect.mapError(() => terminal ?? failure("connection_failed")),
         );
       }
+      run.tools.abort();
       yield* Deferred.await(run.completed).pipe(Effect.timeoutOrElse({
         duration: options.requestTimeoutMs ?? 10_000,
         orElse: () => Effect.fail(failure("cancel_timeout")),

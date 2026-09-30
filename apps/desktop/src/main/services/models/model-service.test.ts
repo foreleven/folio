@@ -97,6 +97,23 @@ async function withService<A>(
 }
 
 describe('ModelService', () => {
+  it('stores local System One settings separately from its key and retains the key on connection edits', async () => {
+    await withService(async service => {
+      const configuration = { baseUrl: 'http://localhost:8000/v1', model: 'local-jev' }
+      const view = await Effect.runPromise(service.saveSystemOne(configuration, Redacted.make('system-one-only-secret')))
+      expect(view.systemOne).toEqual({ configuration, credentialConfigured: true })
+      expect(view.configuredProviders).toEqual([])
+      expect(JSON.stringify(view)).not.toContain('system-one-only-secret')
+      const config = await readFile(join(root, 'config.json'), 'utf8')
+      expect(JSON.parse(config).agent.systemOne).toEqual(configuration)
+      expect(config).not.toContain('system-one-only-secret')
+      expect(await readFile(join(service.directory, 'auth.json'), 'utf8')).toContain('system-one-only-secret')
+      const edited = await Effect.runPromise(service.saveSystemOne({ ...configuration, model: 'next-model' }))
+      expect(edited.systemOne).toMatchObject({ configuration: { model: 'next-model' }, credentialConfigured: true })
+      expect(await readFile(join(service.directory, 'auth.json'), 'utf8')).toContain('system-one-only-secret')
+    }, makeRuntime(NodeFileSystem.layer, {}, runtimeAdapter()))
+  })
+
   it('saves a provider key without creating a model profile or default selection', async () => {
     await withService(async (service) => {
       const view = await Effect.runPromise(service.setProviderCredential('provider-connected', Redacted.make('provider-only-secret')))

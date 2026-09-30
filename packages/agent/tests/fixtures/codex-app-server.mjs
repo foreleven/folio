@@ -9,7 +9,15 @@ const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   const { id, method, params } = message;
-  if (!method) return send({ method: "answered", params: message });
+  if (!method) {
+    if (id === 'system-one-call') {
+      writeFileSync('tool-response.json', JSON.stringify(message.result));
+      if (activeTurn.interrupted) return;
+      return send({ method: 'turn/completed', params: { threadId: activeTurn.threadId,
+        turn: { ...activeTurn.turn, status: 'completed' } } });
+    }
+    return send({ method: "answered", params: message });
+  }
   if (method === "initialize") return send({ id, result: { userAgent: "fixture" } });
   if (method === "initialized") return;
   if (method === "thread/backgroundTerminals/clean") {
@@ -34,6 +42,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (method === "thread/start" || method === "thread/read" || method === "thread/resume") {
     try {
       if (method === "thread/start") {
+        writeFileSync('thread-start.json', JSON.stringify(params));
         writeFileSync("native-thread.json", JSON.stringify({ id: "native-thread", cwd: process.cwd(), ephemeral: false }));
       }
       const thread = JSON.parse(readFileSync("native-thread.json", "utf8"));
@@ -52,6 +61,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     activeTurn = { turn, mode, threadId: params.threadId };
     const notify = (method, extra) => send({ method, params: { threadId: params.threadId, turnId: turn.id, ...extra } });
     notify("turn/started", { turn });
+    if (mode === 'system-one' || mode === 'system-one-cancel') {
+      send({ id, result: { turn } });
+      return send({ id: 'system-one-call', method: 'item/tool/call', params: { threadId: params.threadId,
+        turnId: turn.id, callId: 'decision', tool: 'system_one', arguments: { rawRef: 'raw', context: 'evidence',
+          goals: [{ id: 'idea', description: 'Preserve ideas.' }] } } });
+    }
     if (mode === "running" || mode === "cancel-start" || mode === "cancel-timeout") {
       return setTimeout(() => send({ id, result: { turn } }), mode === "cancel-start" ? 60 : 0);
     }
@@ -70,6 +85,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return setTimeout(() => send({ id, result: { turn: { ...turn, id: mode === "mismatch" ? "other-turn" : turn.id } } }), 30);
   }
   if (method === "turn/interrupt") {
+    activeTurn.interrupted = true;
     writeFileSync("interrupt.json", JSON.stringify(params));
     send({ id, result: {} });
     if (activeTurn.mode === "cancel-timeout") return;

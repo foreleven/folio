@@ -113,10 +113,23 @@ export const ModelProfile = ModelProfileFields.check(
 );
 export type ModelProfile = typeof ModelProfile.Type;
 
+/** Local System One deployments may use HTTP; generation providers retain their own URL policy. */
+export const SystemOneConfig = Schema.Struct({
+  baseUrl: requiredString("baseUrl").check(Schema.makeFilter(value => {
+    try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash; }
+    catch { return false; }
+  }, { expected: "an absolute HTTP or HTTPS API base URL without credentials, query or fragment" })),
+  model: identifier("model"),
+});
+export type SystemOneConfig = typeof SystemOneConfig.Type;
+export const SystemOneGoal = Schema.Struct({ id: identifier("goalId"), description: requiredString("goal description") });
+export type SystemOneGoal = typeof SystemOneGoal.Type;
+
 const AgentSettingsFields = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
   modelProfiles: Schema.Array(ModelProfile).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   defaultModelProfileId: Schema.optionalKey(identifier("defaultModelProfileId")),
+  systemOne: Schema.optionalKey(SystemOneConfig),
 });
 
 export const AgentSettings = AgentSettingsFields.check(

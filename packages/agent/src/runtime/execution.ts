@@ -9,6 +9,7 @@ import { makeCodexAcpBackend } from "../codex/acp-backend.js";
 import { makePiAcpBackend } from "../pi/acp-backend.js";
 import type { ModelProfile } from "../config/schema.js";
 import { makeFolioAgentRuntimeComposition } from "./composition.js";
+import { makeSystemOneToolExecutor } from "../system-one.js";
 
 export interface AgentExecutionOptions {
   readonly toolExecutor?: PiToolExecutor;
@@ -56,7 +57,8 @@ export async function openAgentExecution(
   let factory = backendOverride;
   if (!factory) {
     if (options.agent === "codex") {
-      factory = makeCodexAcpBackend({ processTransport: options.processTransport, executable: options.codexExecutable, skillPaths: options.skillPaths, onProcessStarted: options.onProcessStarted });
+      factory = makeCodexAcpBackend({ processTransport: options.processTransport, executable: options.codexExecutable, skillPaths: options.skillPaths, onProcessStarted: options.onProcessStarted,
+        toolExecutor: options.toolExecutor ?? makeSystemOneToolExecutor(options.configDirectory, options.agentDirectory) });
     } else {
       const profile = options.modelProfile;
       if (!profile) throw new Error("Pi execution requires the saved Session model profile.");

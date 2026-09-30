@@ -1,4 +1,5 @@
 import { createPiToolHost } from './pi-tool-host'
+import { makeSystemOneToolExecutor } from '@folio/agent/system-one'
 import { NativeAgentProcess } from './native-agent-process'
 import { Worker, type Transferable } from 'node:worker_threads'
 import type { UpdateSessionNotification } from '@agentclientprotocol/sdk/experimental/v2'
@@ -76,7 +77,8 @@ export class AgentWorkerClient {
   async open(options: AgentWorkerOptions): Promise<{ nativeSessionId: string; processId: number }> {
     if (this.opening || this.terminal) throw this.terminal ?? new Error('Worker already owns a Session.')
     this.opening = true
-    if (options.agent === 'pi') this.toolHost = createPiToolHost(options.cwd, this.environment ?? process.env, this.onProcessStarted, this.onProcessStopped)
+    this.toolHost = createPiToolHost(options.cwd, this.environment ?? process.env, this.onProcessStarted, this.onProcessStopped,
+      makeSystemOneToolExecutor(options.configDirectory, options.agentDirectory))
     if (options.agent === 'codex') {
       this.native = new NativeAgentProcess(options.codexExecutable ?? 'codex', options.cwd, this.environment)
       await this.native.ready

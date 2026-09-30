@@ -31,6 +31,46 @@ const openFixture = (options: CodexTurnRuntimeOptions) => Effect.gen(function*()
 });
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
+it.each([false, true])('registers System One and persists the host tool result (failure=%s)', async fail => {
+  const input = await fixture();
+  await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const runtime = yield* openFixture({ ...input, toolExecutor: async (name, id, params) => {
+      expect(name).toBe('system_one'); expect(id).toBe('decision');
+      expect(params).toMatchObject({ context: 'evidence' });
+      if (fail) throw new Error('System One unavailable.');
+      return { content: [{ type: 'text', text: '{"results":[{"matched":true}]}' }], details: {} };
+    } });
+    const run = yield* runtime.prompt('system-one');
+    expect(yield* run.completion).toBe('end_turn');
+    expect(input.updates).toContainEqual(expect.objectContaining({ sessionUpdate: 'tool_call_update',
+      toolCallId: codexItemId(run.nativeTurnId, 'decision'), status: fail ? 'failed' : 'completed' }));
+  })).pipe(Effect.provide(NodeServices.layer)));
+  const start = JSON.parse(await readFile(join(input.cwd, 'thread-start.json'), 'utf8'));
+  expect(start.dynamicTools).toEqual([expect.objectContaining({ type: 'function', name: 'system_one', inputSchema: expect.objectContaining({ type: 'object', properties: expect.any(Object), required: expect.any(Array) }) })]);
+  const response = JSON.parse(await readFile(join(input.cwd, 'tool-response.json'), 'utf8'));
+  expect(response).toMatchObject({ success: !fail, contentItems: [{ type: 'inputText' }] });
+});
+
+it('cancels a pending decision while continuing to consume native turn events', async () => {
+  const input = await fixture();
+  let aborted = false;
+  await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const started = yield* Deferred.make<void>();
+    const runtime = yield* openFixture({ ...input, toolExecutor: async (_name, _id, _params, signal) => {
+      await Effect.runPromise(Deferred.succeed(started, undefined));
+      return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => {
+        aborted = true; reject(new Error('System One call cancelled.'));
+      }, { once: true }));
+    } });
+    const run = yield* runtime.prompt('system-one-cancel');
+    yield* Deferred.await(started);
+    yield* runtime.cancel;
+    expect(yield* run.completion).toBe('cancelled');
+    expect(yield* runtime.state).toBe('idle');
+    expect(aborted).toBe(true);
+  })).pipe(Effect.provide(NodeServices.layer)));
+});
+
 it("waits for both native completion and acknowledgement and replaces streamed output with final items", async () => {
   const input = await fixture();
   await Effect.runPromise(Effect.scoped(Effect.gen(function*() {

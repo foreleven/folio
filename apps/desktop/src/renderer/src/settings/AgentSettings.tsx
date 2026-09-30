@@ -1,8 +1,9 @@
 import { BotIcon, CheckIcon } from 'lucide-react'
 import { useLocale } from '../preferences'
 import { ModelsSettings } from './ModelsSettings'
+import { SystemOneSettings } from './SystemOneSettings'
 
-/** This panel configures Pi providers; Codex tasks use the external CLI's local configuration. */
+/** Pi model settings and the shared System One connection; Codex generation uses its local CLI configuration. */
 export function AgentSettings(): React.JSX.Element {
   const chinese = useLocale() === 'zh-CN'
   return (
@@ -22,6 +23,7 @@ export function AgentSettings(): React.JSX.Element {
         </div>
       </div>
       <ModelsSettings />
+      <SystemOneSettings />
     </div>
   )
 }

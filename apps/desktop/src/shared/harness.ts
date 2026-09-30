@@ -80,6 +80,17 @@ export const TaskRecord = Schema.Union([
 ])
 export type TaskRecord = typeof TaskRecord.Type
 
+/** One current status per Task; successful Runs alone do not complete their Task. */
+export const TaskStatus = Schema.Literals(['pending', 'queued', 'preparing', 'running', 'completed', 'failed', 'interrupted', 'cancelled', 'conflict'])
+export const TaskCounts = Schema.Struct({
+  pending: Schema.Number, queued: Schema.Number, preparing: Schema.Number, running: Schema.Number,
+  completed: Schema.Number, failed: Schema.Number, interrupted: Schema.Number, cancelled: Schema.Number, conflict: Schema.Number
+})
+export type TaskCounts = typeof TaskCounts.Type
+export const emptyTaskCounts = (): { -readonly [K in keyof TaskCounts]: number } => ({
+  pending: 0, queued: 0, preparing: 0, running: 0, completed: 0, failed: 0, interrupted: 0, cancelled: 0, conflict: 0
+})
+
 export const SessionPurpose = Schema.Literals(['task', 'conflict-resolution'])
 const SessionIdentity = {
   id: Id,

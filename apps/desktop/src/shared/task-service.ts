@@ -1,6 +1,6 @@
 import type { ExecutionCounts } from './execution'
 import { Context, Effect } from 'effect'
-import type { HarnessStoreError, SessionRecord, TaskRecord, RunRecord } from './harness'
+import type { HarnessStoreError, SessionRecord, TaskRecord, TaskCounts, RunRecord } from './harness'
 import type { RunRoutine, SaveRoutine, RoutineRecord, RoutineExecution, ScheduledRoutineExecution } from './routine'
 import type { CreateTaskInput, OpenTaskSessionInput, StartConflictResolutionInput, StartTaskRunInput, RetryKnowledgeRunInput, TaskDetail, SessionHistory, RoutineRunResult, TaskFeedPage, TaskFeedCursor } from './rpc/task-rpc'
 import type {
@@ -46,6 +46,7 @@ export class TaskService extends Context.Service<
     readonly pendingTaskSynchronizations: (taskId: string) => Effect.Effect<readonly GitSyncOperation[], HarnessStoreError>
     readonly taskSynchronization: (id: string) => Effect.Effect<GitSyncOperation, HarnessStoreError>
     readonly executionCounts: Effect.Effect<ExecutionCounts, HarnessStoreError>
+    readonly taskCounts: Effect.Effect<TaskCounts, HarnessStoreError>
     readonly claimExecution: (owner: string) => Effect.Effect<RunRecord | null, HarnessStoreError>
     readonly recoverExecutionState: Effect.Effect<number, HarnessStoreError>
     readonly executeRequest: (request: RunRecord) => Effect.Effect<void, HarnessStoreError>

@@ -10,7 +10,7 @@ type OwnedProcess = {
 
 /** Tool I/O stays in the host so a failed SDK thread cannot orphan native tool processes. */
 export function createPiToolHost(cwd: string, environment: NodeJS.ProcessEnv | undefined,
-  onStarted: (pid: number) => Promise<void>, onStopped: (pid: number) => Promise<void>) {
+  onStarted: (pid: number) => Promise<void>, onStopped: (pid: number) => Promise<void>, decision?: PiToolExecutor) {
   const active = new Map<string, { controller: AbortController; completion: Promise<unknown> }>()
   const processes = new Set<OwnedProcess>()
   let closing = false
@@ -83,7 +83,8 @@ export function createPiToolHost(cwd: string, environment: NodeJS.ProcessEnv | u
       child.child.stdin.end('\n')
       return child.child
     })
-    const completion = execute(name, id, params, controller.signal, onUpdate).finally(async () => {
+    const executor = name === 'system_one' && decision ? decision : execute
+    const completion = executor(name, id, params, controller.signal, onUpdate).finally(async () => {
       // SDK cancellation can settle before asynchronous search preparation finishes.
       // Fence late spawn requests and join both registration and actual process exit.
       finished = true

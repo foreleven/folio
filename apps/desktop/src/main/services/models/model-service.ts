@@ -8,7 +8,8 @@ import {
   type PiModelRuntimeAdapter
 } from '@folio/agent/model'
 import { resolveFolioAgentDirectory } from '@folio/agent/config/directory'
-import { AgentSettings, ModelProfile } from '@folio/agent/config/schema'
+import { AgentSettings, ModelProfile, SystemOneConfig } from '@folio/agent/config/schema'
+import { SYSTEM_ONE_CREDENTIAL_ID } from '@folio/agent/system-one'
 import { Context, Effect, FileSystem, Layer, Path, PubSub, Redacted, Ref, Schema, Semaphore, Stream } from 'effect'
 import {
   SessionModelSelection,
@@ -57,6 +58,7 @@ export interface ModelServiceOptions {
 /** Owns main-process model commands; all externally visible state is credential-blind. */
 export class ModelService extends Context.Service<ModelService, {
   readonly resolveSessionModel: (selection: SessionModelSelection) => Effect.Effect<ModelProfile, ModelServiceError>
+  readonly saveSystemOne: (configuration: SystemOneConfig, apiKey?: Redacted.Redacted<string>) => Effect.Effect<ModelSettingsView, ModelServiceError>
   readonly directory: string
   readonly setProviderCredential: (providerId: string, apiKey: Redacted.Redacted<string>) => Effect.Effect<ModelSettingsView, ModelServiceError>
   readonly modelsPath: string
@@ -130,7 +132,7 @@ export class ModelService extends Context.Service<ModelService, {
         const statuses = yield* Ref.get(connectionStatuses)
         return {
           enabled: settings.enabled,
-          configuredProviders: [...providers],
+          configuredProviders: [...providers].filter(id => id !== SYSTEM_ONE_CREDENTIAL_ID),
           piImportFailed,
           ...(settings.defaultModelProfileId === undefined
             ? {}
@@ -142,7 +144,9 @@ export class ModelService extends Context.Service<ModelService, {
                 ? providers.has(profile.provider.providerId)
                 : Boolean(profile.environmentVariable && environment[profile.environmentVariable])),
             connectionStatus: statuses.get(profile.id) ?? 'untested'
-          }))
+          })),
+          ...(settings.systemOne ? { systemOne: { configuration: settings.systemOne,
+            credentialConfigured: providers.has(SYSTEM_ONE_CREDENTIAL_ID) } } : {})
         } satisfies ModelSettingsView
       })
 
@@ -206,6 +210,21 @@ export class ModelService extends Context.Service<ModelService, {
           return next
         }
       )
+
+      /** Reuses the model-command gate so saving connection settings cannot overwrite a profile edit. */
+      const saveSystemOne = Effect.fn('ModelService.saveSystemOne')(function*(input: SystemOneConfig, apiKey?: Redacted.Redacted<string>) {
+        const configuration = yield* Schema.decodeUnknownEffect(SystemOneConfig)(input, { onExcessProperty: 'error' }).pipe(
+          Effect.mapError(() => failure('invalid_profile')))
+        if (apiKey !== undefined) {
+          const key = Redacted.value(apiKey).trim()
+          if (!key) return yield* failure('credential_unavailable')
+          yield* Effect.tryPromise({ try: () => credentials.modify(SYSTEM_ONE_CREDENTIAL_ID, async () => ({ type: 'api_key', key })),
+            catch: () => failure('credential_unavailable') })
+        }
+        yield* config.setAgent({ ...yield* getSettings, systemOne: configuration }).pipe(
+          Effect.mapError(() => failure('config_unavailable')))
+        return yield* list
+      }, commands.withPermit, announce)
 
       /** A managed credential belongs to its provider, so every dependent test result expires together. */
       const resetProviderConnections = (settings: AgentSettings, providerId: string) => Ref.update(
@@ -363,6 +382,7 @@ export class ModelService extends Context.Service<ModelService, {
       const rebuildDerivedConfig = Effect.flatMap(getSettings, writeDerived).pipe(commands.withPermit)
 
       return ModelService.of({
+        saveSystemOne,
         resolveSessionModel,
         setProviderCredential,
         directory,

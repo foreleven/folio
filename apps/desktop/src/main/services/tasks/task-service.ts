@@ -15,7 +15,10 @@ import { HarnessRuns } from '../harness/harness-runs'
 import { ModelService } from '../models/model-service'
 import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema, Scope, Semaphore } from 'effect'
 import { join } from 'node:path'
-import { lstat } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
+import { parse as parseYaml } from 'yaml'
+import { KNOWLEDGE_TODO_FILE, VaultConfig } from '../../../shared/knowledge'
+import { knowledgeIntakePrompt } from './knowledge-intake-prompt'
 import { randomUUID } from 'node:crypto'
 import { v7 as uuidv7 } from 'uuid'
 import { HarnessStoreError, TaskSummary, type IngestionReceipt, type TaskRecord } from '../../../shared/harness'
@@ -274,6 +277,7 @@ export const TaskServiceLive = Layer.effect(
       const { fromCommit, toCommit } = task.configuration.rawInput
       const prompt = [
         'Continue the interrupted Knowledge intake in this Task and inspect its saved messages and Wiki draft before editing.',
+        `Read ${KNOWLEDGE_TODO_FILE} first and continue its incomplete screening and todos. Use the frozen Knowledge goals in the original instructions.`,
         `Raw fromCommit: ${fromCommit ?? '(initial full snapshot)'}`,
         `Raw toCommit: ${toCommit}`,
         'Use only this frozen Git raw range. Read files with git show <toCommit>:<raw-path>; inspect the Git diff for deletions. Do not consume newer raw changes.',
@@ -421,6 +425,11 @@ export const TaskServiceLive = Layer.effect(
         ? (yield* git(main, ['ls-tree', '-r', '--name-only', '-z', toCommit, '--', 'raws'])).split('\0').filter(Boolean)
         : (yield* git(main, ['diff', '--name-only', '--no-renames', '-z', fromCommit, toCommit, '--', 'raws'])).split('\0').filter(Boolean)
       if (!paths.length) return
+      const vaultConfig = yield* Effect.tryPromise({ try: () => readFile(join(vault.directory, 'config.json'), 'utf8'),
+        catch: () => new HarnessStoreError({ reason: 'storage', message: 'Vault Knowledge goals could not be read.' }) }).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(VaultConfig))),
+        Effect.mapError(error => error instanceof HarnessStoreError ? error : new HarnessStoreError({
+          reason: 'invalid-state', message: 'Vault Knowledge goals are invalid. Check the Vault config.json.' })))
       const taskId = randomUUID()
       yield* worktrees.reserve({ id: taskId, type: 'agent', receipt: null, configuration: {
         ...routine.configuration, rawInput: { fromCommit, toCommit }
@@ -430,19 +439,8 @@ export const TaskServiceLive = Layer.effect(
       const runId = randomUUID()
       yield* prepareSession({ taskId, sessionId, agent: routine.configuration.agent,
         ...(routine.configuration.model ? { model: routine.configuration.model } : {}) })
-      const prompt = [
-        'Organize the frozen raw input into evidence-backed Wiki knowledge assets.',
-        `Raw fromCommit: ${fromCommit ?? '(initial full snapshot)'}`,
-        `Raw toCommit: ${toCommit}`,
-        `Raw paths:\n${paths.map(path => `- ${path}`).join('\n')}`,
-        'Read each raw file from the frozen Git tree with git show <toCommit>:<raw-path>, not from a newer working-tree projection. For deletions, inspect the Git diff and prior blob.',
-        'Create or update coherent Pages for Projects, Persons, Organizations, Meetings, Decisions, Events, and Notes as warranted by evidence.',
-        'Read wiki/_types.json and existing Wiki Pages before editing. Each new Page is a Markdown file with YAML frontmatter containing a stable id, title, objectType, createdAt, updatedAt, and properties. Use valid option IDs from the existing ObjectType definitions.',
-        'icon must be a string; use an empty string ("") when absent. cover may be a URL string or null when absent. parentId may be null when the Page has no parent.',
-        'Use [label](folio-page:<pageId>) for Page relationships and [source](folio-raw:<toCommit>/<raw-path>#<encoded-record-id>) for source citations. Omit the fragment when no stable record ID exists.',
-        'Use existing ObjectTypes. Do not change wiki/_types.json, raws, or other workspace files. Do not delete or trash Pages or change their IDs. Do not create placeholder milestones. Folio will return validation issues to this Session for repair.',
-        `Additional goal: ${routine.configuration.goal}`
-      ].join('\n\n')
+      const prompt = knowledgeIntakePrompt({ fromCommit, toCommit, paths, goals: vaultConfig.knowledgeGoals,
+        instruction: routine.configuration.goal })
       yield* queue.submit({ id: runId, taskId, sessionId, prompt, purpose: 'execution', resumesRunId: null, source: 'routine' })
       yield* Effect.logInfo('Raw knowledge intake Task queued', {
         routineId: routine.id, taskId, runId, fromCommit, toCommit, rawPathCount: paths.length
@@ -461,6 +459,20 @@ export const TaskServiceLive = Layer.effect(
       for (let index = 0; index + 1 < fields.length; index += 2) changed.set(fields[index + 1]!, fields[index]!)
       for (const path of (yield* git(checkout, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)) changed.set(path, 'A')
       const issues: string[] = []
+      // A no-change Wiki result cannot acknowledge an unfinished or failed screening phase.
+      const todoInfo = yield* Effect.promise(() => lstat(join(checkout, KNOWLEDGE_TODO_FILE)).catch(() => null))
+      if (!todoInfo?.isFile() || todoInfo.isSymbolicLink() || todoInfo.size > 1024 * 1024) {
+        issues.push(`${KNOWLEDGE_TODO_FILE}: Missing or invalid Task-local intake progress file.`)
+      } else {
+        const text = yield* Effect.tryPromise({ try: () => readFile(join(checkout, KNOWLEDGE_TODO_FILE), 'utf8'), catch: safeError })
+        try {
+          const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)
+          const progress = Schema.decodeUnknownSync(Schema.Struct({ fromCommit: Schema.NullOr(Schema.String),
+            toCommit: Schema.String, phase: Schema.Literal('completed') }))(parseYaml(frontmatter?.[1] ?? ''))
+          if (progress.fromCommit !== input.fromCommit || progress.toCommit !== input.toCommit || /^\s*[-*+]\s+\[ \]/m.test(text))
+            issues.push(`${KNOWLEDGE_TODO_FILE}: Complete all screening and todos against this Task's frozen input.`)
+        } catch { issues.push(`${KNOWLEDGE_TODO_FILE}: Set matching frozen commits and phase: completed after all work is settled.`) }
+      }
       for (const [path, status] of changed) {
         if (!/^wiki\/(?!_types\.json$).+\.md$/.test(path)) issues.push(`${path}: Knowledge results may edit only Wiki Page Markdown.`)
         if (status === 'D') issues.push(`${path}: Page deletion is not permitted.`)
@@ -1095,6 +1107,7 @@ export const TaskServiceLive = Layer.effect(
       'Task publication reconciliation could not start; saved snapshots remain available.', { vaultId: vault.id }, error))))
     return TaskService.of({
       executionCounts: queue.counts,
+      taskCounts: store.taskCounts,
       tickRoutines,
       dispatchRoutine,
       runRoutine,

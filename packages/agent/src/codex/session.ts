@@ -2,6 +2,8 @@ import { Effect, Schema } from "effect";
 import { realpath } from "node:fs/promises";
 import { openCodexConnection, type CodexConnectionOptions } from "./connection.js";
 import { loadCodexSkills } from "./skills.js";
+import { systemOneToolSpec } from "../system-one.js";
+import type { PiToolExecutor } from "../pi/host-tools.js";
 
 const Thread = Schema.Struct({ id: Schema.NonEmptyString, cwd: Schema.String, ephemeral: Schema.Boolean });
 const ReadResult = Schema.Struct({ thread: Thread });
@@ -36,6 +38,7 @@ const sameDirectory = Effect.fn("CodexSession.sameDirectory")(function*(actual: 
 });
 
 export interface CodexSessionOptions extends CodexConnectionOptions {
+  readonly toolExecutor?: PiToolExecutor;
   readonly skillPaths?: readonly string[];
   /** The resumable native thread.id, not Codex's session-tree grouping ID or a Folio/ACP ID. */
   readonly nativeSessionId?: string;
@@ -72,7 +75,8 @@ export const openCodexSession = Effect.fn("CodexSession.open")(function*(options
     );
     stage = requestedId === undefined ? 'thread-start' : 'thread-resume';
     const result = yield* connection.request(requestedId === undefined ? "thread/start" : "thread/resume", {
-      ...(requestedId === undefined ? { ephemeral: false } : { threadId: requestedId }),
+      ...(requestedId === undefined ? { ephemeral: false,
+        ...(options.toolExecutor ? { dynamicTools: [systemOneToolSpec] } : {}) } : { threadId: requestedId }),
       cwd: options.cwd, sandbox: "danger-full-access", approvalPolicy: "never",
     }).pipe(
       Effect.flatMap(Schema.decodeUnknownEffect(SessionResult)),

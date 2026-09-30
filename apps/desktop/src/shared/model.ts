@@ -1,4 +1,4 @@
-import { ModelProfile, ThinkingLevel } from '@folio/agent/config/schema'
+import { ModelProfile, SystemOneConfig, ThinkingLevel } from '@folio/agent/config/schema'
 import { Schema } from 'effect'
 
 /** Explicit model intent contains no credentials or custom endpoint supplied by the renderer. */
@@ -43,7 +43,8 @@ export const ModelSettingsView = Schema.Struct({
   configuredProviders: Schema.optionalKey(Schema.Array(Schema.String)),
   piImportFailed: Schema.optionalKey(Schema.Boolean),
   defaultModelProfileId: Schema.optionalKey(Schema.String),
-  profiles: Schema.Array(ModelProfileView)
+  profiles: Schema.Array(ModelProfileView),
+  systemOne: Schema.optionalKey(Schema.Struct({ configuration: SystemOneConfig, credentialConfigured: Schema.Boolean }))
 })
 export type ModelSettingsView = typeof ModelSettingsView.Type
 

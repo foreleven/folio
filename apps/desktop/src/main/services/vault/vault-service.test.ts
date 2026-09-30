@@ -1,3 +1,4 @@
+import { defaultVaultConfig } from '../../../shared/knowledge'
 import * as NodeFileSystem from '@effect/platform-node/NodeFileSystem'
 import * as NodePath from '@effect/platform-node/NodePath'
 import * as NodeChildProcessSpawner from '@effect/platform-node/NodeChildProcessSpawner'
@@ -123,7 +124,7 @@ describe('VaultService', () => {
       theme: 'system', language: 'system', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', vaults: [vault], agent: { enabled: false, modelProfiles: [] }
     })
     const settingsFile = join(root, 'config/vaults', vault.id, 'config.json')
-    expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual({})
+    expect(JSON.parse(await readFile(settingsFile, 'utf8'))).toEqual(defaultVaultConfig)
     const databaseFile = join(root, 'config/vaults', vault.id, 'data.db')
     expect((await readFile(databaseFile)).subarray(0, 16).toString()).toBe('SQLite format 3\0')
     expect(await readdir(selected)).toEqual(['_types.json'])
@@ -281,7 +282,7 @@ describe('VaultService', () => {
       const registered = (await retry.runPromise(config.get)).vaults[0]
       expect(await readdir(join(root, 'config/vaults', registered.id))).toEqual([])
       expect(await retry.runPromise(Effect.flatMap(VaultService, (store) => store.register(selected)))).toEqual(registered)
-      expect(JSON.parse(await readFile(join(root, 'config/vaults', registered.id, 'config.json'), 'utf8'))).toEqual({})
+      expect(JSON.parse(await readFile(join(root, 'config/vaults', registered.id, 'config.json'), 'utf8'))).toEqual(defaultVaultConfig)
     } finally { await retry.dispose() }
   })
 

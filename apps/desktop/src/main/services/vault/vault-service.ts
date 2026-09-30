@@ -2,6 +2,7 @@ import { Context, Effect, FileSystem, Layer, Path, Schema, Semaphore } from 'eff
 import { v7 as uuidv7 } from 'uuid'
 import { ChildProcessSpawner } from 'effect/unstable/process'
 import { Vault, VaultError } from '../../../shared/vault'
+import { defaultVaultConfig } from '../../../shared/knowledge'
 import { ConfigService } from '../config/config-service'
 import { vaultDatabaseLayer } from './vault-database'
 import { initializeVaultWorkspace } from './vault-workspace'
@@ -69,7 +70,7 @@ export class VaultService extends Context.Service<
             const temporary = yield* fs.makeTempDirectoryScoped({ directory, prefix: '.config-' })
             const staged = path.join(temporary, 'config.json')
             // Identity lives only in the global index; this file is reserved for vault-level settings.
-            yield* fs.writeFileString(staged, '{}\n', { mode: 0o600 })
+            yield* fs.writeFileString(staged, JSON.stringify(defaultVaultConfig, null, 2) + '\n', { mode: 0o600 })
             yield* fs.rename(staged, filePath).pipe(Effect.uninterruptible)
           }
           // Initialize existing vaults too; the registration scope closes the client

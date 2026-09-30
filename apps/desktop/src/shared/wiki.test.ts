@@ -9,7 +9,7 @@ describe('ObjectType property validation', () => {
     ['phone', '+86 138 0013 8000', 'not a phone'],
     ['select', 'open', 'Unknown'], ['multi-select', ['open'], ['Unknown']], ['status', 'open', 'Unknown']
   ])('validates %s values and permits unset properties', (kind, valid, invalid) => {
-    const type = { id: 'test', name: 'Test', icon: '', properties: [{ key: 'field', name: 'Field', kind: kind as PropertyKind, options: [{ id: 'open', name: 'Open' }, { id: 'closed', name: 'Closed' }] }] }
+    const type = { id: 'test', name: 'Test', icon: '', template: '', properties: [{ key: 'field', name: 'Field', kind: kind as PropertyKind, options: [{ id: 'open', name: 'Open' }, { id: 'closed', name: 'Closed' }] }] }
     const page = newPageMetadata('test')
     expect(() => validatePageProperties(page, type)).not.toThrow()
     expect(() => validatePageProperties({ ...page, properties: { field: valid } }, type)).not.toThrow()

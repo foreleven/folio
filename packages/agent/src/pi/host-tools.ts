@@ -3,19 +3,27 @@ import {
   createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition,
   createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition, type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
+import { systemOneToolSpec } from '../system-one.js';
 
 export type PiToolResult = Awaited<ReturnType<ToolDefinition['execute']>>;
 export type PiToolExecutor = (name: string, callId: string, params: unknown, signal?: AbortSignal,
   onUpdate?: (result: PiToolResult) => void) => Promise<PiToolResult>;
+
+/** Both native backends expose the same host-owned decision tool and argument schema. */
+export function makeSystemOneToolDefinition(execute: PiToolExecutor): ToolDefinition<any, any> {
+  return { name: systemOneToolSpec.name, label: 'System One', description: systemOneToolSpec.description,
+    promptSnippet: 'Match original raw material against Knowledge goals.', parameters: systemOneToolSpec.inputSchema,
+    execute: (id, params, signal, onUpdate) => execute(systemOneToolSpec.name, id, params, signal, onUpdate) };
+}
 
 /** Keep SDK schemas/prompts; only tool I/O is delegated to the supervising host. */
 export function makeHostToolDefinitions(cwd: string, execute: PiToolExecutor): ToolDefinition<any, any>[] {
   const definitions: ToolDefinition<any, any>[] = [createReadToolDefinition(cwd), createBashToolDefinition(cwd),
     createEditToolDefinition(cwd), createWriteToolDefinition(cwd), createGrepToolDefinition(cwd),
     createFindToolDefinition(cwd), createLsToolDefinition(cwd)];
-  return definitions.map(definition => ({ ...definition,
-    execute: (id, params, signal, onUpdate) => execute(definition.name, id, params, signal, onUpdate),
-  }));
+  return [...definitions.map(definition => ({ ...definition,
+    execute: (id: string, params: unknown, signal?: AbortSignal, onUpdate?: (result: PiToolResult) => void) => execute(definition.name, id, params, signal, onUpdate),
+  })), makeSystemOneToolDefinition(execute)];
 }
 
 /** Host-side SDK tools preserve normal output formatting, truncation and file mutation behavior. */

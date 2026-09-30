@@ -14,6 +14,8 @@ Each schedule trigger retains a `routine_schedules` row bound to its Task and ex
 
 Routine execution history queries `tasks` by `routine_id`, then left-joins its optional schedule and latest Agent Run. Event Tasks therefore appear in the same history without fabricated dates, windows, or timezone data. Their UI date groups use Task creation time in the saved global display timezone; scheduled Tasks retain their frozen window timezone. Agent Run success does not mark an event Task complete while its Wiki publication is still pending.
 
+The global footer also counts Tasks, including both Agent and Ingestion, once per current status rather than accumulating historical Runs. Completed and cancelled Task lifecycle states take precedence; active Agent Tasks project their live worker, queued work, publication conflict, or latest Run outcome, while active Ingestion Tasks project their current receipt. A successful Run alone leaves an active Task pending. The footer polls all registered Vaults every two seconds; historical failed or interrupted Runs do not keep a completed Task flagged. Run counts remain an internal execution-ownership check for safely closing a Vault.
+
 There is no separate `processing_boundary` column: the next window is determined from retained windows and their associated Task outcomes. Failed windows retain their identity for retry instead of advancing a second cursor independently.
 
 Removing `is_end` also removes the Routine calendar's whole-day success and missing-day inference. A successful window is not evidence that an entire local day was processed. The UI presents the actual scheduled windows and their Task outcomes; handling windows left over from a previous day remains a separate future workflow.

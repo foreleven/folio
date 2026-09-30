@@ -1,4 +1,5 @@
 import { type PiToolExecutor } from "../pi/host-tools.js";
+import { makeSystemOneToolExecutor } from "../system-one.js";
 import type { CreateModelRuntimeOptions, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { ModelRuntime as PiModelRuntime } from "@earendil-works/pi-coding-agent";
 import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
@@ -199,6 +200,7 @@ export const makeFolioAgentRuntimeComposition = (
     runtime = created;
     const sessionFactory = sessionFactoryBuilder({
       toolExecutor: options.toolExecutor,
+      systemOneExecutor: makeSystemOneToolExecutor(snapshot.configDirectory, snapshot.agentDirectory),
       agentDirectory: snapshot.agentDirectory,
       sessionDirectory: options.sessionDirectory,
       skillPaths: options.skillPaths,

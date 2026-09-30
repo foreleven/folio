@@ -6,6 +6,7 @@ import { ModelService } from '../services/models/model-service'
 export const ModelRpcHandlersLive = ModelRpcs.toLayer(Effect.gen(function*() {
   const models = yield* ModelService
   return ModelRpcs.of({
+    'models.saveSystemOne': ({ configuration, apiKey }) => models.saveSystemOne(configuration, apiKey),
     'models.setProviderCredential': ({ providerId, credential }) => models.setProviderCredential(providerId, credential),
     'models.watch': () => models.watch,
     'models.saveProfile': (profile) => models.saveProfile(profile),

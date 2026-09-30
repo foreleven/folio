@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { RunIntent } from './harness'
+import { RunIntent, TaskCounts } from './harness'
 
 /** Durable admission is independent of an Agent process or a verified Git baseline. */
 export const ExecutionSubmission = Schema.Struct({
@@ -19,8 +19,8 @@ export type ExecutionCounts = typeof ExecutionCounts.Type
 export const emptyExecutionCounts = (): { -readonly [K in keyof ExecutionCounts]: number } => ({
   queued: 0, preparing: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0, interrupted: 0
 })
-export const GlobalExecutionStatus = Schema.Struct({
-  ...ExecutionCounts.fields,
+export const GlobalTaskStatus = Schema.Struct({
+  ...TaskCounts.fields,
   vaults: Schema.Number,
   unavailableVaults: Schema.Number,
   concurrency: Schema.Number

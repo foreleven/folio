@@ -10,6 +10,50 @@ import { createFolioAgentApp } from "../../src/acp/server.js";
 import { SessionArchive } from "../../src/acp/session-archive.js";
 import { applyToolCallUpdate, type ToolCallSnapshot } from "../../src/acp/tool-upsert.js";
 
+it('executes the System One definition through the real Pi tool loop and persists its result', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'folio-pi-systemone-'));
+  const runtime = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
+  await runtime.setRuntimeApiKey('openai', 'test-only-key');
+  const model = runtime.getModel('openai', 'gpt-4o')!;
+  let requests = 0;
+  let calls = 0;
+  const factory = makePiSessionFactory({ agentDirectory: join(root, 'agent'), modelRuntime: runtime,
+    profile: { profileId: 'test', model, thinkingLevel: 'off' },
+    systemOneExecutor: async (name, id, params) => {
+      calls++;
+      expect(name).toBe('system_one'); expect(id).toBe('judge');
+      expect(params).toEqual({ rawRef: 'raw', context: 'source', goals: [{ id: 'idea', description: 'Preserve ideas.' }] });
+      return { content: [{ type: 'text', text: '{"probability":0.8,"matched":true}' }], details: {} };
+    },
+    createAgentSession: async options => {
+      const result = await createAgentSession(options);
+      result.session.agent.streamFunction = () => requests++ === 0 ? response({ type: 'toolCall', id: 'judge', name: 'system_one',
+        arguments: { rawRef: 'raw', context: 'source', goals: [{ id: 'idea', description: 'Preserve ideas.' }] } }) : response();
+      return result;
+    },
+  });
+  const app = createFolioAgentApp({ sessionFactory: factory, archive: new SessionArchive(join(root, 'archive')), log: () => undefined });
+  try {
+    const updates: SessionUpdate[] = [];
+    await client().connectWith(app, async context => {
+      await context.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, info: { name: 'test', version: '1' }, capabilities: {} });
+      const session = await context.buildSession(root).start();
+      await session.prompt('Judge source material');
+      while (true) {
+        const { update } = await session.nextUpdate(); updates.push(update);
+        if (SessionUpdate.isStateUpdate(update) && update.state === 'idle') break;
+      }
+    });
+    expect(calls).toBe(1);
+    expect(project(updates).get('judge')).toMatchObject({ status: 'completed', content: [{ type: 'content',
+      content: { type: 'text', text: '{"probability":0.8,"matched":true}' } }] });
+  } finally {
+    await app.shutdown();
+    await runtime.removeRuntimeApiKey('openai');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** Replaces only provider output; Pi still runs its real prompt loop, tools and native persistence. */
 function response(toolCall?: ToolCall, aborted = false) {
   const stream = createAssistantMessageEventStream();

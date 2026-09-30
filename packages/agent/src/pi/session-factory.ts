@@ -1,4 +1,4 @@
-import { makeHostToolDefinitions, type PiToolExecutor } from "./host-tools.js";
+import { makeHostToolDefinitions, makeSystemOneToolDefinition, type PiToolExecutor } from "./host-tools.js";
 import { ThinkingLevel } from "../config/schema.js";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -78,6 +78,7 @@ export interface PiSessionProfile {
 
 export interface PiSessionFactoryOptions {
   readonly toolExecutor?: PiToolExecutor;
+  readonly systemOneExecutor?: PiToolExecutor;
   /** Explicit skill files/directories assembled by the harness; global discovery remains disabled. */
   readonly skillPaths?: readonly string[];
   /** Folio-owned native session directory; the harness can locate it under a Vault, outside Git. */
@@ -153,8 +154,11 @@ export const makePiSessionFactory = (options: PiSessionFactoryOptions): PiSessio
           modelRuntime: options.modelRuntime,
           model: selectedModel,
           thinkingLevel: selectedThinking,
-          tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
-          customTools: options.toolExecutor ? makeHostToolDefinitions(cwd, options.toolExecutor) : [],
+          // Pi's explicit tool list is an allowlist, including custom definitions.
+          tools: ["read", "bash", "edit", "write", "grep", "find", "ls",
+            ...(options.toolExecutor || options.systemOneExecutor ? ["system_one"] : [])],
+          customTools: options.toolExecutor ? makeHostToolDefinitions(cwd, options.toolExecutor)
+            : options.systemOneExecutor ? [makeSystemOneToolDefinition(options.systemOneExecutor)] : [],
           resourceLoader,
           sessionManager,
           settingsManager,

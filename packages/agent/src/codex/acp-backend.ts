@@ -1,4 +1,5 @@
 import type { CodexProcessTransport } from "./process-transport.js";
+import type { PiToolExecutor } from "../pi/host-tools.js";
 import { RequestError, SessionUpdate } from "@agentclientprotocol/sdk/experimental/v2";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Exit, Schema, Scope } from "effect";
@@ -6,6 +7,7 @@ import { CodexSessionIdentity, type AcpSessionBackendFactory } from "../acp/sess
 import { openCodexTurnRuntime, CodexTurnError, type CodexTurnRuntimeOptions } from "./turn-runtime.js";
 
 export interface CodexAcpBackendOptions {
+  readonly toolExecutor?: PiToolExecutor;
   readonly processTransport?: CodexProcessTransport;
   readonly executable?: string;
   readonly skillPaths?: readonly string[];
@@ -43,7 +45,7 @@ export const makeCodexAcpBackend = (options: CodexAcpBackendOptions = {}): AcpSe
     let completion: Promise<void> | undefined;
     try {
       const runtime = await run((options.acquire ?? openCodexTurnRuntime)({
-        cwd, processTransport: options.processTransport, nativeSessionId: resume?.nativeSessionId, executable: options.executable, skillPaths: options.skillPaths, onProcessStarted: options.onProcessStarted, onUpdate: async (update) => {
+        cwd, toolExecutor: options.toolExecutor, processTransport: options.processTransport, nativeSessionId: resume?.nativeSessionId, executable: options.executable, skillPaths: options.skillPaths, onProcessStarted: options.onProcessStarted, onUpdate: async (update) => {
           if (SessionUpdate.isStateUpdate(update) && update.state === "idle") finalizing = true;
           await onUpdate(update);
         },

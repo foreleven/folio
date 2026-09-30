@@ -38,17 +38,17 @@ function GlobalTaskStatus({ chinese }: { chinese: boolean }): React.JSX.Element 
     ? (chinese ? '全局任务状态不可用' : 'Global task status unavailable')
     : (chinese ? '正在读取全局任务…' : 'Loading global tasks…')}</span>
   const value = query.value
-  const attention = value.failed + value.interrupted
+  const attention = value.failed + value.interrupted + value.conflict
   const summary = chinese
-    ? `全局任务 · 执行 ${value.running} · 准备 ${value.preparing} · 排队 ${value.queued}`
-    : `All vaults · Running ${value.running} · Preparing ${value.preparing} · Queued ${value.queued}`
+    ? `全局任务 · 执行 ${value.running} · 准备 ${value.preparing} · 排队 ${value.queued} · 待处理 ${value.pending}`
+    : `All vaults · Running ${value.running} · Preparing ${value.preparing} · Queued ${value.queued} · Pending ${value.pending}`
   const detail = chinese
-    ? `共 ${value.vaults} 个 Vault；并发上限 ${value.concurrency}；历史执行：成功 ${value.succeeded}，失败 ${value.failed}，中断 ${value.interrupted}，取消 ${value.cancelled}。按执行次数统计，每 2 秒刷新。`
-    : `${value.vaults} vaults; concurrency limit ${value.concurrency}; execution history: ${value.succeeded} succeeded, ${value.failed} failed, ${value.interrupted} interrupted, ${value.cancelled} cancelled. Counts execution attempts; refreshes every 2 seconds.`
+    ? `共 ${value.vaults} 个 Vault；Agent 并发上限 ${value.concurrency}；Task 当前状态：已完成 ${value.completed}，失败 ${value.failed}，中断 ${value.interrupted}，冲突 ${value.conflict}，取消 ${value.cancelled}。包含 Agent 和 Ingestion，每个 Task 只统计一次，每 2 秒刷新。`
+    : `${value.vaults} vaults; Agent concurrency limit ${value.concurrency}; current Task status: ${value.completed} completed, ${value.failed} failed, ${value.interrupted} interrupted, ${value.conflict} conflicted, ${value.cancelled} cancelled. Includes Agent and Ingestion; counts each Task once; refreshes every 2 seconds.`
   return <span role="status" title={detail} className="flex min-w-0 items-center gap-1.5 tabular-nums">
     <Activity className="size-3.5 shrink-0" aria-hidden="true" />
     <span className="truncate">{summary}</span>
-    {attention > 0 && <span className="shrink-0 text-warning">{chinese ? `失败/中断 ${attention}` : `Failed/interrupted ${attention}`}</span>}
+    {attention > 0 && <span className="shrink-0 text-warning">{chinese ? `失败/中断/冲突 ${attention}` : `Failed/interrupted/conflicted ${attention}`}</span>}
     {value.unavailableVaults > 0 && <span className="shrink-0 text-warning">{chinese ? `${value.unavailableVaults} 个 Vault 不可用` : `${value.unavailableVaults} vault(s) unavailable`}</span>}
   </span>
 }

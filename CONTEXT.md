@@ -117,13 +117,21 @@ A failed publication in which an Ingestion commit cannot merge into the canonica
 _Avoid_: Last-writer-wins overwrite
 
 **Knowledge organization**:
-An Agent operation that transforms committed raw changes into personal wiki knowledge. It consumes raw material but does not fetch source data from the provider.
+An Agent operation that selects committed raw material against the Vault's Knowledge goals, collects goal-matched curation work, and curates evidence-backed personal wiki knowledge. A batch may produce no knowledge changes when its material does not warrant curation.
+
+**Knowledge goal**:
+A Vault-level description of what the user wants to understand, develop, or reuse through their knowledge assets. Knowledge goals provide the primary relevance criteria for selecting and organizing raw material; they are distinct from action-system goals and individual execution instructions.
+_Avoid_: Extraction quota, action Goal, Routine execution goal
+
+**Knowledge todo**:
+A piece of knowledge-curation work organized around a stable topic and specific subject, with matched Knowledge goals, discussion context and one or more frozen message references. Matches remain traceable to a todo or a documented no-change outcome. The Agent decides whether the work warrants creating, updating, merging, or leaving knowledge unchanged; a todo does not guarantee a new Page.
+_Avoid_: Action-system Task, guaranteed Page output
 
 **Knowledge Routine**:
 An Agent Routine whose business goal is Knowledge organization from pending raw changes. Its input is fixed from canonical raw history, and its completion advances that Routine's derived processing checkpoint.
 
 **Raw knowledge intake**:
-The single system-owned Knowledge Routine in a Vault that turns pending raw material into coherent Wiki assets. It owns entity extraction, source citation, relationship creation, and updates to existing Pages rather than splitting those concerns across competing raw consumers.
+The single system-owned Knowledge Routine in a Vault that selects valuable material using Knowledge goals and curates coherent Wiki assets. It owns entity extraction, source citation, relationship creation, and updates to existing Pages; processing a source does not require creating a Page for it.
 _Avoid_: Per-entity raw Routine
 
 **Knowledge asset layer**:
@@ -142,9 +150,21 @@ _Avoid_: Company-name relation as text
 A stable knowledge asset representing a company, team, customer, supplier, or other named organization. Relationships between an Organization and people, Projects, or other assets use Knowledge links.
 _Avoid_: Organization name embedded as a relation property
 
+**Page**:
+The common name for a Wiki page carrying a knowledge asset, regardless of its ObjectType. Page is not a separate knowledge-asset type.
+_Avoid_: Page ObjectType
+
 **Note**:
-A generic knowledge asset for material without a stronger ObjectType. Its tags provide lightweight classification but never stand in for explicit links to people, Projects, or other assets.
-_Avoid_: Tag-as-relationship
+A source-backed, independently understandable note about a specific topic, preserving facts, experience, methods, or arguments worth understanding or reusing. Tags provide lightweight classification but do not replace explicit links to people, Projects, or other assets.
+_Avoid_: Content ObjectType, generic Page ObjectType, raw transcript copy, tag-as-relationship
+
+**Idea**:
+An unfinished thought, inspiration, hypothesis, viewpoint, or direction preserved as a concise knowledge asset. It keeps its original meaning, source, and unresolved aspects rather than treating the idea as an established conclusion.
+_Avoid_: Accepted Decision, confirmed fact
+
+**Question**:
+An unresolved question preserved with relevant context, available clues, and sources. Recording a Question does not imply that an answer has been established or that an action Task has been created.
+_Avoid_: Invented answer, action-system Task
 
 **Decision**:
 An evidence-backed choice with a lifecycle status that remains part of the user's knowledge even when it implies later work. The default statuses are Proposed (`not_started`), Accepted (`complete`), and Superseded (`complete`). Unadopted alternatives and review discussion remain in the body or in Notes/Events rather than becoming rejected Decisions. A Decision links to its Projects, Meetings, people, and sources; it is not itself an action or Task.
